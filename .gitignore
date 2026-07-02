@@ -2,3 +2,11 @@
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
+
+# personal notes
+/specs/
+/vault-refs/
+
+# personal helpers
+/bin/push
+/bin/pull

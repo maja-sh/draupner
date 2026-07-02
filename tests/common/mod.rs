@@ -1,0 +1,76 @@
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use tempfile::TempDir;
+
+pub struct WorkspaceFixture {
+    pub root: TempDir,
+}
+
+impl WorkspaceFixture {
+    pub fn empty() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("wsfix-")
+            .tempdir()
+            .expect("tempdir");
+        Self { root }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// Create a subdirectory and `git init` an empty repo with one empty commit,
+    /// so `git worktree add` / `git branch --show-current` etc. work.
+    pub fn add_repo(&self, name: &str) -> PathBuf {
+        let repo = self.path().join(name);
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-m", "init", "-q"]);
+        repo
+    }
+
+    /// Run `ws <args>` from the fixture root. Returns Output for inspection.
+    pub fn run(&self, args: &[&str]) -> Output {
+        let bin = env!("CARGO_BIN_EXE_ws");
+        Command::new(bin)
+            .args(args)
+            .current_dir(self.path())
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("spawn ws")
+    }
+
+    pub fn run_ok(&self, args: &[&str]) -> Output {
+        let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "ws {args:?} failed (exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        out
+    }
+}
+
+pub fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+pub fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
