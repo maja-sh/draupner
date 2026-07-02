@@ -12,7 +12,8 @@ fn main() {
     compat::check();
     obs::init_logging();
     if let Err(e) = cli::run() {
+        let code = e.downcast_ref::<ops::ExitError>().map_or(1, |e| e.code);
         crate::ui::summary_fail(&format!("{e:#}"));
-        std::process::exit(1);
+        std::process::exit(code);
     }
 }

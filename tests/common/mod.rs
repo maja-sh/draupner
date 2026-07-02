@@ -17,6 +17,17 @@ impl WorkspaceFixture {
         Self { root }
     }
 
+    /// Create a workspace with the given repos and a `.ws.json` referencing them.
+    pub fn with_repos(names: &[&str]) -> Self {
+        let f = Self::empty();
+        for name in names {
+            f.add_repo(name);
+        }
+        let repos_json: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+        f.write_ws_json(&format!("{{\"repos\":[{}]}}", repos_json.join(",")));
+        f
+    }
+
     pub fn path(&self) -> &Path {
         self.root.path()
     }
@@ -30,9 +41,6 @@ impl WorkspaceFixture {
             let out = Command::new("git")
                 .args(args)
                 .current_dir(&repo)
-                // Isolate from the developer's ~/.gitconfig (gpgsign,
-                // hooksPath, commit templates). Without this, a host with
-                // `commit.gpgsign = true` can break `git commit --allow-empty`.
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .env("GIT_AUTHOR_NAME", "test")
@@ -46,6 +54,30 @@ impl WorkspaceFixture {
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "--allow-empty", "-m", "init", "-q"]);
         repo
+    }
+
+    /// Write `.ws.json` in the fixture root with the given raw JSON content.
+    pub fn write_ws_json(&self, json: &str) {
+        std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
+    }
+
+    /// Write a hook script under `.ws-hooks/<repo>/<event>` and make it executable.
+    /// `body` is the script body (bash commands); the shebang is prepended.
+    pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
+        let dir = self.path().join(".ws-hooks").join(repo);
+        std::fs::create_dir_all(&dir).expect("create hook dir");
+        let path = dir.join(event);
+        std::fs::write(
+            &path,
+            format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
+        )
+        .expect("write hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod hook");
+        }
     }
 
     /// Run `ws <args>` from the fixture root. Returns Output for inspection.
@@ -64,10 +96,14 @@ impl WorkspaceFixture {
         cmd.args(args)
             .current_dir(self.path())
             .env_remove("RUST_LOG")
-            // Redirect HOME + CLAUDE_SKILLS_DIR into the fixture so any op
-            // that resolves paths against them lands inside the tempdir.
             .env("HOME", self.path())
-            .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"));
+            .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com");
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

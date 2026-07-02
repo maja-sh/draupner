@@ -15,33 +15,74 @@ use crate::ui;
 /// up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
-#[allow(dead_code)]
-pub fn run(workspace_root: &Path, hook_rel: &str, worktree_path: &Path) -> Result<()> {
-    // Hook path must be relative to the workspace root — an absolute path
-    // silently escapes the workspace because `Path::join` replaces the base.
+/// Find a hook for the given repo and event. Returns the relative path to the
+/// hook if it exists and is executable, or `None` if absent/non-executable.
+///
+/// Checks the override path first (from `RepoConfig.hooks`), then falls back
+/// to the convention path `.ws-hooks/<repo>/<event>`.
+pub fn lookup(workspace_root: &Path, repo: &str, event: &str, override_path: Option<&str>) -> Option<String> {
+    if let Some(ovr) = override_path {
+        let full = workspace_root.join(ovr);
+        if full.exists() && is_executable(&full) {
+            return Some(ovr.to_string());
+        }
+        return None;
+    }
+    let conv = format!(".ws-hooks/{}/{}", repo, event);
+    let full = workspace_root.join(&conv);
+    if full.exists() && is_executable(&full) {
+        return Some(conv);
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_p: &Path) -> bool {
+    true
+}
+
+pub fn run(
+    workspace_root: &Path,
+    hook_rel: &str,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+) -> Result<()> {
     if Path::new(hook_rel).is_absolute() {
         bail!("hook path must be relative to the workspace root: {hook_rel}");
     }
     let hook = workspace_root.join(hook_rel);
-    let hook_name = short_name(&hook);
+    let tag = format!("{repo}-{event}");
 
-    let mut child = Command::new("bash")
-        .arg(&hook)
+    let mut child = Command::new(&hook)
         .arg(worktree_path)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env("WS_WORKSPACE_ROOT", workspace_root)
+        .env("WS_REPO", repo)
+        .env("WS_BRANCH_SANITIZED", branch_sanitized)
+        .env("WS_HOOK_NAME", event)
         .spawn()
-        .with_context(|| format!("spawn bash {}", hook.display()))?;
+        .with_context(|| format!("spawn {}", hook.display()))?;
 
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
-    let name_out = hook_name.clone();
-    let name_err = hook_name.clone();
+    let tag_out = tag.clone();
+    let tag_err = tag.clone();
 
-    let out_h = thread::spawn(move || pipe(stdout, &name_out, false));
-    let err_h = thread::spawn(move || pipe(stderr, &name_err, true));
+    let out_h = thread::spawn(move || pipe(stdout, &tag_out, false));
+    let err_h = thread::spawn(move || pipe(stderr, &tag_err, true));
 
     let status = child.wait()?;
     let _ = out_h.join();
@@ -76,10 +117,6 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
         let line = String::from_utf8_lossy(&buf[..end]);
         ui::hook_line(tag, &line, stderr);
     }
-}
-
-fn short_name(p: &Path) -> String {
-    p.file_stem().and_then(|s| s.to_str()).unwrap_or("hook").to_string()
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@ fn no_args_prints_usage_and_exits_nonzero() {
 fn stubbed_ops_return_not_implemented() {
     let ws = WorkspaceFixture::empty();
     for args in [
-        vec!["new", "foo", "bar/baz"],
         vec!["up", "bar/baz"],
         vec!["down", "bar/baz"],
         vec!["rm", "bar/baz"],
