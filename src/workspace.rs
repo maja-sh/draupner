@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
@@ -44,32 +45,42 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
 /// Return all repo worktrees for a branch (repo name + path pairs).
 #[allow(dead_code)]
 pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
-    let td = task_dir(root, branch);
-    let Ok(rd) = std::fs::read_dir(&td) else { return Vec::new(); };
-    rd.filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            Some((name, e.path()))
-        })
+    list_child_dirs(&task_dir(root, branch))
+        .into_iter()
+        .filter_map(|(name, path)| name.map(|n| (n, path)))
         .collect()
 }
 
 /// Every task dir under `.worktrees/`. Used by `ws list` and `ws clean`.
 #[allow(dead_code)]
 pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(root.join(".worktrees")) else { return Vec::new(); };
-    rd.filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.path())
+    list_child_dirs(&root.join(".worktrees"))
+        .into_iter()
+        .map(|(_, path)| path)
         .collect()
 }
 
 /// Is this path a git repo? Handles both plain repos (has `.git/`) and worktrees (has `.git` file).
-#[allow(dead_code)]
 pub fn is_git_repo(p: &Path) -> bool {
     let g = p.join(".git");
     g.is_dir() || g.is_file()
+}
+
+/// List real (non-symlink) child directories of `dir`. Returns pairs of
+/// `(name_or_none_if_not_utf8, path)`. Broken entries and non-directories are
+/// silently skipped. Errors on `read_dir` itself yield an empty vec.
+pub fn list_child_dirs(dir: &Path) -> Vec<(Option<String>, PathBuf)> {
+    let Ok(rd) = fs::read_dir(dir) else { return Vec::new(); };
+    rd.filter_map(Result::ok)
+        .filter_map(|e| {
+            let ft = e.file_type().ok()?;
+            if ft.is_symlink() || !ft.is_dir() {
+                return None;
+            }
+            let name = e.file_name().to_str().map(str::to_string);
+            Some((name, e.path()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -87,5 +98,21 @@ mod tests {
     fn task_dir_layout() {
         let root = Path::new("/ws/foo");
         assert_eq!(task_dir(root, "feat/bar"), Path::new("/ws/foo/.worktrees/feat-bar"));
+    }
+
+    #[test]
+    fn list_child_dirs_skips_symlinks_and_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("real")).unwrap();
+        fs::write(root.join("plain.txt"), b"hi").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+
+        let dirs: Vec<String> = list_child_dirs(root)
+            .into_iter()
+            .filter_map(|(n, _)| n)
+            .collect();
+        assert_eq!(dirs, vec!["real".to_string()]);
     }
 }

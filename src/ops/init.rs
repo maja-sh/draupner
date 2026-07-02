@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::{RepoEntry, WsConfig};
 
@@ -40,7 +40,8 @@ fn init_local(root: &Path) -> Result<()> {
     step_config.ok();
 
     let step_schema = crate::ui::step("cfg", ".ws.schema.json");
-    write_schema(&root.join(".ws.schema.json"))?;
+    let schema = schemars::schema_for!(WsConfig);
+    write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
     step_schema.ok();
 
     let step_hooks = crate::ui::step("hks", ".ws-hooks/ templates");
@@ -52,15 +53,24 @@ fn init_local(root: &Path) -> Result<()> {
     summary.push(".ws.schema.json".to_string());
     summary.push(".ws-hooks/".to_string());
     crate::ui::summary_ok(&summary);
-    crate::ui::nudge("edit .ws.json / .ws-hooks/, then `ws register`");
+    crate::ui::nudge("edit .ws.json / .ws-hooks/, then `ws claude`");
     Ok(())
 }
 
 fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", "--refresh-schema");
 
+    // Refuse to scatter an orphan schema in a non-workspace dir.
+    if !root.join(".ws.json").exists() {
+        bail!(
+            "no {} here — `ws init --refresh-schema` only runs inside an initialized workspace.",
+            root.join(".ws.json").display()
+        );
+    }
+
     let step = crate::ui::step("cfg", ".ws.schema.json");
-    write_schema(&root.join(".ws.schema.json"))?;
+    let schema = schemars::schema_for!(WsConfig);
+    write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
     step.ok();
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
     Ok(())
@@ -68,33 +78,40 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    for entry in fs::read_dir(root).context("read cwd")? {
-        let entry = entry?;
+    // Swallow per-entry read errors — one broken symlink shouldn't abort the
+    // whole scan. Errors on the top-level `read_dir` still propagate.
+    for entry in fs::read_dir(root).context("read cwd")?.filter_map(Result::ok) {
         let path = entry.path();
-        if !path.is_dir() {
+        // Skip symlinks (they can point outside the workspace and confuse
+        // later ops). Also skip anything that isn't a real dir.
+        let Ok(meta) = entry.file_type() else { continue };
+        if meta.is_symlink() || !meta.is_dir() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            // Non-UTF-8 dir names would round-trip through `.ws.json` lossily
+            // and break later worktree lookups. Skip with a warn instead of
+            // silently corrupting the config.
+            tracing::warn!(
+                path = %entry.path().display(),
+                "skipping non-UTF-8 directory name in workspace scan"
+            );
+            continue;
+        };
         if name.starts_with('.') {
             continue;
         }
         if crate::workspace::is_git_repo(&path) {
-            names.push(name);
+            names.push(name.to_string());
         }
     }
     names.sort();
     Ok(names)
 }
 
-fn write_json_pretty<T: serde::Serialize>(path: &PathBuf, value: &T) -> Result<()> {
+fn write_json_pretty<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{s}\n"))?;
-    Ok(())
-}
-
-fn write_schema(path: &Path) -> Result<()> {
-    let schema = schemars::schema_for!(WsConfig);
-    let s = serde_json::to_string_pretty(&schema)?;
     fs::write(path, format!("{s}\n"))?;
     Ok(())
 }

@@ -5,17 +5,10 @@ use common::{stderr, WorkspaceFixture};
 #[test]
 fn claude_writes_all_skills() {
     let ws = WorkspaceFixture::empty();
-    let skills_dir = ws.path().join("skills-out");
+    let out = ws.run_ok(&["claude"]);
+    assert!(stderr(&out).contains("ws-claude"));
 
-    let bin = env!("CARGO_BIN_EXE_ws");
-    let out = std::process::Command::new(bin)
-        .args(["claude"])
-        .env("CLAUDE_SKILLS_DIR", &skills_dir)
-        .env_remove("RUST_LOG")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-
+    let skills_dir = ws.path().join("claude-skills");
     for name in [
         "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list", "ws-here",
         "ws-use", "ws-clean", "ws-init",
@@ -32,17 +25,31 @@ fn claude_writes_all_skills() {
 #[test]
 fn claude_is_idempotent() {
     let ws = WorkspaceFixture::empty();
-    let skills_dir = ws.path().join("skills-out");
-    let bin = env!("CARGO_BIN_EXE_ws");
-
     for _ in 0..2 {
-        let out = std::process::Command::new(bin)
-            .args(["claude"])
-            .env("CLAUDE_SKILLS_DIR", &skills_dir)
-            .env_remove("RUST_LOG")
-            .output()
-            .unwrap();
-        assert!(out.status.success());
+        ws.run_ok(&["claude"]);
     }
-    assert!(skills_dir.join("ws-new").join("SKILL.md").is_file());
+    assert!(ws.path().join("claude-skills").join("ws-new").join("SKILL.md").is_file());
+}
+
+#[test]
+fn claude_fails_helpfully_when_home_missing() {
+    let ws = WorkspaceFixture::empty();
+    // Force both HOME and CLAUDE_SKILLS_DIR to be missing. Since the fixture
+    // sets both by default, we override with empty strings via a different
+    // path: spawn manually so we can `.env_remove`.
+    let bin = env!("CARGO_BIN_EXE_ws");
+    let out = std::process::Command::new(bin)
+        .args(["claude"])
+        .current_dir(ws.path())
+        .env_clear()
+        // clap needs a minimum env to render usage/help; PATH avoids missing exec look-ups.
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "expected failure without HOME");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("HOME is not set"),
+        "expected 'HOME is not set' in stderr, got: {err}"
+    );
 }

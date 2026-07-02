@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 pub fn run() -> Result<()> {
-    let target = crate::skills::default_target_root();
+    let target = crate::skills::default_target_root()?;
     crate::ui::header("ws-claude", &format!("target={}", target.display()));
 
     let s = crate::ui::step("skills", "writing SKILL.md files");

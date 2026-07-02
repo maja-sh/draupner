@@ -31,12 +31,13 @@ pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Where skills are written by default. Overridable via `CLAUDE_SKILLS_DIR` for tests.
-pub fn default_target_root() -> PathBuf {
+pub fn default_target_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("CLAUDE_SKILLS_DIR") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".claude").join("skills")
+    let home = std::env::var("HOME")
+        .context("HOME is not set — set CLAUDE_SKILLS_DIR or run in a normal user environment")?;
+    Ok(PathBuf::from(home).join(".claude").join("skills"))
 }
 
 #[cfg(test)]

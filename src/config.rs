@@ -78,5 +78,22 @@ pub fn load(root: &Path) -> Result<WsConfig> {
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
     let raw = std::fs::read_to_string(p)
         .with_context(|| format!("read {}", p.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parse {}", p.display()))
+    // Strip a leading UTF-8 BOM. Some Windows editors + `git core.autocrlf`
+    // configurations materialize one; serde_json otherwise reports the
+    // opaque `expected value at line 1 column 1`.
+    let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    serde_json::from_str(trimmed).with_context(|| format!("parse {}", p.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_json_strips_utf8_bom() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "\u{feff}{\"repos\":[]}").unwrap();
+        let cfg: WsConfig = read_json(tmp.path()).unwrap();
+        assert!(cfg.repos.is_empty());
+    }
 }

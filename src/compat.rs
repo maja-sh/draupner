@@ -2,8 +2,9 @@
 //!
 //! `ws` depends on macOS-specific semantics that have drifted across recent majors:
 //!   - APFS clonefile (used by `ws new`'s vendor/ copy via `cp -c`).
-//!   - Gatekeeper behavior (relevant to `ws update` payloads).
 //!   - Subprocess signal defaults (hook orchestration).
+//!   - Gatekeeper quarantine handling — matters for `ws update` payloads (v2),
+//!     pre-qualifying now.
 //!
 //! Each release ships with a MIN..=MAX matrix of qualified macOS majors,
 //! baked in at build time via `build.rs`. Outside that range we refuse rather
