@@ -56,6 +56,41 @@ impl WorkspaceFixture {
         repo
     }
 
+    /// Run a git command inside `<root>/<repo_rel>` with the same isolated env
+    /// as `add_repo`. Panics on failure. Lets tests drive git directly to set
+    /// up scenarios (commits, upstreams, dirty state).
+    pub fn git(&self, repo_rel: &str, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(self.path().join(repo_rel))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {repo_rel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Add a repo with a real bare `origin` remote (under `.origins/`) and its
+    /// `main` branch pushed + tracked. Enables upstream-aware checks (unpushed
+    /// commits) in tests. Returns the working checkout path.
+    pub fn add_repo_with_origin(&self, name: &str) -> PathBuf {
+        let repo = self.add_repo(name);
+        let origin = self.path().join(".origins").join(format!("{name}.git"));
+        std::fs::create_dir_all(origin.parent().unwrap()).expect("mkdir .origins");
+        self.git(".", &["init", "--bare", "-q", origin.to_str().unwrap()]);
+        self.git(name, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        self.git(name, &["push", "-q", "-u", "origin", "main"]);
+        repo
+    }
+
     /// Write `.ws.json` in the fixture root with the given raw JSON content.
     pub fn write_ws_json(&self, json: &str) {
         std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");

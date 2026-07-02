@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::ui;
 
@@ -92,6 +93,74 @@ pub fn run(
         bail!("{hook_rel} exited {}", status.code().unwrap_or(-1));
     }
     Ok(())
+}
+
+/// Run a hook and capture its first non-empty stdout line, giving up after
+/// `timeout`. Used by `ws list` for the read-only `status` hook — output is
+/// captured (not streamed) and a wedged hook can't hang the whole listing.
+///
+/// Returns `None` on spawn failure, non-zero exit, timeout, or empty output.
+pub fn capture(
+    workspace_root: &Path,
+    hook_rel: &str,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    timeout: Duration,
+) -> Option<String> {
+    if Path::new(hook_rel).is_absolute() {
+        return None;
+    }
+    let hook = workspace_root.join(hook_rel);
+
+    let mut child = Command::new(&hook)
+        .arg(worktree_path)
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("WS_WORKSPACE_ROOT", workspace_root)
+        .env("WS_REPO", repo)
+        .env("WS_BRANCH_SANITIZED", branch_sanitized)
+        .env("WS_HOOK_NAME", event)
+        .spawn()
+        .ok()?;
+
+    // Drain stdout on a helper thread so a hook that fills the pipe buffer
+    // can't deadlock against our wait loop.
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        s
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let text = reader.join().unwrap_or_default();
+                if !status.success() {
+                    return None;
+                }
+                return first_nonempty_line(&text);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn first_nonempty_line(s: &str) -> Option<String> {
+    s.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
 }
 
 /// Stream lines from `r` to `ui::hook_line`, capped at `MAX_LINE` bytes per

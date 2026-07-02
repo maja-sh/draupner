@@ -24,8 +24,6 @@ fn stubbed_ops_return_not_implemented() {
     for args in [
         vec!["up", "bar/baz"],
         vec!["down", "bar/baz"],
-        vec!["rm", "bar/baz"],
-        vec!["list"],
         vec!["here"],
         vec!["use", "main"],
         vec!["clean"],

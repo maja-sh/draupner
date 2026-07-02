@@ -179,11 +179,107 @@ pub fn summary_ok(lines: &[String]) {
     }
 }
 
+/// Up-front warning block — a `⚠` title followed by indented detail lines.
+/// Used by `ws rm` to surface dirty / unpushed state before teardown.
+pub fn warn(title: &str, items: &[String]) {
+    if tty() {
+        eprintln!("  {} {}", style("⚠").yellow().bold(), style(title).yellow());
+    } else {
+        eprintln!("  warn: {title}");
+    }
+    for item in items {
+        if tty() {
+            eprintln!("        {}", style(item).dim());
+        } else {
+            eprintln!("        {item}");
+        }
+    }
+}
+
 pub fn summary_fail(reason: &str) {
     if tty() {
         eprintln!("{} {}", style("✗").red().bold(), style(reason).red());
     } else {
         eprintln!("FAIL: {reason}");
+    }
+}
+
+/// One repo's row within a `ws list` task group.
+pub struct ListRow {
+    pub repo: String,
+    pub dirty: bool,
+    /// Free-form run-state string emitted by the `status` hook (first line),
+    /// or `None` when there's no hook / it timed out / it failed.
+    pub status: Option<String>,
+    /// Extra tag (`detached`, `unmanaged`, …). Rendered dim after the status.
+    pub note: Option<String>,
+}
+
+/// A task grouping for `ws list` — one branch, one or more repo worktrees.
+pub struct ListGroup {
+    /// Display label — the branch name (`feat/foo`) or the sanitized task dir.
+    pub task: String,
+    pub rows: Vec<ListRow>,
+}
+
+/// `ws list` with no worktrees found. Not an error — informational.
+pub fn list_empty() {
+    if tty() {
+        eprintln!("\n{}", style("no worktrees").dim());
+    } else {
+        eprintln!("\nno worktrees");
+    }
+}
+
+/// Render the `ws list` table: task groups separated by blank lines, each with
+/// aligned repo / dirty / status columns.
+pub fn list_table(groups: &[ListGroup]) {
+    let repo_w = groups
+        .iter()
+        .flat_map(|g| g.rows.iter())
+        .map(|r| r.repo.len())
+        .max()
+        .unwrap_or(0);
+
+    let dash = if tty() { "—" } else { "-" };
+
+    eprintln!();
+    for group in groups {
+        if tty() {
+            eprintln!("  {}", style(&group.task).bold());
+        } else {
+            eprintln!("  {}", group.task);
+        }
+        for row in &group.rows {
+            let repo = format!("{:<width$}", row.repo, width = repo_w);
+            let dirty_txt = if row.dirty { "dirty" } else { "clean" };
+            let status = row.status.as_deref().unwrap_or(dash);
+            if tty() {
+                let dirty = if row.dirty {
+                    style(format!("{dirty_txt:<5}")).yellow()
+                } else {
+                    style(format!("{dirty_txt:<5}")).green()
+                };
+                let mut line = format!(
+                    "    {} {} {}",
+                    style(repo).green().bold(),
+                    dirty,
+                    style(status).dim(),
+                );
+                if let Some(note) = &row.note {
+                    line.push(' ');
+                    line.push_str(&style(format!("({note})")).dim().to_string());
+                }
+                eprintln!("{line}");
+            } else {
+                let mut line = format!("    {repo} {dirty_txt:<5} {status}");
+                if let Some(note) = &row.note {
+                    line.push_str(&format!(" ({note})"));
+                }
+                eprintln!("{line}");
+            }
+        }
+        eprintln!();
     }
 }
 
