@@ -10,3 +10,6 @@ Cargo.lock.bak
 # personal helpers
 /bin/push
 /bin/pull
+
+# throwaway test workspace (scripts/testenv)
+/.testenv/

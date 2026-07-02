@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# testenv — drop into a throwaway workspace for exercising `ws` by hand.
+#
+# Not part of the shipped binary. Running it:
+#   1. builds `ws` (release),
+#   2. scaffolds a fresh sandbox with a couple of dummy git repos,
+#   3. drops you into a subshell *inside* that sandbox with `ws` on PATH,
+#   4. removes the sandbox when you `exit`.
+#
+# So there's nothing to clean up and nothing left tracked. Just run:
+#
+#   scripts/testenv
+#
+# then type `exit` when you're done. Sandbox lives at ./.testenv/sandbox
+# (gitignored); override with WS_TESTENV_DIR.
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SANDBOX="${WS_TESTENV_DIR:-$REPO_ROOT/.testenv/sandbox}"
+WS_BIN="$REPO_ROOT/target/release/ws"
+REPOS=(api web)
+
+# Stable identity so commits work on a host with no git identity configured.
+export GIT_AUTHOR_NAME="testenv"
+export GIT_AUTHOR_EMAIL="testenv@example.com"
+export GIT_COMMITTER_NAME="testenv"
+export GIT_COMMITTER_EMAIL="testenv@example.com"
+
+log() { printf '  \033[36m∙\033[0m %s\n' "$*"; }
+die() { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+make_repo() {
+  local name="$1"
+  local dir="$SANDBOX/$name"
+  mkdir -p "$dir"
+  git init -q -b main "$dir"
+  printf 'foo bar\n' > "$dir/foo.txt"
+  # gitignore the fake deps so worktrees read as clean.
+  printf 'node_modules/\nvendor/\n' > "$dir/.gitignore"
+  git -C "$dir" add -A
+  git -C "$dir" commit -q -m "init $name"
+
+  # Fake deps so `ws new` copies vendor/ and symlinks node_modules.
+  printf '{}\n' > "$dir/composer.json"
+  mkdir -p "$dir/vendor";       printf '<?php // fake\n' > "$dir/vendor/autoload.php"
+  mkdir -p "$dir/node_modules"; printf '{}\n'            > "$dir/node_modules/.installed"
+
+  log "repo '$name' ready"
+}
+
+# --- build + scaffold ------------------------------------------------------
+
+# Let cargo render its own progress TUI (live bar + colored Compiling/Finished)
+# straight to the terminal instead of hiding it behind a spinner.
+printf '\n  \033[1mBuilding ws\033[0m \033[2m(release)\033[0m\n\n'
+( cd "$REPO_ROOT" && cargo build --release ) || die "build failed"
+printf '\n'
+[ -x "$WS_BIN" ] || die "expected binary at $WS_BIN after build"
+
+rm -rf "$SANDBOX"
+mkdir -p "$SANDBOX"
+for r in "${REPOS[@]}"; do make_repo "$r"; done
+
+steps() {
+  cat <<EOF
+
+  Sandbox: $SANDBOX   (removed when you exit)
+
+  Try:
+    ws init                       # detects: ${REPOS[*]}
+    ws new ${REPOS[0]},${REPOS[1]} feat/demo
+    ws list
+    ws rm feat/demo
+
+  Type 'exit' to leave and clean up.
+EOF
+}
+steps
+
+# --- drop into the sandbox -------------------------------------------------
+
+cd "$SANDBOX"
+export PATH="$REPO_ROOT/target/release:$PATH"   # so bare `ws` works
+
+cleanup() { cd "$REPO_ROOT"; rm -rf "$SANDBOX"; log "sandbox removed"; }
+
+if [ -t 0 ] && [ -t 1 ]; then
+  trap cleanup EXIT
+  # Interactive subshell rooted in the sandbox. `|| true` so a non-zero exit
+  # (e.g. last command failed) still returns cleanly to the cleanup trap.
+  "${SHELL:-bash}" -i || true
+else
+  # Non-interactive (piped/CI): can't drop a shell. Leave it and say how to
+  # remove it so nothing silently accumulates.
+  echo "  (non-interactive shell: sandbox left in place)"
+  echo "  remove with: rm -rf \"$SANDBOX\""
+fi
