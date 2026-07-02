@@ -186,6 +186,59 @@ fn vendor_copied_when_composer_present() {
 }
 
 #[test]
+fn worktree_is_clean_despite_symlinked_node_modules() {
+    // A repo that gitignores node_modules with the conventional trailing-slash
+    // (dir-only) rule. The symlink ws creates is a file to git, so without a
+    // worktree exclude it would read as untracked → dirty forever.
+    let f = WorkspaceFixture::with_repos(&["app"]);
+    std::fs::write(f.path().join("app/.gitignore"), "node_modules/\nvendor/\n").unwrap();
+    f.git("app", &["add", ".gitignore"]);
+    f.git("app", &["commit", "-q", "-m", "add gitignore"]);
+    std::fs::create_dir(f.path().join("app/node_modules")).unwrap();
+    std::fs::write(f.path().join("app/node_modules/.installed"), "{}").unwrap();
+
+    f.run_ok(&["new", "app", "feat/clean"]);
+
+    // git status in the worktree must be empty.
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(f.path().join(".worktrees/feat-clean/app"))
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        status.trim().is_empty(),
+        "worktree should be clean, got:\n{status}"
+    );
+}
+
+#[test]
+fn config_worktree_excludes_are_applied() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","worktree_excludes":["/local.env",".cache/"]}]}"#,
+    );
+
+    f.run_ok(&["new", "api", "feat/excl"]);
+
+    // Drop files matching the configured excludes; worktree stays clean.
+    std::fs::write(f.path().join(".worktrees/feat-excl/api/local.env"), "X=1").unwrap();
+    std::fs::create_dir(f.path().join(".worktrees/feat-excl/api/.cache")).unwrap();
+    std::fs::write(f.path().join(".worktrees/feat-excl/api/.cache/blob"), "z").unwrap();
+
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(f.path().join(".worktrees/feat-excl/api"))
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    assert!(status.trim().is_empty(), "expected clean worktree, got:\n{status}");
+}
+
+#[test]
 fn ws_env_vars_passed_to_hook() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook(
