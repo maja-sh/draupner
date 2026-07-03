@@ -1,0 +1,128 @@
+//! Worktree teardown pipeline shared by `ws rm` and `ws clean`.
+//!
+//! Both ops end the same way: run each repo's `down` then `post-remove` hook,
+//! drop the dep symlinks, `git worktree remove`, delete the local branch, and
+//! prune the now-empty task dir. `ws rm` gates this behind a dirty/unpushed
+//! safety check; `ws clean` gates it behind a merged/clean audit. The gating
+//! differs — the teardown itself does not.
+
+use anyhow::Result;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::config::WsConfig;
+use crate::hooks;
+use crate::workspace;
+
+/// Tear down every worktree of a task. Runs teardown hooks, removes the
+/// worktrees, deletes the branch, and prunes the task dir.
+///
+/// Returns `Ok(true)` when a hook exited non-zero (the worktrees are still
+/// removed — resource leakage is the lesser evil), `Ok(false)` when clean.
+/// Errors only when `git worktree remove` itself fails even with `--force`.
+pub fn remove_task(
+    root: &Path,
+    cfg: &WsConfig,
+    branch: &str,
+    worktrees: &[(String, PathBuf)],
+) -> Result<bool> {
+    let sanitized = workspace::sanitize_branch(branch);
+    let mut hook_failed = false;
+
+    for (repo, wt) in worktrees {
+        // Resource teardown hooks — best-effort. A failing hook is reported but
+        // doesn't stop removal (the user wants the worktree gone).
+        for event in ["down", "post-remove"] {
+            let hook_override = repo_hook_override(cfg, repo, event);
+            if let Some(rel) = hooks::lookup(root, repo, event, hook_override) {
+                let step = crate::ui::step(repo, &format!("{event} hook"));
+                match hooks::run(root, &rel, wt, repo, &sanitized, event) {
+                    Ok(()) => step.ok(),
+                    Err(e) => {
+                        step.fail(&format!("{e}"));
+                        hook_failed = true;
+                    }
+                }
+            }
+        }
+
+        // Drop symlinked deps first so `git worktree remove` sees a clean tree.
+        remove_if_symlink(&wt.join("node_modules"));
+        remove_if_symlink(&wt.join("vendor"));
+
+        let main = root.join(repo);
+        let step = crate::ui::step(repo, "worktree removed");
+        match remove_worktree(&main, wt) {
+            Ok(()) => step.ok(),
+            Err(e) => {
+                step.fail("git worktree remove failed");
+                return Err(super::op_failure(format!(
+                    "{e}; try `git worktree prune` in {}",
+                    main.display()
+                )));
+            }
+        }
+
+        // Delete the local branch — best-effort. A branch that's gone (merged
+        // and pruned) or checked out elsewhere just leaves this a no-op.
+        delete_branch(&main, branch);
+    }
+
+    // Best-effort: drop the now-empty task dir. Leftover files (a stray
+    // .DS_Store, an unmanaged sibling) make this a silent no-op.
+    let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
+
+    Ok(hook_failed)
+}
+
+pub fn repo_hook_override<'a>(cfg: &'a WsConfig, repo: &str, event: &str) -> Option<&'a str> {
+    cfg.repos
+        .iter()
+        .find(|r| r.name() == repo)
+        .and_then(|r| r.hook_override(event))
+}
+
+fn remove_if_symlink(p: &Path) {
+    if let Ok(meta) = p.symlink_metadata() {
+        if meta.file_type().is_symlink() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Remove a worktree, retrying with `--force` when a soft remove refuses
+/// (dirty tree, untracked deps). Errors only when even `--force` fails.
+fn remove_worktree(main: &Path, wt: &Path) -> Result<()> {
+    let soft = Command::new("git")
+        .arg("-C")
+        .arg(main)
+        .args(["worktree", "remove"])
+        .arg(wt)
+        .output()?;
+    if soft.status.success() {
+        return Ok(());
+    }
+    let hard = Command::new("git")
+        .arg("-C")
+        .arg(main)
+        .args(["worktree", "remove", "--force"])
+        .arg(wt)
+        .output()?;
+    if hard.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "git worktree remove: {}",
+        String::from_utf8_lossy(&hard.stderr).trim()
+    )
+}
+
+fn delete_branch(main: &Path, branch: &str) {
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(main)
+        .args(["branch", "-D", branch])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
