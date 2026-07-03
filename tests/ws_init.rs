@@ -93,6 +93,34 @@ fn refresh_schema_refuses_outside_workspace() {
 }
 
 #[test]
+fn init_refuses_inside_an_enclosing_workspace() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    // A plain subdir of an existing workspace.
+    let sub = ws.path().join("nested");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let out = ws.run_in("nested", &["init"]);
+    assert_eq!(out.status.code(), Some(2), "expected preflight exit 2");
+    let err = stderr(&out);
+    assert!(err.contains("already inside the workspace"), "expected nesting refusal in:\n{err}");
+    assert!(!sub.join(".ws.json").exists(), "must not write a nested .ws.json");
+}
+
+#[test]
+fn init_refuses_inside_worktree_tree_with_sharper_message() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+
+    let out = ws.run_in(".worktrees/feat-x/api", &["init"]);
+    assert_eq!(out.status.code(), Some(2), "expected preflight exit 2");
+    assert!(
+        stderr(&out).contains(".worktrees/"),
+        "expected the sharper worktree-tree message: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn init_skips_symlinked_directories() {
     let ws = WorkspaceFixture::empty();
     let real = ws.add_repo("real");

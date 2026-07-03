@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{RepoEntry, WsConfig};
 
@@ -18,6 +18,23 @@ pub fn run(refresh_schema: bool) -> Result<()> {
 
 fn init_local(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
+
+    // Blocks *creating* a nested root, not running `ws` from a subdir (that
+    // still resolves upward). The hazard: under the outer's `.worktrees/`, an
+    // outer `ws clean`/`rm` would tear the inner workspace down.
+    if let Some(outer) = enclosing_workspace(root) {
+        let detail = if root.starts_with(outer.join(".worktrees")) {
+            " — inside its `.worktrees/` tree, where an outer `ws clean`/`rm` would tear this down"
+        } else {
+            ""
+        };
+        return Err(super::preflight(format!(
+            "refusing to initialize: already inside the workspace at {}{}. \
+             Nested workspaces aren't supported — run `ws init` outside it.",
+            outer.display(),
+            detail,
+        )));
+    }
 
     if root.join(".ws.json").exists() {
         bail!(
@@ -74,6 +91,15 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
     step.ok();
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
     Ok(())
+}
+
+/// The nearest workspace strictly above `root` (an ancestor holding `.ws.json`),
+/// or `None` if `root` isn't nested inside one.
+fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .skip(1)
+        .find(|dir| dir.join(".ws.json").is_file())
+        .map(Path::to_path_buf)
 }
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
