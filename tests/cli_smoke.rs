@@ -21,12 +21,8 @@ fn no_args_prints_usage_and_exits_nonzero() {
 #[test]
 fn stubbed_ops_return_not_implemented() {
     let ws = WorkspaceFixture::empty();
+    // `test` is the only remaining stub — deferred to v2.
     for args in [
-        vec!["up", "bar/baz"],
-        vec!["down", "bar/baz"],
-        vec!["here"],
-        vec!["use", "main"],
-        vec!["clean"],
         vec!["test", "bar/baz"],
     ] {
         let out = ws.run(&args);
