@@ -125,11 +125,25 @@ impl WorkspaceFixture {
         self.run_with_env(args, &[])
     }
 
+    /// Like `run`, but with the process CWD set to `<root>/<subdir>` — for ops
+    /// (e.g. `ws here`) whose behavior depends on which worktree you're inside.
+    pub fn run_in(&self, subdir: &str, args: &[&str]) -> Output {
+        self.run_in_env(subdir, args, &[])
+    }
+
+    pub fn run_in_env(&self, subdir: &str, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        self.run_from(&self.path().join(subdir), args, extra_env)
+    }
+
     pub fn run_with_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        self.run_from(self.path(), args, extra_env)
+    }
+
+    fn run_from(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
         let bin = env!("CARGO_BIN_EXE_ws");
         let mut cmd = Command::new(bin);
         cmd.args(args)
-            .current_dir(self.path())
+            .current_dir(cwd)
             .env_remove("RUST_LOG")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
