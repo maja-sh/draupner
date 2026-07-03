@@ -1,6 +1,7 @@
 pub mod init;
 pub mod claude;
 pub mod new;
+pub mod hooksweep;
 pub mod up;
 pub mod down;
 pub mod rm;

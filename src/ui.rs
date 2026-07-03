@@ -168,6 +168,22 @@ pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
     }
 }
 
+/// A dim, subordinate note that a repo was skipped for a step (e.g. it has a
+/// worktree but no hook for this event). Not a failure — just visible enough
+/// that the user knows nothing ran for that repo.
+pub fn skip(tag: &str, reason: &str) {
+    if tty() {
+        eprintln!(
+            "  {} {} {}",
+            style(pad_tag(tag)).green().bold(),
+            style("·").dim(),
+            style(reason).dim(),
+        );
+    } else {
+        eprintln!("  {}  skip  {}", pad_tag(tag), reason);
+    }
+}
+
 pub fn summary_ok(lines: &[String]) {
     if tty() {
         eprintln!("\n{} {}", style("✓").green(), style("Done.").bold());
