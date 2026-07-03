@@ -14,8 +14,7 @@ pub fn init_logging() {
         .try_init();
 }
 
-// NOTE: SIGINT / cooperative-cancellation handling deferred to spec-2. The
-// earlier scaffold installed a `ctrlc` handler that set a flag no code ever
-// polled, so Ctrl-C ended up swallowed. Wire it up properly (poll between
-// hook invocations, propagate SIGINT to child processes) when the ops that
-// need it land.
+// SIGINT / cooperative-cancellation handling lives in `signal.rs`: the handler
+// flips a flag that looping ops poll at each repo boundary via
+// `ops::bail_if_interrupted` (exit 130). SIGINT reaches hook/git children for
+// free via the shared process group, so no manual forwarding is needed.

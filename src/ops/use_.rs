@@ -65,6 +65,8 @@ fn switch(repos: &[(String, PathBuf)], branch: &str) -> Result<()> {
     }
 
     for (name, main) in repos {
+        super::bail_if_interrupted()?;
+
         let step = crate::ui::step(name, &format!("checkout {branch}"));
         // If a linked worktree owns the branch, git refuses to check it out in
         // the main repo — detach that worktree first (leaves it in detached

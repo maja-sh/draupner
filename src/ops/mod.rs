@@ -38,3 +38,13 @@ pub(crate) fn preflight(msg: impl Into<String>) -> anyhow::Error {
 pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into() }.into()
 }
+
+/// Return the interrupt error (exit 130) if a Ctrl-C has been observed. Called
+/// by looping ops at each repo boundary so an interrupt stops the sweep cleanly
+/// instead of proceeding into the next repo. Convention: 130 = SIGINT.
+pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
+    if crate::signal::interrupted() {
+        return Err(ExitError { code: 130, msg: "interrupted".into() }.into());
+    }
+    Ok(())
+}

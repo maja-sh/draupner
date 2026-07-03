@@ -55,6 +55,8 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
 
     for (repo, wt) in &targets {
+        super::bail_if_interrupted()?;
+
         let hook_override = repo_hook_override(&cfg, repo, event);
         let Some(rel) = hooks::lookup(&ws.root, repo, event, hook_override) else {
             crate::ui::skip(repo, &format!("no {event} hook"));

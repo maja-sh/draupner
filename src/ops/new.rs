@@ -43,6 +43,8 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
     let mut wt_paths = Vec::new();
 
     for repo_name in &requested {
+        super::bail_if_interrupted()?;
+
         let repo_entry = cfg.repos.iter().find(|r| r.name() == repo_name).unwrap();
         let repo_path = ws.root.join(repo_name);
         let wt_path = task_dir.join(repo_name);

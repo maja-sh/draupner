@@ -19,6 +19,8 @@ pub fn run() -> Result<()> {
     let mut any = false;
 
     for task_dir in &task_dirs {
+        super::bail_if_interrupted()?;
+
         let task_name = match task_dir.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,

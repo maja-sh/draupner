@@ -30,6 +30,8 @@ pub fn remove_task(
     let mut hook_failed = false;
 
     for (repo, wt) in worktrees {
+        super::bail_if_interrupted()?;
+
         // Resource teardown hooks — best-effort. A failing hook is reported but
         // doesn't stop removal (the user wants the worktree gone).
         for event in ["down", "post-remove"] {
