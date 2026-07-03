@@ -64,6 +64,17 @@ fn missing_status_hook_does_not_crash() {
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
     assert!(err.contains("feat/nostatus"), "expected worktree listed in:\n{err}");
+
+    // With no status hook anywhere, the status column is suppressed entirely —
+    // no bare placeholder dash dangling off the row.
+    let row = err
+        .lines()
+        .find(|l| l.contains("api") && l.contains("clean"))
+        .expect("expected an 'api … clean' row");
+    assert!(
+        !row.contains('-'),
+        "status dash should be suppressed when nothing reports status: {row:?}"
+    );
 }
 
 #[test]

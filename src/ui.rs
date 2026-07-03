@@ -241,6 +241,12 @@ pub fn list_table(groups: &[ListGroup]) {
         .max()
         .unwrap_or(0);
 
+    // Only show the status column when something actually reports one —
+    // otherwise every row is a bare dash, which reads as noise.
+    let any_status = groups
+        .iter()
+        .flat_map(|g| g.rows.iter())
+        .any(|r| r.status.is_some());
     let dash = if tty() { "—" } else { "-" };
 
     eprintln!();
@@ -253,26 +259,29 @@ pub fn list_table(groups: &[ListGroup]) {
         for row in &group.rows {
             let repo = format!("{:<width$}", row.repo, width = repo_w);
             let dirty_txt = if row.dirty { "dirty" } else { "clean" };
-            let status = row.status.as_deref().unwrap_or(dash);
             if tty() {
                 let dirty = if row.dirty {
                     style(format!("{dirty_txt:<5}")).yellow()
                 } else {
                     style(format!("{dirty_txt:<5}")).green()
                 };
-                let mut line = format!(
-                    "    {} {} {}",
-                    style(repo).green().bold(),
-                    dirty,
-                    style(status).dim(),
-                );
+                let mut line = format!("    {} {}", style(repo).green().bold(), dirty);
+                if any_status {
+                    let status = row.status.as_deref().unwrap_or(dash);
+                    line.push(' ');
+                    line.push_str(&style(status).dim().to_string());
+                }
                 if let Some(note) = &row.note {
                     line.push(' ');
                     line.push_str(&style(format!("({note})")).dim().to_string());
                 }
                 eprintln!("{line}");
             } else {
-                let mut line = format!("    {repo} {dirty_txt:<5} {status}");
+                let mut line = format!("    {repo} {dirty_txt:<5}");
+                if any_status {
+                    line.push(' ');
+                    line.push_str(row.status.as_deref().unwrap_or(dash));
+                }
                 if let Some(note) = &row.note {
                     line.push_str(&format!(" ({note})"));
                 }
