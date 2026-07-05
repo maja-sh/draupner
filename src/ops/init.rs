@@ -2,21 +2,54 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{RepoEntry, WsConfig};
+use crate::config::{RemoteConfig, RepoEntry, WsConfig};
 
 const HOOK_EVENTS: &[&str] = &["post-create", "up", "down", "post-remove", "status", "test"];
 
-pub fn run(refresh_schema: bool) -> Result<()> {
+pub fn run(
+    refresh_schema: bool,
+    remote: Option<Option<String>>,
+    remote_path: Option<String>,
+    domain: Option<String>,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     if refresh_schema {
         return refresh_schema_only(&cwd);
     }
 
-    init_local(&cwd)
+    let remote_cfg = build_remote(&cwd, remote, remote_path, domain)?;
+    init_local(&cwd, remote_cfg)
 }
 
-fn init_local(root: &Path) -> Result<()> {
+/// Turn the `--remote[=host]` / `--remote-path` / `--domain` flags into a
+/// `RemoteConfig`, or `None` when `--remote` wasn't given. A bare `--remote`
+/// falls back to `$WS_REMOTE_HOST`. `workspace_path` is written explicitly
+/// (defaulting to the workspace dir name) so it's visible in `.ws.json`.
+fn build_remote(
+    root: &Path,
+    remote: Option<Option<String>>,
+    remote_path: Option<String>,
+    domain: Option<String>,
+) -> Result<Option<RemoteConfig>> {
+    let Some(conn) = remote else { return Ok(None) };
+    let connection = conn
+        .or_else(|| std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()))
+        .ok_or_else(|| {
+            super::preflight(
+                "`ws init --remote` needs a host: pass `--remote <host>` or set $WS_REMOTE_HOST",
+            )
+        })?;
+    let workspace_path = remote_path.or_else(|| dir_name(root));
+    Ok(Some(RemoteConfig::new(connection, workspace_path, domain)))
+}
+
+/// The basename of `root` as an owned String (the workspace's own dir name).
+fn dir_name(root: &Path) -> Option<String> {
+    root.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+fn init_local(root: &Path, remote: Option<RemoteConfig>) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
     // Blocks *creating* a nested root, not running `ws` from a subdir (that
@@ -45,9 +78,11 @@ fn init_local(root: &Path) -> Result<()> {
 
     let repos = detect_repos(root)?;
 
+    let remote_note = remote.as_ref().map(|r| r.connection.clone());
     let step_config = crate::ui::step("cfg", ".ws.json");
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
+        remote,
         repos: repos.iter().map(|r| RepoEntry::Name(r.clone())).collect(),
     };
     let cfg_path = root.join(".ws.json");
@@ -66,6 +101,9 @@ fn init_local(root: &Path) -> Result<()> {
 
     let mut summary = Vec::new();
     summary.push(format!(".ws.json  ({} repos: {})", repos.len(), repos.join(", ")));
+    if let Some(conn) = remote_note {
+        summary.push(format!("remote  → {conn}"));
+    }
     summary.push(".ws.schema.json".to_string());
     summary.push(".ws-hooks/".to_string());
     crate::ui::summary_ok(&summary);

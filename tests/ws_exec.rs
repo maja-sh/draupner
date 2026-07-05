@@ -3,15 +3,15 @@ mod common;
 use common::{stderr, stdout, WorkspaceFixture};
 use std::path::Path;
 
-/// Write a `.ws.json.local` with a remote block pointing at `connection`.
-fn write_local_remote(f: &WorkspaceFixture, connection: &str) {
+/// Rewrite `.ws.json` (repos `["api"]`) with a remote block pointing at `connection`.
+fn write_remote(f: &WorkspaceFixture, connection: &str) {
     std::fs::write(
-        f.path().join(".ws.json.local"),
+        f.path().join(".ws.json"),
         format!(
-            r#"{{"remote":{{"connection":"{connection}","workspace_path":"workspace"}}}}"#
+            r#"{{"repos":["api"],"remote":{{"connection":"{connection}","workspace_path":"workspace"}}}}"#
         ),
     )
-    .expect("write .ws.json.local");
+    .expect("write .ws.json");
 }
 
 /// Drop an executable stub script at `<root>/<name>` that appends each argument
@@ -134,7 +134,7 @@ fn outside_a_worktree_is_a_preflight_error() {
 fn remote_workspace_dispatches_over_ssh() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
-    write_local_remote(&f, "srv");
+    write_remote(&f, "srv");
     let ssh = write_arg_recorder(&f, "fake-ssh");
     let args_file = f.path().join("ssh-args.txt");
 
@@ -165,7 +165,7 @@ fn remote_workspace_dispatches_over_ssh() {
 fn local_flag_forces_local_even_when_remote() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
-    write_local_remote(&f, "srv");
+    write_remote(&f, "srv");
     let ssh = write_arg_recorder(&f, "fake-ssh");
     let args_file = f.path().join("ssh-args.txt");
 

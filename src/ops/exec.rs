@@ -19,7 +19,6 @@ pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) 
 
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
-    let local_cfg = config::load_local(&ws.root)?;
 
     // The task (which worktree set) always comes from CWD — you run `ws exec`
     // from inside a task's tree. The repo defaults to the one you're in, but an
@@ -42,11 +41,11 @@ pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) 
         return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
     }
 
-    let remote = if local { None } else { local_cfg.remote.as_ref() };
+    let remote = if local { None } else { cfg.remote.as_ref() };
     let env: [(&str, &str); 2] = [("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
 
     let status = match remote {
-        Some(r) => exec_remote(r, &task, &repo, no_flush, &env, command),
+        Some(r) => exec_remote(r, &ws.root, &task, &repo, no_flush, &env, command),
         None => exec_local(&ws.root, &task, &repo, &env, program, args),
     }?;
 
@@ -77,6 +76,7 @@ fn exec_local(
 /// side has our latest edits.
 fn exec_remote(
     r: &config::RemoteConfig,
+    ws_root: &Path,
     task: &str,
     repo: &str,
     no_flush: bool,
@@ -92,7 +92,7 @@ fn exec_remote(
         }
     }
 
-    let dir = remote::worktree_path(&r.workspace_path, task, repo);
+    let dir = remote::worktree_path(&r.worktree_base(ws_root), task, repo);
     let script = remote::remote_script(&dir, env, command);
     // Allocate a remote pty only when both stdin and stdout are terminals.
     // Keying on stdin alone would put a pty on `ws exec … > file`, corrupting

@@ -35,6 +35,34 @@ fn init_local_writes_config_and_hook_templates() {
 }
 
 #[test]
+fn init_remote_writes_the_remote_block() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+
+    // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to
+    // the workspace's own dir name (written explicitly so it's discoverable).
+    let out = ws.run_with_env(&["init", "--remote"], &[("WS_REMOTE_HOST", "srv")]);
+    assert!(out.status.success(), "ws init --remote failed:\n{}", stderr(&out));
+
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
+    assert!(cfg.contains("srv"), "expected the connection:\n{cfg}");
+    assert!(cfg.contains("\"connection\""));
+    // workspace_path defaults to the workspace dir name (the tempdir basename).
+    let base = ws.path().file_name().unwrap().to_str().unwrap();
+    assert!(cfg.contains(base), "expected workspace_path default of `{base}`:\n{cfg}");
+}
+
+#[test]
+fn init_without_remote_writes_no_remote_block() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    ws.run_ok(&["init"]);
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(!cfg.contains("\"remote\""), "no remote block expected without --remote:\n{cfg}");
+}
+
+#[test]
 fn init_refuses_when_ws_json_exists() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");

@@ -14,6 +14,15 @@ enum Cmd {
         /// Rewrite .ws.schema.json from the current schema, leave .ws.json alone
         #[arg(long)]
         refresh_schema: bool,
+        /// Offload to a server: SSH host to reach it (falls back to $WS_REMOTE_HOST)
+        #[arg(long, value_name = "CONNECTION", num_args = 0..=1)]
+        remote: Option<Option<String>>,
+        /// Server dir the worktrees live under (default: this workspace's dir name)
+        #[arg(long, value_name = "PATH", requires = "remote")]
+        remote_path: Option<String>,
+        /// Private TLD for per-worktree hostnames (routing; used later)
+        #[arg(long, value_name = "DOMAIN", requires = "remote")]
+        domain: Option<String>,
     },
     /// Install Claude Code skill files (~/.claude/skills/ws-*)
     Claude,
@@ -50,7 +59,8 @@ enum Cmd {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Init { refresh_schema } => crate::ops::init::run(refresh_schema),
+        Cmd::Init { refresh_schema, remote, remote_path, domain } =>
+            crate::ops::init::run(refresh_schema, remote, remote_path, domain),
         Cmd::Claude                  => crate::ops::claude::run(),
         Cmd::New{repos,branch}       => crate::ops::new::run(&repos, &branch),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
