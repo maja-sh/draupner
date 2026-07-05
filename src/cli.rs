@@ -31,6 +31,20 @@ enum Cmd {
     Here,
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
+    /// Run a command where the repo's stack lives (remote via ssh, else local)
+    Exec {
+        /// Repo to run in; inferred from the current worktree if omitted
+        repo: Option<String>,
+        /// Force local execution even when the workspace is remote
+        #[arg(long)]
+        local: bool,
+        /// Skip the pre-run mutagen flush
+        #[arg(long)]
+        no_flush: bool,
+        /// The command to run, after `--`
+        #[arg(last = true, required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -45,5 +59,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Here                    => crate::ops::here::run(),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
+        Cmd::Exec{repo,local,no_flush,command} =>
+            crate::ops::exec::run(repo.as_deref(), local, no_flush, &command),
     }
 }

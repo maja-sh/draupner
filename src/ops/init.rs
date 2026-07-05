@@ -48,7 +48,6 @@ fn init_local(root: &Path) -> Result<()> {
     let step_config = crate::ui::step("cfg", ".ws.json");
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
-        remote: None,
         repos: repos.iter().map(|r| RepoEntry::Name(r.clone())).collect(),
     };
     let cfg_path = root.join(".ws.json");

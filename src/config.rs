@@ -7,19 +7,40 @@ use std::path::Path;
 pub struct WsConfig {
     #[serde(skip_serializing_if = "Option::is_none", default, rename = "$schema")]
     pub schema: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub remote: Option<RemoteConfig>,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
 }
 
-/// v2 remote-offload block. Present as a stub in v1 so the schema is stable
-/// once we start writing `.ws.json` files — no logic reads it yet.
+/// Per-machine overlay, read from `.ws.json.local` (gitignored). Absent on
+/// machines that run everything locally; present with a `remote` block on a
+/// machine that offloads its stack to a server. See `spec-remote.md`.
+#[derive(Deserialize, Serialize, Default, schemars::JsonSchema)]
+pub struct LocalConfig {
+    #[serde(skip_serializing_if = "Option::is_none", default, rename = "$schema")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub remote: Option<RemoteConfig>,
+}
+
+/// v2 remote-offload block. When present, every repo's stack runs on the
+/// server and location-transparent ops (`ws exec`, later `up`/`down`) target it.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RemoteConfig {
-    pub host: String,
-    #[serde(default)]
-    pub remote_root: Option<String>,
+    /// SSH host to reach the server — a Tailscale MagicDNS name or `~/.ssh/config` alias.
+    pub connection: String,
+    /// Parent dir on the server holding the synced worktrees. Relative paths are
+    /// resolved against the SSH login home; absolute paths are used verbatim.
+    pub workspace_path: String,
+    /// Container runtime on the server. Informational for now — hooks invoke it.
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
+    /// Private TLD for per-worktree hostnames (routing; not yet consumed by `ws exec`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+fn default_runtime() -> String {
+    "podman".to_string()
 }
 
 /// A repo entry is either a bare name (convention-only) or an object with overrides.
@@ -74,6 +95,17 @@ pub fn load(root: &Path) -> Result<WsConfig> {
     read_json(&root.join(".ws.json"))
 }
 
+/// Load the per-machine overlay from `<workspace-root>/.ws.json.local`. A
+/// missing file is not an error — it means "no local overrides" (default).
+#[allow(dead_code)]
+pub fn load_local(root: &Path) -> Result<LocalConfig> {
+    let p = root.join(".ws.json.local");
+    if !p.exists() {
+        return Ok(LocalConfig::default());
+    }
+    read_json(&p)
+}
+
 #[allow(dead_code)]
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
     let raw = std::fs::read_to_string(p)
@@ -95,5 +127,27 @@ mod tests {
         std::fs::write(tmp.path(), "\u{feff}{\"repos\":[]}").unwrap();
         let cfg: WsConfig = read_json(tmp.path()).unwrap();
         assert!(cfg.repos.is_empty());
+    }
+
+    #[test]
+    fn load_local_missing_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = load_local(dir.path()).unwrap();
+        assert!(local.remote.is_none());
+    }
+
+    #[test]
+    fn load_local_parses_remote_block_and_defaults_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".ws.json.local"),
+            r#"{"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
+        )
+        .unwrap();
+        let remote = load_local(dir.path()).unwrap().remote.expect("remote block");
+        assert_eq!(remote.connection, "srv");
+        assert_eq!(remote.workspace_path, "workspace");
+        assert_eq!(remote.runtime, "podman");
+        assert!(remote.domain.is_none());
     }
 }

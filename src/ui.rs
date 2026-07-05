@@ -343,6 +343,17 @@ pub fn clean_empty() {
     }
 }
 
+/// A single dim, subordinate line to stderr. Used by `ws exec` to note where a
+/// command is being dispatched (e.g. the remote host) without polluting the
+/// command's own stdout.
+pub fn note(text: &str) {
+    if tty() {
+        eprintln!("{}", style(text).dim());
+    } else {
+        eprintln!("{text}");
+    }
+}
+
 pub fn nudge(text: &str) {
     if tty() {
         eprintln!("\n{}", style(format!("Next: {text}")).dim().italic());

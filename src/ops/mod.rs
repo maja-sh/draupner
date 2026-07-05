@@ -9,6 +9,7 @@ pub mod rm;
 pub mod list;
 pub mod here;
 pub mod clean;
+pub mod exec;
 
 #[derive(Debug)]
 pub struct ExitError {
@@ -31,6 +32,14 @@ pub(crate) fn preflight(msg: impl Into<String>) -> anyhow::Error {
 #[allow(dead_code)]
 pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into() }.into()
+}
+
+/// Propagate a child process's exit code without printing a failure banner.
+/// `ws exec` is a transparent runner — when the command it ran exits non-zero,
+/// the command has already reported why, so `ws` should just mirror the code
+/// and stay silent (empty message; `main` suppresses the banner for it).
+pub(crate) fn passthrough_exit(code: i32) -> anyhow::Error {
+    ExitError { code, msg: String::new() }.into()
 }
 
 /// Return the interrupt error (exit 130) if a Ctrl-C has been observed. Called
