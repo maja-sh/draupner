@@ -45,14 +45,23 @@ pub fn ref_exists(path: &Path, refspec: &str) -> bool {
 /// The repo's default branch as a start-point name (`origin/main`, `main`, …),
 /// or `None` when none can be resolved. Prefers `origin/HEAD`, then falls back
 /// through the conventional `main`/`master` ladder (remote-tracking first).
+///
+/// The ladder probes *fully-qualified* refspecs so a `main`/`master` **tag**
+/// (or a stray `refs/main`) can't shadow the branch — short-name `rev-parse`
+/// would resolve the tag first and branch new work off the wrong commit.
 pub fn default_ref(path: &Path) -> Option<String> {
     if let Some(head) = symbolic_origin_head(path) {
         return Some(head);
     }
-    ["origin/main", "origin/master", "main", "master"]
-        .into_iter()
-        .find(|c| ref_exists(path, c))
-        .map(String::from)
+    [
+        ("refs/remotes/origin/main", "origin/main"),
+        ("refs/remotes/origin/master", "origin/master"),
+        ("refs/heads/main", "main"),
+        ("refs/heads/master", "master"),
+    ]
+    .into_iter()
+    .find(|(refspec, _)| ref_exists(path, refspec))
+    .map(|(_, name)| name.to_string())
 }
 
 /// `git symbolic-ref refs/remotes/origin/HEAD`, stripped to a short name

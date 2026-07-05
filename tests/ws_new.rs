@@ -3,6 +3,26 @@ mod common;
 use common::{stderr, WorkspaceFixture};
 
 #[test]
+fn a_tag_named_main_does_not_shadow_the_default_branch() {
+    // Regression: default-branch resolution must probe fully-qualified refspecs
+    // so a *tag* called `main` can't be picked as the start-point. Here the repo
+    // has no `main`/`master` branch and no origin, only a `main` tag — resolution
+    // must fail rather than branch new work off the tag.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.git("api", &["branch", "-m", "trunk"]); // rename main -> trunk (no main branch)
+    f.git("api", &["tag", "main"]); // a tag that short-name rev-parse would resolve
+
+    let out = f.run(&["new", "api", "feat/x"]);
+    assert!(!out.status.success(), "should refuse when only a tag matches");
+    assert!(
+        stderr(&out).contains("default branch"),
+        "expected a default-branch error, got:\n{}",
+        stderr(&out)
+    );
+    assert!(!f.path().join(".worktrees/feat-x/api").exists());
+}
+
+#[test]
 fn happy_path_two_repos() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
     f.add_hook("api", "post-create", "echo \"api-hook: wt=$1\"");
