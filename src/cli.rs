@@ -29,8 +29,6 @@ enum Cmd {
     List,
     /// Print worktree paths for the current task
     Here,
-    /// Switch dev containers to serve a branch
-    Use   { branch: Option<String> },
     /// Remove safe-to-drop worktrees
     Clean,
     /// Run tests in one or more repos of a task
@@ -48,7 +46,6 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Here                    => crate::ops::here::run(),
-        Cmd::Use{branch}             => crate::ops::use_::run(branch.as_deref()),
         Cmd::Clean                   => crate::ops::clean::run(),
         Cmd::Test{branch,repos}      => crate::ops::test::run(&branch, repos.as_deref()),
     }

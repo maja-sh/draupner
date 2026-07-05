@@ -8,7 +8,6 @@ pub mod down;
 pub mod rm;
 pub mod list;
 pub mod here;
-pub mod use_;
 pub mod clean;
 pub mod test;
 
