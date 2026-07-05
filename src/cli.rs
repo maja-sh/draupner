@@ -29,8 +29,8 @@ enum Cmd {
     List,
     /// Print worktree paths for the current task
     Here,
-    /// Remove safe-to-drop worktrees
-    Clean,
+    /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
+    Clean { #[arg(long, short)] force: bool },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -44,6 +44,6 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Here                    => crate::ops::here::run(),
-        Cmd::Clean                   => crate::ops::clean::run(),
+        Cmd::Clean{force}            => crate::ops::clean::run(force),
     }
 }

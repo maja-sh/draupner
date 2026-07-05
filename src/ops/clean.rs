@@ -5,16 +5,17 @@ use std::process::Command;
 use crate::config;
 use crate::workspace;
 
-pub fn run() -> Result<()> {
+pub fn run(force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    crate::ui::header("ws-clean", "");
+    crate::ui::header("ws-clean", if force { "--force" } else { "" });
 
     let mut task_dirs = workspace::all_task_dirs(&ws.root);
     task_dirs.sort();
 
     let mut removed = 0usize;
+    let mut removable = 0usize;
     let mut kept = 0usize;
     let mut any = false;
 
@@ -33,14 +34,18 @@ pub fn run() -> Result<()> {
 
         match audit(&worktrees, &task_name) {
             Verdict::Remove { branch, reason } => {
-                crate::ui::clean_verdict(&task_name, true, &reason);
-                // Reuse the shared teardown. A hook failure here is reported by
-                // the step line; we don't abort the whole clean over it.
-                let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, &worktrees)?;
-                removed += 1;
+                crate::ui::clean_verdict(&task_name, true, &reason, !force);
+                if force {
+                    // Reuse the shared teardown. A hook failure here is reported
+                    // by the step line; we don't abort the whole clean over it.
+                    let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, &worktrees)?;
+                    removed += 1;
+                } else {
+                    removable += 1;
+                }
             }
             Verdict::Keep { reason } => {
-                crate::ui::clean_verdict(&task_name, false, &reason);
+                crate::ui::clean_verdict(&task_name, false, &reason, !force);
                 kept += 1;
             }
         }
@@ -51,7 +56,14 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    crate::ui::summary_ok(&[format!("Removed {removed}, kept {kept}")]);
+    if force {
+        crate::ui::summary_ok(&[format!("Removed {removed}, kept {kept}")]);
+    } else if removable > 0 {
+        crate::ui::summary_ok(&[format!("{removable} removable, {kept} kept")]);
+        crate::ui::nudge("ws clean --force to remove");
+    } else {
+        crate::ui::summary_ok(&[format!("Nothing to remove, {kept} kept")]);
+    }
     Ok(())
 }
 

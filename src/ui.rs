@@ -308,14 +308,19 @@ pub fn list_table(groups: &[ListGroup]) {
     }
 }
 
-/// One `ws clean` audit verdict — a task and whether it was removed, with the
-/// deciding reason. `remove == false` is a dim keep; `true` is a green remove.
-pub fn clean_verdict(task: &str, remove: bool, reason: &str) {
+/// One `ws clean` audit verdict. `removal` drives the color (green remove / dim
+/// keep); `dry` renders a removal as "would remove" for the preview pass.
+pub fn clean_verdict(task: &str, removal: bool, reason: &str, dry: bool) {
+    let verb = if removal {
+        if dry { "would remove" } else { "remove" }
+    } else {
+        "keep"
+    };
     if tty() {
-        let (mark, label) = if remove {
-            (style("✓").green().to_string(), style("remove").green().to_string())
+        let (mark, label) = if removal {
+            (style("✓").green().to_string(), style(verb).green().to_string())
         } else {
-            (style("·").dim().to_string(), style("keep").dim().to_string())
+            (style("·").dim().to_string(), style(verb).dim().to_string())
         };
         eprintln!(
             "  {} {} {} — {}",
@@ -325,8 +330,7 @@ pub fn clean_verdict(task: &str, remove: bool, reason: &str) {
             style(reason).dim(),
         );
     } else {
-        let label = if remove { "remove" } else { "keep" };
-        eprintln!("  {task}  {label}  {reason}");
+        eprintln!("  {task}  {verb}  {reason}");
     }
 }
 

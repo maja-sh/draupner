@@ -10,7 +10,24 @@ fn no_worktrees_is_nothing_to_clean() {
 }
 
 #[test]
-fn clean_merged_worktree_is_removed() {
+fn preview_by_default_removes_nothing() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/done"]);
+    let wt = ".worktrees/feat-done/api";
+    f.git(wt, &["commit", "-q", "--allow-empty", "-m", "task work"]);
+    f.git("api", &["merge", "-q", "feat/done"]);
+
+    // No --force: a removable worktree is previewed, not removed.
+    let out = f.run_ok(&["clean"]);
+    let err = stderr(&out);
+
+    assert!(f.path().join(wt).exists(), "preview must not remove anything");
+    assert!(err.contains("would remove"), "expected a preview verdict in:\n{err}");
+    assert!(err.contains("--force"), "expected a --force nudge in:\n{err}");
+}
+
+#[test]
+fn clean_merged_worktree_is_removed_with_force() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/done"]);
 
@@ -20,7 +37,7 @@ fn clean_merged_worktree_is_removed() {
     f.git(wt, &["commit", "-q", "--allow-empty", "-m", "task work"]);
     f.git("api", &["merge", "-q", "feat/done"]);
 
-    let out = f.run_ok(&["clean"]);
+    let out = f.run_ok(&["clean", "--force"]);
     let err = stderr(&out);
 
     assert!(err.contains("remove"), "expected a remove verdict in:\n{err}");
@@ -76,7 +93,7 @@ fn mixed_removes_safe_keeps_unsafe() {
     f.run_ok(&["new", "api", "feat/keepme"]);
     f.git(".worktrees/feat-keepme/api", &["commit", "-q", "--allow-empty", "-m", "wip"]);
 
-    let out = f.run_ok(&["clean"]);
+    let out = f.run_ok(&["clean", "--force"]);
     let err = stderr(&out);
 
     assert!(!f.path().join(".worktrees/feat-safe/api").exists(), "merged task should be removed");
@@ -85,12 +102,12 @@ fn mixed_removes_safe_keeps_unsafe() {
 }
 
 #[test]
-fn never_committed_worktree_is_removed() {
+fn never_committed_worktree_is_removed_with_force() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     // Fresh worktree, no commits beyond main, clean → safe to drop.
     f.run_ok(&["new", "api", "feat/empty"]);
 
-    let out = f.run_ok(&["clean"]);
+    let out = f.run_ok(&["clean", "--force"]);
     let err = stderr(&out);
 
     assert!(!f.path().join(".worktrees/feat-empty/api").exists(), "never-committed worktree should be removed");
