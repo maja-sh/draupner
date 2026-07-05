@@ -5,7 +5,6 @@
 //! The SSH binary is resolved through `WS_SSH` (default `ssh`) so tests can
 //! substitute a fake that records its arguments instead of dialing a server.
 
-use std::path::Path;
 use std::process::Command;
 
 /// SSH binary to invoke. Overridable via `WS_SSH` for tests.
@@ -67,12 +66,6 @@ pub fn ssh_command(connection: &str, script: &str, want_tty: bool) -> Command {
     }
     c.arg(connection).arg(script);
     c
-}
-
-/// Does this repo currently have a worktree checked out for `task`? Only used
-/// for the local dispatch path; the remote path lets `cd` fail on the server.
-pub fn local_worktree_exists(root: &Path, task: &str, repo: &str) -> bool {
-    root.join(".worktrees").join(task).join(repo).is_dir()
 }
 
 #[cfg(test)]

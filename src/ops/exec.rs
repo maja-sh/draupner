@@ -14,10 +14,8 @@ use crate::remote;
 use crate::workspace;
 
 pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) -> Result<()> {
-    // clap enforces a non-empty command (`last`/`required`), but stay defensive.
-    let Some((program, args)) = command.split_first() else {
-        return Err(super::preflight("no command given; use `ws exec [repo] -- <command>`"));
-    };
+    // clap declares the command `required` after `--`, so it's always non-empty.
+    let (program, args) = command.split_first().expect("clap enforces a non-empty command");
 
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
@@ -31,7 +29,7 @@ pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) 
     let root_canon = ws.root.canonicalize().unwrap_or_else(|_| ws.root.clone());
     let worktrees_root = root_canon.join(".worktrees");
 
-    let (task, repo_from_cwd) = containing_task_repo(&cwd, &worktrees_root)
+    let (task, repo_from_cwd) = workspace::task_repo_under(&cwd, &worktrees_root)
         .ok_or_else(|| super::preflight("not inside a task worktree; run `ws exec` from within one"))?;
 
     let repo = match repo {
@@ -64,12 +62,9 @@ fn exec_local(
     program: &str,
     args: &[String],
 ) -> Result<ExitStatus> {
-    if !remote::local_worktree_exists(root, task, repo) {
-        return Err(super::preflight(format!(
-            "no worktree for `{repo}` in task `{task}`"
-        )));
-    }
-    let wt = root.join(".worktrees").join(task).join(repo);
+    let wt = workspace::worktree_for(root, task, repo).ok_or_else(|| {
+        super::preflight(format!("no worktree for `{repo}` in task `{task}`"))
+    })?;
     let mut c = Command::new(program);
     c.args(args).current_dir(&wt).env("WS_WORKSPACE_ROOT", root);
     for (k, v) in env {
@@ -115,56 +110,4 @@ fn propagate(status: ExitStatus) -> Result<()> {
         return Ok(());
     }
     Err(super::passthrough_exit(status.code().unwrap_or(1)))
-}
-
-/// If `cwd` is inside `<worktrees_root>/<task>[/<repo>/…]`, return the task dir
-/// name and (when the path reaches into a repo) that repo name. Both paths are
-/// expected to be canonical. Mirrors `here::containing_task`, extended to also
-/// pull out the repo component.
-fn containing_task_repo(cwd: &Path, worktrees_root: &Path) -> Option<(String, Option<String>)> {
-    let rel = cwd.strip_prefix(worktrees_root).ok()?;
-    let mut comps = rel.components();
-    let task = comps.next()?.as_os_str().to_string_lossy().into_owned();
-    let repo = comps.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
-    Some((task, repo))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn wt_root() -> PathBuf {
-        PathBuf::from("/ws/proj/.worktrees")
-    }
-
-    #[test]
-    fn infers_task_and_repo_from_inside_a_repo_worktree() {
-        let cwd = PathBuf::from("/ws/proj/.worktrees/feat-foo/api/src");
-        assert_eq!(
-            containing_task_repo(&cwd, &wt_root()),
-            Some(("feat-foo".to_string(), Some("api".to_string())))
-        );
-    }
-
-    #[test]
-    fn infers_task_but_no_repo_at_the_task_dir() {
-        let cwd = PathBuf::from("/ws/proj/.worktrees/bug-bar");
-        assert_eq!(
-            containing_task_repo(&cwd, &wt_root()),
-            Some(("bug-bar".to_string(), None))
-        );
-    }
-
-    #[test]
-    fn none_outside_the_worktrees_tree() {
-        let cwd = PathBuf::from("/ws/proj/api/src");
-        assert_eq!(containing_task_repo(&cwd, &wt_root()), None);
-    }
-
-    #[test]
-    fn none_for_sibling_prefix_collision() {
-        let cwd = PathBuf::from("/ws/proj/.worktrees-backup/feat-foo/api");
-        assert_eq!(containing_task_repo(&cwd, &wt_root()), None);
-    }
 }
