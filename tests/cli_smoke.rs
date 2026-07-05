@@ -17,20 +17,3 @@ fn no_args_prints_usage_and_exits_nonzero() {
     let err = stderr(&out);
     assert!(err.contains("Usage:") || err.contains("usage"));
 }
-
-#[test]
-fn stubbed_ops_return_not_implemented() {
-    let ws = WorkspaceFixture::empty();
-    // `test` is the only remaining stub — deferred to v2.
-    for args in [
-        vec!["test", "bar/baz"],
-    ] {
-        let out = ws.run(&args);
-        assert!(!out.status.success(), "expected {args:?} to fail (stub)");
-        assert!(
-            stderr(&out).contains("not yet implemented"),
-            "expected 'not yet implemented' for {args:?}, got: {}",
-            stderr(&out)
-        );
-    }
-}

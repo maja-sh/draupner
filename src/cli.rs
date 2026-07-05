@@ -31,8 +31,6 @@ enum Cmd {
     Here,
     /// Remove safe-to-drop worktrees
     Clean,
-    /// Run tests in one or more repos of a task
-    Test  { branch: String, repos: Option<String> },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -47,6 +45,5 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Here                    => crate::ops::here::run(),
         Cmd::Clean                   => crate::ops::clean::run(),
-        Cmd::Test{branch,repos}      => crate::ops::test::run(&branch, repos.as_deref()),
     }
 }

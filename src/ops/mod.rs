@@ -9,11 +9,6 @@ pub mod rm;
 pub mod list;
 pub mod here;
 pub mod clean;
-pub mod test;
-
-pub(crate) fn not_implemented(name: &str) -> anyhow::Result<()> {
-    anyhow::bail!("{name}: not yet implemented (spec-1 scaffold only)")
-}
 
 #[derive(Debug)]
 pub struct ExitError {
