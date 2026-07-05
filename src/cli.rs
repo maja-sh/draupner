@@ -23,6 +23,9 @@ enum Cmd {
         /// Private TLD for per-worktree hostnames (routing; used later)
         #[arg(long, value_name = "DOMAIN", requires = "remote")]
         domain: Option<String>,
+        /// Skip the SSH reachability check (init refuses an unreachable host by default)
+        #[arg(long, requires = "remote")]
+        no_verify: bool,
     },
     /// Install Claude Code skill files (~/.claude/skills/ws-*)
     Claude,
@@ -59,8 +62,8 @@ enum Cmd {
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Init { refresh_schema, remote, remote_path, domain } =>
-            crate::ops::init::run(refresh_schema, remote, remote_path, domain),
+        Cmd::Init { refresh_schema, remote, remote_path, domain, no_verify } =>
+            crate::ops::init::run(refresh_schema, remote, remote_path, domain, no_verify),
         Cmd::Claude                  => crate::ops::claude::run(),
         Cmd::New{repos,branch}       => crate::ops::new::run(&repos, &branch),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),

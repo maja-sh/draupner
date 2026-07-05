@@ -5,11 +5,28 @@
 //! The SSH binary is resolved through `WS_SSH` (default `ssh`) so tests can
 //! substitute a fake that records its arguments instead of dialing a server.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// SSH binary to invoke. Overridable via `WS_SSH` for tests.
 fn ssh_bin() -> String {
     std::env::var("WS_SSH").unwrap_or_else(|_| "ssh".to_string())
+}
+
+/// Light reachability probe: can we open a non-interactive SSH session to
+/// `connection`? `BatchMode=yes` fails fast instead of hanging on a password
+/// prompt; a short `ConnectTimeout` avoids stalling on a dead host. Used by
+/// `ws init --remote` to catch a bad connection at config time rather than at
+/// first `ws new`. (A passphrase-protected key with no agent will read as
+/// unreachable — that's what `--no-verify` is for.)
+pub fn reachable(connection: &str) -> bool {
+    Command::new(ssh_bin())
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", connection, "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Server-side path of a synced worktree: `<workspace_path>/<task>/<repo>`.

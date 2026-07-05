@@ -21,6 +21,20 @@ fn mutagen_bin() -> String {
     std::env::var("WS_MUTAGEN").unwrap_or_else(|_| "mutagen".to_string())
 }
 
+/// Is `mutagen` available on PATH? Cheap client-side readiness check — a
+/// remote workspace needs it locally to sync, so `ws init --remote` verifies it
+/// up front rather than letting `ws new` fail later.
+pub fn installed() -> bool {
+    Command::new(mutagen_bin())
+        .arg("version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Canonical sync-session name for a worktree: `ws-<sanitized-branch>-<repo>`.
 /// This is the documented escape hatch — a user can `mutagen sync pause ws-…`
 /// directly — so the naming is a stable contract.

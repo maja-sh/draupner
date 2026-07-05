@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{RemoteConfig, RepoEntry, WsConfig};
+use crate::{mutagen, remote as remotelib};
 
 const HOOK_EVENTS: &[&str] = &["post-create", "up", "down", "post-remove", "status", "test"];
 
@@ -11,6 +12,7 @@ pub fn run(
     remote: Option<Option<String>>,
     remote_path: Option<String>,
     domain: Option<String>,
+    no_verify: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -19,7 +21,29 @@ pub fn run(
     }
 
     let remote_cfg = build_remote(&cwd, remote, remote_path, domain)?;
-    init_local(&cwd, remote_cfg)
+    init_local(&cwd, remote_cfg, no_verify)
+}
+
+/// Client-side readiness for a remote workspace, checked at config time so a
+/// teammate hears about a bad setup here instead of at their first `ws new`.
+/// Strict by default (refuse); `--no-verify` skips it for the bootstrap case
+/// where the server isn't provisioned yet. This is the *client* half — full
+/// server validation (podman/Caddy/DNS/TLS) is `ws remote check`.
+fn verify_remote(r: &RemoteConfig) -> Result<()> {
+    if !mutagen::installed() {
+        return Err(super::preflight(
+            "mutagen isn't installed — a remote workspace needs it locally to sync. \
+             Install mutagen, or `ws init --remote … --no-verify` to configure anyway.",
+        ));
+    }
+    if !remotelib::reachable(&r.connection) {
+        return Err(super::preflight(format!(
+            "can't reach `{}` over SSH — fix the connection (host/key/Tailscale), \
+             or `--no-verify` to configure anyway.",
+            r.connection
+        )));
+    }
+    Ok(())
 }
 
 /// Turn the `--remote[=host]` / `--remote-path` / `--domain` flags into a
@@ -49,7 +73,7 @@ fn dir_name(root: &Path) -> Option<String> {
     root.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-fn init_local(root: &Path, remote: Option<RemoteConfig>) -> Result<()> {
+fn init_local(root: &Path, remote: Option<RemoteConfig>, no_verify: bool) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
     // Blocks *creating* a nested root, not running `ws` from a subdir (that
@@ -74,6 +98,21 @@ fn init_local(root: &Path, remote: Option<RemoteConfig>) -> Result<()> {
             "{} already exists. Remove it (or use `--refresh-schema` to regenerate the JSON Schema).",
             root.join(".ws.json").display()
         );
+    }
+
+    // Verify client readiness before writing anything, so a strict-mode refusal
+    // leaves no half-written config behind.
+    if let Some(r) = &remote {
+        if !no_verify {
+            let step = crate::ui::step("cfg", "remote reachable");
+            match verify_remote(r) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    step.fail("check failed");
+                    return Err(e);
+                }
+            }
+        }
     }
 
     let repos = detect_repos(root)?;
@@ -101,13 +140,17 @@ fn init_local(root: &Path, remote: Option<RemoteConfig>) -> Result<()> {
 
     let mut summary = Vec::new();
     summary.push(format!(".ws.json  ({} repos: {})", repos.len(), repos.join(", ")));
-    if let Some(conn) = remote_note {
+    if let Some(conn) = &remote_note {
         summary.push(format!("remote  → {conn}"));
     }
     summary.push(".ws.schema.json".to_string());
     summary.push(".ws-hooks/".to_string());
     crate::ui::summary_ok(&summary);
-    crate::ui::nudge("edit .ws.json / .ws-hooks/, then `ws claude`");
+    if remote_note.is_some() {
+        crate::ui::nudge("run `ws remote check` once the server's set up for full validation");
+    } else {
+        crate::ui::nudge("edit .ws.json / .ws-hooks/, then `ws claude`");
+    }
     Ok(())
 }
 

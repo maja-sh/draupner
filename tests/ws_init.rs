@@ -38,10 +38,19 @@ fn init_local_writes_config_and_hook_templates() {
 fn init_remote_writes_the_remote_block() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
+    // Make the client-readiness check pass: mutagen "installed" and host reachable.
+    let ok = ws.stub("ok", "exit 0");
 
     // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to
     // the workspace's own dir name (written explicitly so it's discoverable).
-    let out = ws.run_with_env(&["init", "--remote"], &[("WS_REMOTE_HOST", "srv")]);
+    let out = ws.run_with_env(
+        &["init", "--remote"],
+        &[
+            ("WS_REMOTE_HOST", "srv"),
+            ("WS_SSH", ok.to_str().unwrap()),
+            ("WS_MUTAGEN", ok.to_str().unwrap()),
+        ],
+    );
     assert!(out.status.success(), "ws init --remote failed:\n{}", stderr(&out));
 
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
@@ -51,6 +60,53 @@ fn init_remote_writes_the_remote_block() {
     // workspace_path defaults to the workspace dir name (the tempdir basename).
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     assert!(cfg.contains(base), "expected workspace_path default of `{base}`:\n{cfg}");
+}
+
+#[test]
+fn init_remote_refuses_an_unreachable_host_by_default() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let ok = ws.stub("ok", "exit 0"); // mutagen "installed"
+    let bad = ws.stub("bad-ssh", "exit 1"); // host unreachable
+
+    let out = ws.run_with_env(
+        &["init", "--remote", "srv"],
+        &[("WS_MUTAGEN", ok.to_str().unwrap()), ("WS_SSH", bad.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
+    assert!(stderr(&out).contains("reach"), "clear message:\n{}", stderr(&out));
+    // Strict refusal leaves nothing behind.
+    assert!(!ws.path().join(".ws.json").exists(), "no config written on refusal");
+}
+
+#[test]
+fn init_remote_refuses_when_mutagen_missing() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let ok = ws.stub("ok", "exit 0"); // host reachable
+    let bad = ws.stub("no-mutagen", "exit 1"); // mutagen not installed
+
+    let out = ws.run_with_env(
+        &["init", "--remote", "srv"],
+        &[("WS_SSH", ok.to_str().unwrap()), ("WS_MUTAGEN", bad.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
+    assert!(stderr(&out).contains("mutagen"), "clear message:\n{}", stderr(&out));
+    assert!(!ws.path().join(".ws.json").exists());
+}
+
+#[test]
+fn init_remote_no_verify_skips_the_checks() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let bad = ws.stub("bad", "exit 1"); // both checks would fail
+
+    let out = ws.run_with_env(
+        &["init", "--remote", "srv", "--no-verify"],
+        &[("WS_SSH", bad.to_str().unwrap()), ("WS_MUTAGEN", bad.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "--no-verify should skip the checks:\n{}", stderr(&out));
+    assert!(ws.path().join(".ws.json").exists(), "config written with --no-verify");
 }
 
 #[test]

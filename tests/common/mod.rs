@@ -96,6 +96,20 @@ impl WorkspaceFixture {
         std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
     }
 
+    /// Executable stub at `<root>/<name>` with the given bash `body`. Use for a
+    /// canned exit code, e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")`
+    /// pointed at `WS_SSH`/`WS_MUTAGEN` to simulate reachable/unreachable.
+    pub fn stub(&self, name: &str, body: &str) -> PathBuf {
+        let path = self.path().join(name);
+        std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     /// Executable stub at `<root>/<name>` that appends each argv (one per line)
     /// to `$ARGS_FILE`, then exits 0. Stands in for `ssh`/`mutagen` so a test
     /// can assert the exact command `ws` would run without a real server.
