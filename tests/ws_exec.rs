@@ -74,6 +74,18 @@ fn propagates_the_child_exit_code_without_a_banner() {
 }
 
 #[test]
+fn propagates_signal_death_as_128_plus_signum() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    // Child kills itself with SIGTERM (15) — `ws` should exit 128+15 = 143,
+    // not collapse to a bare 1, and print no banner.
+    let out = f.run_in(".worktrees/feat-foo/api", &["exec", "--", "sh", "-c", "kill -TERM $$"]);
+    assert_eq!(out.status.code(), Some(143), "expected 128+SIGTERM");
+    assert!(!stderr(&out).contains("FAIL"), "no banner over a signalled child:\n{}", stderr(&out));
+}
+
+#[test]
 fn infers_repo_from_the_current_worktree() {
     let f = WorkspaceFixture::with_repos(&["api", "web"]);
     f.run_ok(&["new", "api,web", "feat/foo"]);

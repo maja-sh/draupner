@@ -66,7 +66,7 @@ fn exec_local(
         super::preflight(format!("no worktree for `{repo}` in task `{task}`"))
     })?;
     let mut c = Command::new(program);
-    c.args(args).current_dir(&wt).env("WS_WORKSPACE_ROOT", root);
+    c.args(args).current_dir(&wt);
     for (k, v) in env {
         c.env(k, v);
     }
@@ -94,7 +94,10 @@ fn exec_remote(
 
     let dir = remote::worktree_path(&r.workspace_path, task, repo);
     let script = remote::remote_script(&dir, env, command);
-    let want_tty = std::io::stdin().is_terminal();
+    // Allocate a remote pty only when both stdin and stdout are terminals.
+    // Keying on stdin alone would put a pty on `ws exec … > file`, corrupting
+    // the redirected output with CRLF / control sequences.
+    let want_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     crate::ui::note(&format!("→ {}:{dir}", r.connection));
     remote::ssh_command(&r.connection, &script, want_tty)
@@ -102,12 +105,28 @@ fn exec_remote(
         .with_context(|| format!("ssh {}", r.connection))
 }
 
-/// Mirror the child's exit status. Success → `Ok`. Non-zero (or signal) →
+/// Mirror the child's exit status. Success → `Ok`. Non-zero or signal death →
 /// a silent passthrough error carrying the code, so `ws` exits with it but
 /// prints no banner over the command's own output.
 fn propagate(status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
     }
-    Err(super::passthrough_exit(status.code().unwrap_or(1)))
+    Err(super::passthrough_exit(exit_code(&status)))
+}
+
+/// The child's exit code, mapping a signal death to `128 + signum` (so a
+/// Ctrl-C'd child yields 130) to match `ws`'s exit conventions elsewhere.
+#[cfg(unix)]
+fn exit_code(status: &ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|s| 128 + s))
+        .unwrap_or(1)
+}
+
+#[cfg(not(unix))]
+fn exit_code(status: &ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
 }

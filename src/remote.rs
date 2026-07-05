@@ -55,10 +55,11 @@ pub fn remote_script(dir: &str, env: &[(&str, &str)], command: &[String]) -> Str
     s
 }
 
-/// Assemble the `ssh` command for `connection` running `script`. Allocates a
-/// TTY (`-t`) only when our own stdin is a terminal, matching how a bare `ssh`
-/// decides — interactive work (tinker, prompts, colors) gets a pty; piped or
-/// test invocations don't, keeping output deterministic.
+/// Assemble the `ssh` command for `connection` running `script`. Passes `-t`
+/// (force a remote pty) when `want_tty` — the caller decides based on whether
+/// our stdio is interactive; see `exec`. Interactive work (tinker, prompts,
+/// colors) gets a pty; piped/redirected/test invocations don't, keeping output
+/// clean.
 pub fn ssh_command(connection: &str, script: &str, want_tty: bool) -> Command {
     let mut c = Command::new(ssh_bin());
     if want_tty {
