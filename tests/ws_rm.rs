@@ -3,6 +3,35 @@ mod common;
 use common::{stderr, WorkspaceFixture};
 
 #[test]
+fn rm_on_a_remote_workspace_terminates_the_sync_session() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{"repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
+    );
+    let mg = f.arg_recorder("fake-mutagen");
+
+    // Create the worktree (also runs `sync create`, recorded elsewhere).
+    let create_args = f.path().join("create-args.txt");
+    f.run_with_env(
+        &["new", "api", "feat/foo"],
+        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", create_args.to_str().unwrap())],
+    );
+
+    // Tear it down — should terminate the same session.
+    let term_args = f.path().join("term-args.txt");
+    let out = f.run_with_env(
+        &["rm", "feat/foo"],
+        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", term_args.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "ws rm failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&term_args).expect("mutagen was invoked on rm");
+    assert!(rec.contains("terminate"), "expected `sync terminate`:\n{rec}");
+    assert!(rec.contains("ws-feat-foo-api"), "expected the session name:\n{rec}");
+}
+
+#[test]
 fn happy_path_clean_teardown() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
     f.run_ok(&["new", "api,app", "feat/gone"]);

@@ -12,6 +12,7 @@ use std::process::Command;
 
 use crate::config::WsConfig;
 use crate::hooks;
+use crate::mutagen;
 use crate::workspace;
 
 /// Tear down every worktree of a task. Runs teardown hooks, removes the
@@ -45,6 +46,18 @@ pub fn remove_task(
                         hook_failed = true;
                     }
                 }
+            }
+        }
+
+        // Remote workspace → tear down the file sync before we delete the
+        // worktree (so mutagen stops watching a dir that's about to vanish).
+        // Best-effort: a failed terminate is reported but doesn't block removal.
+        if cfg.remote.is_some() {
+            let session = mutagen::session_name(branch, repo);
+            let step = crate::ui::step(repo, "sync terminated");
+            match mutagen::terminate(&session) {
+                Ok(()) => step.ok(),
+                Err(e) => step.fail(&format!("{e}")),
             }
         }
 

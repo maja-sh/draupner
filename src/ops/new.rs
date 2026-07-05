@@ -5,6 +5,8 @@ use std::process::Command;
 use crate::config;
 use crate::git;
 use crate::hooks;
+use crate::mutagen;
+use crate::remote;
 use crate::workspace;
 
 pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
@@ -91,6 +93,23 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
             let step = crate::ui::step(repo_name, "Post-create hook");
             hooks::run(&ws.root, &hook_rel, &wt_path, repo_name, &sanitized, "post-create")?;
             step.ok();
+        }
+
+        // Remote workspace → establish the worktree's file sync to the server.
+        // Runs last so the initial sync includes anything post-create produced.
+        // The `excludes` (node_modules/vendor + configured) double as sync
+        // ignores so those per-host artifacts stay off the wire.
+        if let Some(r) = &cfg.remote {
+            let step = crate::ui::step(repo_name, "Sync created");
+            let session = mutagen::session_name(branch, repo_name);
+            let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
+            match mutagen::create(&session, &wt_path, &r.connection, &remote_path, &excludes) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    step.fail(&format!("{e}"));
+                    return Err(super::op_failure(format!("mutagen sync for {repo_name}: {e}")));
+                }
+            }
         }
 
         wt_paths.push((repo_name.clone(), wt_path));

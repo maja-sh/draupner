@@ -96,6 +96,25 @@ impl WorkspaceFixture {
         std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
     }
 
+    /// Executable stub at `<root>/<name>` that appends each argv (one per line)
+    /// to `$ARGS_FILE`, then exits 0. Stands in for `ssh`/`mutagen` so a test
+    /// can assert the exact command `ws` would run without a real server.
+    /// Point `WS_SSH`/`WS_MUTAGEN` at it and set `ARGS_FILE`.
+    pub fn arg_recorder(&self, name: &str) -> PathBuf {
+        let path = self.path().join(name);
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\n",
+        )
+        .expect("write recorder");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     /// Write a hook script under `.ws-hooks/<repo>/<event>` and make it executable.
     /// `body` is the script body (bash commands); the shebang is prepended.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {

@@ -1,12 +1,17 @@
-//! Thin wrapper over the `mutagen` CLI. For now only the session-name
-//! convention and a best-effort flush are needed — `ws exec` flushes a
-//! worktree's sync before running remotely so the server sees the latest edits.
-//! Session create/terminate lands with the `up`/`down`/`rm` lifecycle work.
+//! Thin wrapper over the `mutagen` CLI. Sync sessions are created when a
+//! worktree is made (`ws new`) and terminated when it's removed (`ws rm` /
+//! `ws clean`); `ws exec` flushes before a remote run. Session naming is a
+//! stable contract (the documented escape hatch).
 //!
 //! The binary is resolved through `WS_MUTAGEN` (default `mutagen`) so tests can
 //! substitute a fake.
+//!
+//! NOTE: the exact mutagen flag names/behavior here are built from docs, not
+//! yet verified against a live `mutagen` — verify when wiring a real server
+//! (spec-remote's standing "the runtime wins" caveat).
 
 use anyhow::{bail, Context, Result};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::workspace;
@@ -21,6 +26,75 @@ fn mutagen_bin() -> String {
 /// directly — so the naming is a stable contract.
 pub fn session_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
+}
+
+/// The `beta` (remote) endpoint mutagen syncs to: `<connection>:<remote_path>`.
+/// `connection` is the SSH host; `remote_path` is resolved the same way `ws
+/// exec` resolves its `cd` target, so sync and exec always agree on the layout.
+fn beta_endpoint(connection: &str, remote_path: &str) -> String {
+    format!("{connection}:{remote_path}")
+}
+
+/// Create a two-way sync between the local worktree (`local`) and the server
+/// (`<connection>:<remote_path>`). `ignores` keeps per-worktree artifacts
+/// (node_modules, vendor) off the wire; `--ignore-vcs` drops the worktree's
+/// `.git` pointer (meaningless on the server). Idempotent: an existing session
+/// of the same name is treated as success.
+pub fn create(
+    session: &str,
+    local: &Path,
+    connection: &str,
+    remote_path: &str,
+    ignores: &[String],
+) -> Result<()> {
+    let beta = beta_endpoint(connection, remote_path);
+    let mut cmd = Command::new(mutagen_bin());
+    cmd.args(["sync", "create", "--name", session, "--ignore-vcs"]);
+    for ig in ignores {
+        cmd.arg(format!("--ignore={ig}"));
+    }
+    cmd.arg(local).arg(&beta);
+    let out = cmd
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("spawn {}", mutagen_bin()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // Idempotent: a session with this name already exists → fine.
+        if err.contains("already exists") || err.contains("in use") {
+            return Ok(());
+        }
+        bail!("mutagen sync create: {}", first_line(&err));
+    }
+    Ok(())
+}
+
+/// Terminate a sync session. Best-effort: a session that's already gone (never
+/// created, or removed out of band) is not an error.
+pub fn terminate(session: &str) -> Result<()> {
+    let out = Command::new(mutagen_bin())
+        .args(["sync", "terminate", session])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("spawn {}", mutagen_bin()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // No such session → already gone, treat as success.
+        if err.contains("did not match")
+            || err.contains("unable to locate")
+            || err.contains("no sessions")
+        {
+            return Ok(());
+        }
+        bail!("mutagen sync terminate: {}", first_line(&err));
+    }
+    Ok(())
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed").trim()
 }
 
 /// Flush a sync session so the far side has the latest edits. Best-effort by
@@ -53,5 +127,13 @@ mod tests {
         assert_eq!(session_name("feat/foo", "api"), "ws-feat-foo-api");
         assert_eq!(session_name("bug/nested/x", "web"), "ws-bug-nested-x-web");
         assert_eq!(session_name("plain", "api"), "ws-plain-api");
+    }
+
+    #[test]
+    fn beta_endpoint_is_scp_style() {
+        assert_eq!(
+            beta_endpoint("srv", "workspace/feat-foo/api"),
+            "srv:workspace/feat-foo/api"
+        );
     }
 }

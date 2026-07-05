@@ -3,6 +3,47 @@ mod common;
 use common::{stderr, WorkspaceFixture};
 
 #[test]
+fn new_on_a_remote_workspace_creates_a_sync_session() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{"repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
+    );
+    let mg = f.arg_recorder("fake-mutagen");
+    let args = f.path().join("mutagen-args.txt");
+
+    let out = f.run_with_env(
+        &["new", "api", "feat/foo"],
+        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&args).expect("mutagen was invoked");
+    // sync create --name ws-feat-foo-api --ignore-vcs <local> srv:workspace/feat-foo/api
+    assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
+    assert!(rec.contains("ws-feat-foo-api"), "expected the session name:\n{rec}");
+    assert!(rec.contains("--ignore-vcs"), "expected --ignore-vcs:\n{rec}");
+    assert!(
+        rec.contains("srv:workspace/feat-foo/api"),
+        "expected the scp-style beta endpoint:\n{rec}"
+    );
+}
+
+#[test]
+fn new_without_a_remote_block_does_not_sync() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    let mg = f.arg_recorder("fake-mutagen");
+    let args = f.path().join("mutagen-args.txt");
+
+    let out = f.run_with_env(
+        &["new", "api", "feat/foo"],
+        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!args.exists(), "no mutagen calls without a remote block");
+}
+
+#[test]
 fn a_tag_named_main_does_not_shadow_the_default_branch() {
     // Regression: default-branch resolution must probe fully-qualified refspecs
     // so a *tag* called `main` can't be picked as the start-point. Here the repo

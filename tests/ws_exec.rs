@@ -14,24 +14,6 @@ fn write_remote(f: &WorkspaceFixture, connection: &str) {
     .expect("write .ws.json");
 }
 
-/// Drop an executable stub script at `<root>/<name>` that appends each argument
-/// (one per line) to the file named by env var `$ARGS_FILE`, then exits 0.
-/// Stands in for `ssh`/`mutagen` so tests can assert what `ws` would invoke.
-fn write_arg_recorder(f: &WorkspaceFixture, name: &str) -> std::path::PathBuf {
-    let path = f.path().join(name);
-    std::fs::write(
-        &path,
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\n",
-    )
-    .expect("write recorder");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    path
-}
-
 #[test]
 fn local_exec_runs_in_the_worktree() {
     let f = WorkspaceFixture::with_repos(&["api"]);
@@ -135,7 +117,7 @@ fn remote_workspace_dispatches_over_ssh() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
     write_remote(&f, "srv");
-    let ssh = write_arg_recorder(&f, "fake-ssh");
+    let ssh = f.arg_recorder("fake-ssh");
     let args_file = f.path().join("ssh-args.txt");
 
     let out = f.run_in_env(
@@ -166,7 +148,7 @@ fn local_flag_forces_local_even_when_remote() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
     write_remote(&f, "srv");
-    let ssh = write_arg_recorder(&f, "fake-ssh");
+    let ssh = f.arg_recorder("fake-ssh");
     let args_file = f.path().join("ssh-args.txt");
 
     let out = f.run_in_env(
