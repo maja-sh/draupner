@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config;
+use crate::git;
 use crate::hooks;
 use crate::workspace;
 
@@ -64,7 +65,7 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         if repo_path.join("composer.json").is_file() && repo_path.join("vendor").is_dir() {
             let step = crate::ui::step(repo_name, "vendor/ copied");
             if let Err(e) = copy_vendor(&repo_path, &wt_path) {
-                let _ = remove_worktree(&repo_path, &wt_path);
+                remove_worktree(&repo_path, &wt_path);
                 return Err(e.context("vendor/ copy failed"));
             }
             excludes.push("/vendor".to_string());
@@ -142,7 +143,7 @@ fn fetch_origin(repo: &Path) {
 }
 
 fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
-    let local_exists = git_ref_exists(repo, &format!("refs/heads/{branch}"));
+    let local_exists = git::ref_exists(repo, &format!("refs/heads/{branch}"));
 
     let out = if local_exists {
         Command::new("git")
@@ -154,11 +155,16 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
             .output()
             .context("spawn git worktree add")?
     } else {
-        let remote_exists = git_ref_exists(repo, &format!("refs/remotes/origin/{branch}"));
+        let remote_exists = git::ref_exists(repo, &format!("refs/remotes/origin/{branch}"));
         let start = if remote_exists {
             format!("origin/{branch}")
         } else {
-            resolve_default_start(repo)?
+            git::default_ref(repo).ok_or_else(|| {
+                super::op_failure(format!(
+                    "unable to determine default branch for {}",
+                    repo.display()
+                ))
+            })?
         };
         Command::new("git")
             .arg("-C")
@@ -177,54 +183,6 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn git_ref_exists(repo: &Path, refspec: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", refspec])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn resolve_default_start(repo: &Path) -> Result<String> {
-    if let Some(default) = resolve_origin_head(repo) {
-        return Ok(default);
-    }
-    for (refspec, name) in [
-        ("refs/remotes/origin/main", "origin/main"),
-        ("refs/remotes/origin/master", "origin/master"),
-        ("refs/heads/main", "main"),
-        ("refs/heads/master", "master"),
-    ] {
-        if git_ref_exists(repo, refspec) {
-            return Ok(name.to_string());
-        }
-    }
-    bail!(
-        "unable to determine default branch for {}",
-        repo.display()
-    )
-}
-
-fn resolve_origin_head(repo: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    full.strip_prefix("refs/remotes/").map(String::from)
 }
 
 fn copy_vendor(repo: &Path, wt: &Path) -> Result<()> {
@@ -305,12 +263,14 @@ fn write_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn remove_worktree(repo: &Path, wt: &Path) -> Result<()> {
+/// Best-effort rollback of a half-created worktree. Failures are ignored — this
+/// only runs while unwinding from an earlier error, and the original error is
+/// what the caller propagates.
+fn remove_worktree(repo: &Path, wt: &Path) {
     let _ = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["worktree", "remove", "--force"])
         .arg(wt)
         .output();
-    Ok(())
 }

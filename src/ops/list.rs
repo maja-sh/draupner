@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::config;
+use crate::git;
 use crate::hooks;
 use crate::ui::{ListGroup, ListRow};
 use crate::workspace;
@@ -42,7 +43,7 @@ pub fn run() -> Result<()> {
             }
 
             let (task_key, managed) = classify(&wt_canon, &worktrees_root);
-            let dirty = is_dirty(&wt_path);
+            let dirty = git::is_dirty(&wt_path);
 
             let status = if managed {
                 let hook_override = repo_entry.hook_override("status");
@@ -57,10 +58,7 @@ pub fn run() -> Result<()> {
             };
 
             let note = if managed {
-                match &branch {
-                    None => Some("detached".to_string()),
-                    Some(_) => None,
-                }
+                branch.is_none().then(|| "detached".to_string())
             } else {
                 Some(match &branch {
                     None => "unmanaged, detached".to_string(),
@@ -105,13 +103,10 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
 /// Classify a worktree path. Returns `(task_key, managed)`. Managed worktrees
 /// live under `<root>/.worktrees/<task>/…`; anything else is "(unmanaged)".
 fn classify(wt_canon: &Path, worktrees_root: &Path) -> (String, bool) {
-    if let Ok(rel) = wt_canon.strip_prefix(worktrees_root) {
-        if let Some(first) = rel.components().next() {
-            let task = first.as_os_str().to_string_lossy().into_owned();
-            return (task, true);
-        }
+    match workspace::task_repo_under(wt_canon, worktrees_root) {
+        Some((task, _)) => (task, true),
+        None => ("(unmanaged)".to_string(), false),
     }
-    ("(unmanaged)".to_string(), false)
 }
 
 /// Parse `git worktree list --porcelain` into `(path, branch)` pairs. `branch`
@@ -149,16 +144,4 @@ fn git_worktrees(repo: &Path) -> Vec<(PathBuf, Option<String>)> {
         result.push((path, cur_branch.take()));
     }
     result
-}
-
-fn is_dirty(wt: &Path) -> bool {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["status", "--porcelain"])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => !out.stdout.is_empty(),
-        _ => false,
-    }
 }

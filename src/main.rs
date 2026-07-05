@@ -1,6 +1,7 @@
 mod cli;
 mod compat;
 mod config;
+mod git;
 mod hooks;
 mod mutagen;
 mod obs;

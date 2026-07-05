@@ -50,6 +50,15 @@ fn is_executable(_p: &Path) -> bool {
     true
 }
 
+/// The `WS_*` context every hook receives. Single source of truth for the hook
+/// environment contract, applied by both `run` (streamed) and `capture`.
+fn ws_env(cmd: &mut Command, workspace_root: &Path, repo: &str, branch_sanitized: &str, event: &str) {
+    cmd.env("WS_WORKSPACE_ROOT", workspace_root)
+        .env("WS_REPO", repo)
+        .env("WS_BRANCH_SANITIZED", branch_sanitized)
+        .env("WS_HOOK_NAME", event);
+}
+
 pub fn run(
     workspace_root: &Path,
     hook_rel: &str,
@@ -64,16 +73,14 @@ pub fn run(
     let hook = workspace_root.join(hook_rel);
     let tag = format!("{repo}-{event}");
 
-    let mut child = Command::new(&hook)
-        .arg(worktree_path)
+    let mut cmd = Command::new(&hook);
+    cmd.arg(worktree_path)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("WS_WORKSPACE_ROOT", workspace_root)
-        .env("WS_REPO", repo)
-        .env("WS_BRANCH_SANITIZED", branch_sanitized)
-        .env("WS_HOOK_NAME", event)
+        .stderr(Stdio::piped());
+    ws_env(&mut cmd, workspace_root, repo, branch_sanitized, event);
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", hook.display()))?;
 
@@ -114,18 +121,14 @@ pub fn capture(
     }
     let hook = workspace_root.join(hook_rel);
 
-    let mut child = Command::new(&hook)
-        .arg(worktree_path)
+    let mut cmd = Command::new(&hook);
+    cmd.arg(worktree_path)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env("WS_WORKSPACE_ROOT", workspace_root)
-        .env("WS_REPO", repo)
-        .env("WS_BRANCH_SANITIZED", branch_sanitized)
-        .env("WS_HOOK_NAME", event)
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    ws_env(&mut cmd, workspace_root, repo, branch_sanitized, event);
+    let mut child = cmd.spawn().ok()?;
 
     // Drain stdout on a helper thread so a hook that fills the pipe buffer
     // can't deadlock against our wait loop.

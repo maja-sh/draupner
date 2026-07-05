@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::config;
+use crate::git;
 use crate::workspace;
 
 pub fn run(branch: &str, force: bool) -> Result<()> {
@@ -23,7 +24,7 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     // `--force`. With `--force`, warnings still print (we're overriding them).
     let mut blocking = false;
     for (repo, wt) in &worktrees {
-        let dirty = dirty_files(wt);
+        let dirty = git::dirty_files(wt);
         if !dirty.is_empty() {
             crate::ui::warn(&format!("{repo}: uncommitted changes"), &dirty);
             blocking = true;
@@ -51,21 +52,6 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     crate::ui::summary_ok(&[format!("Removed worktrees for {branch}")]);
     crate::ui::nudge(&format!("ws new <repos> {branch} to recreate"));
     Ok(())
-}
-
-fn dirty_files(wt: &Path) -> Vec<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["status", "--porcelain"])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 /// Commits present locally but not on the tracked upstream. Empty when there's

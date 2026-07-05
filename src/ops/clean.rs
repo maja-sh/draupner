@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::config;
+use crate::git;
 use crate::workspace;
 
 pub fn run(force: bool) -> Result<()> {
@@ -17,7 +18,6 @@ pub fn run(force: bool) -> Result<()> {
     let mut removed = 0usize;
     let mut removable = 0usize;
     let mut kept = 0usize;
-    let mut any = false;
 
     for task_dir in &task_dirs {
         super::bail_if_interrupted()?;
@@ -30,7 +30,6 @@ pub fn run(force: bool) -> Result<()> {
         if worktrees.is_empty() {
             continue;
         }
-        any = true;
 
         match audit(&worktrees, &task_name) {
             Verdict::Remove { branch, reason } => {
@@ -51,7 +50,7 @@ pub fn run(force: bool) -> Result<()> {
         }
     }
 
-    if !any {
+    if removed + removable + kept == 0 {
         crate::ui::clean_empty();
         return Ok(());
     }
@@ -78,12 +77,13 @@ enum Verdict {
 /// keeps the whole task — we never drop work that isn't safely in the default.
 fn audit(worktrees: &[(String, std::path::PathBuf)], task_name: &str) -> Verdict {
     let mut resolved_branch: Option<String> = None;
-    let mut dirty_seen = false;
     let mut unmerged_seen = false;
 
     for (_repo, wt) in worktrees {
-        if is_dirty(wt) {
-            dirty_seen = true;
+        // Dirty dominates — a single dirty repo keeps the whole task, and its
+        // ancestry/branch no longer matter, so stop scanning.
+        if git::is_dirty(wt) {
+            return Verdict::Keep { reason: "dirty".into() };
         }
         if resolved_branch.is_none() {
             resolved_branch = current_branch(wt);
@@ -93,10 +93,6 @@ fn audit(worktrees: &[(String, std::path::PathBuf)], task_name: &str) -> Verdict
         }
     }
 
-    // Dirty dominates unmerged in the reason we surface — either keeps the task.
-    if dirty_seen {
-        return Verdict::Keep { reason: "dirty".into() };
-    }
     if unmerged_seen {
         return Verdict::Keep { reason: "unmerged commits".into() };
     }
@@ -105,18 +101,6 @@ fn audit(worktrees: &[(String, std::path::PathBuf)], task_name: &str) -> Verdict
     // pruning still target the right place when every worktree is detached.
     let branch = resolved_branch.unwrap_or_else(|| task_name.to_string());
     Verdict::Remove { branch, reason: "clean, no unmerged commits".into() }
-}
-
-fn is_dirty(wt: &Path) -> bool {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["status", "--porcelain"])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => !out.stdout.is_empty(),
-        _ => false,
-    }
 }
 
 fn current_branch(wt: &Path) -> Option<String> {
@@ -137,51 +121,13 @@ fn current_branch(wt: &Path) -> Option<String> {
 /// i.e. dropping it loses nothing. False when no default can be resolved
 /// (conservative: keep rather than risk deleting unmerged work).
 fn is_ancestor_of_default(wt: &Path) -> bool {
-    let Some(default) = default_ref(wt) else {
+    let Some(default) = git::default_ref(wt) else {
         return false;
     };
     Command::new("git")
         .arg("-C")
         .arg(wt)
         .args(["merge-base", "--is-ancestor", "HEAD", &default])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn default_ref(wt: &Path) -> Option<String> {
-    if let Some(head) = symbolic_origin_head(wt) {
-        return Some(head);
-    }
-    for candidate in ["origin/main", "origin/master", "main", "master"] {
-        if ref_exists(wt, candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    None
-}
-
-fn symbolic_origin_head(wt: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    full.strip_prefix("refs/remotes/").map(String::from)
-}
-
-fn ref_exists(wt: &Path, refname: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["rev-parse", "--verify", "--quiet", refname])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

@@ -35,7 +35,7 @@ pub fn remove_task(
         // Resource teardown hooks — best-effort. A failing hook is reported but
         // doesn't stop removal (the user wants the worktree gone).
         for event in ["down", "post-remove"] {
-            let hook_override = repo_hook_override(cfg, repo, event);
+            let hook_override = cfg.hook_override(repo, event);
             if let Some(rel) = hooks::lookup(root, repo, event, hook_override) {
                 let step = crate::ui::step(repo, &format!("{event} hook"));
                 match hooks::run(root, &rel, wt, repo, &sanitized, event) {
@@ -75,13 +75,6 @@ pub fn remove_task(
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
 
     Ok(hook_failed)
-}
-
-pub fn repo_hook_override<'a>(cfg: &'a WsConfig, repo: &str, event: &str) -> Option<&'a str> {
-    cfg.repos
-        .iter()
-        .find(|r| r.name() == repo)
-        .and_then(|r| r.hook_override(event))
 }
 
 fn remove_if_symlink(p: &Path) {

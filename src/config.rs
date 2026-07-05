@@ -63,8 +63,18 @@ pub struct RepoConfig {
     pub worktree_excludes: Vec<String>,
 }
 
+impl WsConfig {
+    /// Resolve a repo's hook-path override for `event`, if it declares one.
+    /// The single lookup shared by the hook-running ops.
+    pub fn hook_override(&self, repo: &str, event: &str) -> Option<&str> {
+        self.repos
+            .iter()
+            .find(|r| r.name() == repo)
+            .and_then(|r| r.hook_override(event))
+    }
+}
+
 impl RepoEntry {
-    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         match self {
             RepoEntry::Name(s) => s,
@@ -72,7 +82,6 @@ impl RepoEntry {
         }
     }
 
-    #[allow(dead_code)]
     pub fn hook_override(&self, event: &str) -> Option<&str> {
         match self {
             RepoEntry::Name(_) => None,
@@ -80,7 +89,6 @@ impl RepoEntry {
         }
     }
 
-    #[allow(dead_code)]
     pub fn worktree_excludes(&self) -> &[String] {
         match self {
             RepoEntry::Name(_) => &[],
@@ -90,14 +98,12 @@ impl RepoEntry {
 }
 
 /// Load a workspace config from `<workspace-root>/.ws.json`.
-#[allow(dead_code)]
 pub fn load(root: &Path) -> Result<WsConfig> {
     read_json(&root.join(".ws.json"))
 }
 
 /// Load the per-machine overlay from `<workspace-root>/.ws.json.local`. A
 /// missing file is not an error — it means "no local overrides" (default).
-#[allow(dead_code)]
 pub fn load_local(root: &Path) -> Result<LocalConfig> {
     let p = root.join(".ws.json.local");
     if !p.exists() {
@@ -106,7 +112,6 @@ pub fn load_local(root: &Path) -> Result<LocalConfig> {
     read_json(&p)
 }
 
-#[allow(dead_code)]
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
     let raw = std::fs::read_to_string(p)
         .with_context(|| format!("read {}", p.display()))?;

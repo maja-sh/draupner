@@ -29,7 +29,6 @@ pub(crate) fn preflight(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 2, msg: msg.into() }.into()
 }
 
-#[allow(dead_code)]
 pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into() }.into()
 }

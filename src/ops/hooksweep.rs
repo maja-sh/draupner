@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 
-use crate::config::{self, WsConfig};
+use crate::config;
 use crate::hooks;
 use crate::workspace;
 
@@ -57,7 +57,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
-        let hook_override = repo_hook_override(&cfg, repo, event);
+        let hook_override = cfg.hook_override(repo, event);
         let Some(rel) = hooks::lookup(&ws.root, repo, event, hook_override) else {
             crate::ui::skip(repo, &format!("no {event} hook"));
             result.skipped.push(repo.clone());
@@ -78,11 +78,4 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     }
 
     Ok(result)
-}
-
-fn repo_hook_override<'a>(cfg: &'a WsConfig, repo: &str, event: &str) -> Option<&'a str> {
-    cfg.repos
-        .iter()
-        .find(|r| r.name() == repo)
-        .and_then(|r| r.hook_override(event))
 }

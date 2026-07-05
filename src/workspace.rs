@@ -2,13 +2,11 @@ use anyhow::{bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 pub struct Workspace {
     pub root: PathBuf,
 }
 
 /// Walk upward from CWD looking for a `.ws.json` file. Fails if none found.
-#[allow(dead_code)]
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
@@ -24,26 +22,22 @@ pub fn locate() -> Result<Workspace> {
 }
 
 /// Sanitize a branch name for filesystem use — replaces `/` with `-`.
-#[allow(dead_code)]
 pub fn sanitize_branch(b: &str) -> String {
     b.replace('/', "-")
 }
 
 /// `<root>/.worktrees/<sanitized-branch>/`
-#[allow(dead_code)]
 pub fn task_dir(root: &Path, branch: &str) -> PathBuf {
     root.join(".worktrees").join(sanitize_branch(branch))
 }
 
 /// `<root>/.worktrees/<sanitized-branch>/<repo>/` if the worktree exists on disk.
-#[allow(dead_code)]
 pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     let p = task_dir(root, branch).join(repo);
     p.is_dir().then_some(p)
 }
 
 /// Return all repo worktrees for a branch (repo name + path pairs).
-#[allow(dead_code)]
 pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
     list_child_dirs(&task_dir(root, branch))
         .into_iter()
@@ -52,12 +46,26 @@ pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
 }
 
 /// Every task dir under `.worktrees/`. Used by `ws list` and `ws clean`.
-#[allow(dead_code)]
 pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
     list_child_dirs(&root.join(".worktrees"))
         .into_iter()
         .map(|(_, path)| path)
         .collect()
+}
+
+/// If `path` is inside `<worktrees_root>/<task>[/<repo>/…]`, return the task dir
+/// name and (when the path reaches into a repo) that repo name. Both paths are
+/// expected to be canonical. The single source of truth for CWD→task/repo
+/// inference used by `ws here`, `ws exec`, and `ws list`.
+pub fn task_repo_under(
+    path: &Path,
+    worktrees_root: &Path,
+) -> Option<(String, Option<String>)> {
+    let rel = path.strip_prefix(worktrees_root).ok()?;
+    let mut comps = rel.components();
+    let task = comps.next()?.as_os_str().to_string_lossy().into_owned();
+    let repo = comps.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
+    Some((task, repo))
 }
 
 /// Is this path a git repo? Handles both plain repos (has `.git/`) and worktrees (has `.git` file).
@@ -98,6 +106,26 @@ mod tests {
     fn task_dir_layout() {
         let root = Path::new("/ws/foo");
         assert_eq!(task_dir(root, "feat/bar"), Path::new("/ws/foo/.worktrees/feat-bar"));
+    }
+
+    #[test]
+    fn task_repo_under_extracts_task_and_repo() {
+        let root = Path::new("/ws/proj/.worktrees");
+        assert_eq!(
+            task_repo_under(Path::new("/ws/proj/.worktrees/feat-foo/api/src"), root),
+            Some(("feat-foo".into(), Some("api".into())))
+        );
+        // Task dir itself — no repo component.
+        assert_eq!(
+            task_repo_under(Path::new("/ws/proj/.worktrees/bug-bar"), root),
+            Some(("bug-bar".into(), None))
+        );
+        // Outside the tree, and a sibling-prefix collision, both yield None.
+        assert_eq!(task_repo_under(Path::new("/ws/proj/api/src"), root), None);
+        assert_eq!(
+            task_repo_under(Path::new("/ws/proj/.worktrees-backup/feat-foo/api"), root),
+            None
+        );
     }
 
     #[test]
