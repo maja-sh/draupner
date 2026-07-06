@@ -119,7 +119,7 @@ pub enum RepoKind {
 }
 
 /// A single service within a repo: its port and whether it's HTTP-routed.
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 pub struct ServiceConfig {
     /// HTTP routing. A string is the subdomain (`"api"` → `<branch>.api.<domain>`);
     /// `true` routes it using the service name as the subdomain; absent or `false`
@@ -134,8 +134,27 @@ pub struct ServiceConfig {
     pub shared: bool,
 }
 
+impl ServiceConfig {
+    /// The HTTP subdomain label for this service, or `None` when it's a raw-TCP
+    /// service (gets an allocated host port instead). A `true` decl routes under
+    /// the service's own name; a string decl gives an explicit label.
+    pub fn subdomain<'a>(&'a self, service_name: &'a str) -> Option<&'a str> {
+        match &self.http {
+            Some(HttpDecl::Subdomain(s)) => Some(s),
+            Some(HttpDecl::Enabled(true)) => Some(service_name),
+            _ => None,
+        }
+    }
+
+    /// Whether this service is HTTP-routed (via Caddy) rather than a raw-TCP
+    /// service that needs an allocated host port.
+    pub fn is_http(&self) -> bool {
+        matches!(self.http, Some(HttpDecl::Subdomain(_)) | Some(HttpDecl::Enabled(true)))
+    }
+}
+
 /// How a service participates in HTTP routing.
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 #[serde(untagged)]
 pub enum HttpDecl {
     /// Explicit subdomain label.
@@ -216,6 +235,13 @@ impl RepoEntry {
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
     read_json(&root.join(".ws.json"))
+}
+
+/// Write `value` as pretty JSON with a trailing newline. The single home for
+/// the on-disk JSON style `ws` writes (`.ws.json`, the schema, `.ws-meta`).
+pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(value)?;
+    std::fs::write(path, format!("{s}\n")).with_context(|| format!("write {}", path.display()))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {

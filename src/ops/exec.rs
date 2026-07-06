@@ -9,6 +9,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use crate::config;
+use crate::inject;
 use crate::mutagen;
 use crate::remote;
 use crate::workspace;
@@ -42,7 +43,16 @@ pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) 
     }
 
     let remote = if local { None } else { cfg.remote.as_ref() };
-    let env: [(&str, &str); 2] = [("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
+
+    // Give the command the same routing context as the scripts. A local run is
+    // where the stack lives, so it allocates host ports (but doesn't render
+    // templates — exec is a command runner); a remote run only loads whatever
+    // was recorded, since the server owns the remote ports (out of scope here).
+    let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
+    let wt = workspace::task_dir(&ws.root, &task).join(&repo);
+    let injected = inject::prepare(&cfg, &ws.root, &wt, &task, &repo, phase)?;
+    let mut env: Vec<(&str, &str)> = vec![("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
+    env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     let status = match remote {
         Some(r) => exec_remote(r, &ws.root, &task, &repo, no_flush, &env, command),

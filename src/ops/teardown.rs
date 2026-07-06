@@ -12,7 +12,9 @@ use std::process::Command;
 
 use crate::config::WsConfig;
 use crate::hooks;
+use crate::inject;
 use crate::mutagen;
+use crate::ports;
 use crate::workspace;
 
 /// Tear down every worktree of a task. Runs teardown hooks, removes the
@@ -33,12 +35,16 @@ pub fn remove_task(
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
+        // Teardown events only read the existing allocation (never allocate).
+        let extra_env =
+            inject::prepare(cfg, root, wt, &sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
+
         // Resource teardown hooks — best-effort. A failing hook is reported but
         // doesn't stop removal (the user wants the worktree gone).
         for event in ["down", "post-remove"] {
             if let Some(action) = hooks::resolve(cfg, root, repo, event) {
                 let step = crate::ui::step(repo, &format!("{event} hook"));
-                match hooks::run_action(root, wt, repo, &sanitized, event, &action) {
+                match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
                     Ok(()) => step.ok(),
                     Err(e) => {
                         step.fail(&format!("{e}"));
@@ -47,6 +53,11 @@ pub fn remove_task(
                 }
             }
         }
+
+        // Free the host ports this worktree held, now that its teardown hooks
+        // have run. Done before the worktree removal so a failed `git worktree
+        // remove` (which aborts the op) can't leak the `.ws-meta` reservation.
+        ports::forget(root, &sanitized, repo);
 
         // Remote workspace → tear down the file sync before we delete the
         // worktree (so mutagen stops watching a dir that's about to vanish).

@@ -97,6 +97,15 @@ fn ws_env(cmd: &mut Command, workspace_root: &Path, repo: &str, branch_sanitized
         .env("WS_HOOK_NAME", event);
 }
 
+/// Apply the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
+/// `env` mappings) on top of the base `WS_*` contract. Shared by script and
+/// file commands so both mechanisms see the same routing context.
+fn apply_extra(cmd: &mut Command, extra_env: &[(String, String)]) {
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+}
+
 /// Build the process for a declarative script command: `sh -c <cmd>` with
 /// cwd = the worktree and the `WS_*` env plus `WS_WORKTREE`. The single home for
 /// the script env contract. Stdio is left to the caller.
@@ -107,11 +116,13 @@ fn script_command(
     branch_sanitized: &str,
     event: &str,
     cmd: &str,
+    extra_env: &[(String, String)],
 ) -> Command {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd).current_dir(worktree_path);
     ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
     c.env("WS_WORKTREE", worktree_path);
+    apply_extra(&mut c, extra_env);
     c
 }
 
@@ -125,14 +136,18 @@ fn file_command(
     repo: &str,
     branch_sanitized: &str,
     event: &str,
+    extra_env: &[(String, String)],
 ) -> Command {
     let mut c = Command::new(workspace_root.join(hook_rel));
     c.arg(worktree_path).current_dir(workspace_root);
     ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
+    apply_extra(&mut c, extra_env);
     c
 }
 
 /// Run a resolved streaming action (`up` / `down` / `post-create` / `post-remove`).
+/// `extra_env` carries the injection context (`WS_HOST_*`/`WS_PORT_*` + declared
+/// `env`) the caller computed for this repo; pass `&[]` when there's none.
 pub fn run_action(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -140,12 +155,15 @@ pub fn run_action(
     branch_sanitized: &str,
     event: &str,
     action: &Action,
+    extra_env: &[(String, String)],
 ) -> Result<()> {
     match action {
         Action::Script(s) => {
-            run_script(workspace_root, worktree_path, repo, branch_sanitized, event, s)
+            run_script(workspace_root, worktree_path, repo, branch_sanitized, event, s, extra_env)
         }
-        Action::File(rel) => run(workspace_root, rel, worktree_path, repo, branch_sanitized, event),
+        Action::File(rel) => {
+            run(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
+        }
     }
 }
 
@@ -161,9 +179,12 @@ fn run_script(
     branch_sanitized: &str,
     event: &str,
     script: &Script,
+    extra_env: &[(String, String)],
 ) -> Result<()> {
     let joined = script.commands().join(" && ");
-    let mut c = script_command(workspace_root, worktree_path, repo, branch_sanitized, event, &joined);
+    let mut c = script_command(
+        workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
+    );
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = c.spawn().with_context(|| format!("spawn `sh -c` for {event} script"))?;
     let status = stream_and_wait(child, &format!("{repo}-{event}"))?;
@@ -182,12 +203,15 @@ fn run(
     repo: &str,
     branch_sanitized: &str,
     event: &str,
+    extra_env: &[(String, String)],
 ) -> Result<()> {
     if Path::new(hook_rel).is_absolute() {
         bail!("hook path must be relative to the workspace root: {hook_rel}");
     }
     let tag = format!("{repo}-{event}");
-    let mut cmd = file_command(workspace_root, hook_rel, worktree_path, repo, branch_sanitized, event);
+    let mut cmd = file_command(
+        workspace_root, hook_rel, worktree_path, repo, branch_sanitized, event, extra_env,
+    );
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = cmd
         .spawn()
@@ -227,6 +251,7 @@ pub fn capture_action(
     event: &str,
     action: &Action,
     timeout: Duration,
+    extra_env: &[(String, String)],
 ) -> Option<String> {
     let mut cmd = match action {
         // A status probe is normally one command; a `Many` runs as a fail-fast
@@ -234,13 +259,15 @@ pub fn capture_action(
         // captured.
         Action::Script(s) => {
             let joined = s.commands().join(" && ");
-            script_command(workspace_root, worktree_path, repo, branch_sanitized, event, &joined)
+            script_command(
+                workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
+            )
         }
         Action::File(rel) => {
             if Path::new(rel).is_absolute() {
                 return None;
             }
-            file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event)
+            file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
         }
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());

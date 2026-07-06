@@ -134,13 +134,12 @@ fn init_local(
         repos: repos.iter().map(|r| RepoEntry::Name(r.clone())).collect(),
     };
     let cfg_path = root.join(".ws.json");
-    write_json_pretty(&cfg_path, &cfg)
-        .with_context(|| format!("write {}", cfg_path.display()))?;
+    crate::config::write_json_pretty(&cfg_path, &cfg)?;
     step_config.ok();
 
     let step_schema = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
-    write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
+    crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
     step_schema.ok();
 
     let step_hooks = crate::ui::step("hks", ".ws-hooks/ templates");
@@ -176,7 +175,7 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
 
     let step = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
-    write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
+    crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
     step.ok();
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
     Ok(())
@@ -223,12 +222,6 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
-}
-
-fn write_json_pretty<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let s = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{s}\n"))?;
-    Ok(())
 }
 
 fn write_hook_templates(dir: &Path, repos: &[String]) -> Result<()> {

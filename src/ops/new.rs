@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::config;
 use crate::git;
 use crate::hooks;
+use crate::inject;
 use crate::mutagen;
 use crate::remote;
 use crate::workspace;
@@ -85,12 +86,20 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         // A symlinked node_modules is a *file* to git, so a repo's conventional
         // `node_modules/` (trailing slash = dir-only) rule won't match it —
         // without this the worktree reads as permanently dirty.
-        write_worktree_excludes(&wt_path, &excludes)
+        git::add_worktree_excludes(&wt_path, &excludes)
             .with_context(|| format!("register worktree excludes for {repo_name}"))?;
+
+        // Render templates + compute the injection env before post-create so
+        // one-time setup (composer install, migrate) sees the per-worktree
+        // config and `WS_HOST_*`/`WS_PORT_*` values.
+        let extra_env =
+            inject::prepare(&cfg, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate)?;
 
         if let Some(action) = hooks::resolve(&cfg, &ws.root, repo_name, "post-create") {
             let step = crate::ui::step(repo_name, "Post-create hook");
-            hooks::run_action(&ws.root, &wt_path, repo_name, &sanitized, "post-create", &action)?;
+            hooks::run_action(
+                &ws.root, &wt_path, repo_name, &sanitized, "post-create", &action, &extra_env,
+            )?;
             step.ok();
         }
 
@@ -228,56 +237,6 @@ fn symlink_node_modules(repo_name: &str, wt: &Path) -> Result<()> {
     let link = wt.join("node_modules");
     std::os::unix::fs::symlink(&target, &link)
         .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
-    Ok(())
-}
-
-/// Append entries to the worktree's git exclude file (`info/exclude`),
-/// idempotently. Resolves the real exclude path via `git rev-parse` so it works
-/// for a linked worktree's `.git` gitdir pointer. Best-effort on lookup — a
-/// missing exclude path just skips silently.
-fn write_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["rev-parse", "--git-path", "info/exclude"])
-        .output()
-        .context("spawn git rev-parse --git-path")?;
-    if !out.status.success() {
-        return Ok(());
-    }
-    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if raw.is_empty() {
-        return Ok(());
-    }
-    let rel = PathBuf::from(&raw);
-    let path = if rel.is_absolute() { rel } else { wt.join(rel) };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let present: std::collections::HashSet<&str> =
-        existing.lines().map(str::trim).collect();
-
-    let mut content = existing.clone();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    let mut added = false;
-    for e in entries {
-        if !present.contains(e.as_str()) {
-            content.push_str(e);
-            content.push('\n');
-            added = true;
-        }
-    }
-    if added {
-        std::fs::write(&path, content)
-            .with_context(|| format!("write {}", path.display()))?;
-    }
     Ok(())
 }
 

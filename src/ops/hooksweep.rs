@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::config;
 use crate::hooks;
+use crate::inject;
 use crate::workspace;
 
 /// Outcome of a sweep, for the caller to render its own summary from.
@@ -54,6 +55,10 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
     let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
 
+    // `up` activates the stack (allocate ports, render templates); `down` is a
+    // teardown-side event that only reads what's already allocated.
+    let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
+
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
@@ -63,8 +68,20 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         };
 
+        // Compute the injection context (ports/hosts/env) and render templates.
+        // A failure here is isolated per-repo, like a failing hook — it doesn't
+        // strand the other repos in the sweep.
+        let extra_env = match inject::prepare(&cfg, &ws.root, wt, &sanitized, repo, phase) {
+            Ok(env) => env,
+            Err(e) => {
+                crate::ui::step(repo, "inject").fail(&format!("{e}"));
+                result.failed.push(repo.clone());
+                continue;
+            }
+        };
+
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action) {
+        match hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action, &extra_env) {
             Ok(()) => {
                 step.ok();
                 result.ran.push(repo.clone());
