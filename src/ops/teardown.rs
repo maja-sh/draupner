@@ -35,6 +35,16 @@ pub fn remove_task(
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
+        // Host process → stop its `systemd --user` unit before the worktree it
+        // runs in is removed. (Containers are torn down by the `down` hook.)
+        if inject::is_host_repo(cfg, repo) {
+            let step = crate::ui::step(repo, "stop (systemd)");
+            match crate::supervise::down(&crate::supervise::unit_name(branch, repo)) {
+                Ok(()) => step.ok(),
+                Err(e) => step.fail(&format!("{e}")),
+            }
+        }
+
         // Teardown events only read the existing allocation (never allocate).
         let extra_env =
             inject::prepare(cfg, root, wt, &sanitized, repo, inject::Phase::Inspect).unwrap_or_default();

@@ -62,6 +62,14 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
+        // Host processes are supervised as `systemd --user` units, not run as a
+        // blocking hook — `up` launches (detached, crash-restarting), `down`
+        // stops. Their `up` script binds the injected `WS_PORT_*`.
+        if inject::is_host_repo(&cfg, repo) {
+            sweep_host(&cfg, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
+            continue;
+        }
+
         let Some(action) = hooks::resolve(&cfg, &ws.root, repo, event) else {
             crate::ui::skip(repo, &format!("no {event} hook"));
             result.skipped.push(repo.clone());
@@ -94,4 +102,68 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     }
 
     Ok(result)
+}
+
+/// Handle one host repo in a sweep. `up` starts its declared `up` script as a
+/// transient `systemd --user` unit with the injected env; `down` stops the unit.
+#[allow(clippy::too_many_arguments)]
+fn sweep_host(
+    cfg: &config::WsConfig,
+    root: &std::path::Path,
+    wt: &std::path::Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    event: &str,
+    phase: inject::Phase,
+    result: &mut SweepResult,
+) {
+    let unit = crate::supervise::unit_name(branch, repo);
+
+    if event == "down" {
+        let step = crate::ui::step(repo, "stop (systemd)");
+        match crate::supervise::down(&unit) {
+            Ok(()) => {
+                step.ok();
+                result.ran.push(repo.to_string());
+            }
+            Err(e) => {
+                step.fail(&format!("{e}"));
+                result.failed.push(repo.to_string());
+            }
+        }
+        return;
+    }
+
+    // `up`: the launch command is the repo's declared `up` script.
+    let Some(cmd) = cfg
+        .repo_config(repo)
+        .and_then(|rc| rc.scripts.get("up"))
+        .map(|s| s.commands().join(" && "))
+    else {
+        crate::ui::skip(repo, "no up script");
+        result.skipped.push(repo.to_string());
+        return;
+    };
+
+    let extra_env = match inject::prepare(cfg, root, wt, sanitized, repo, phase) {
+        Ok(env) => env,
+        Err(e) => {
+            crate::ui::step(repo, "inject").fail(&format!("{e}"));
+            result.failed.push(repo.to_string());
+            return;
+        }
+    };
+
+    let step = crate::ui::step(repo, "start (systemd)");
+    match crate::supervise::up(&unit, wt, &cmd, &extra_env) {
+        Ok(()) => {
+            step.ok();
+            result.ran.push(repo.to_string());
+        }
+        Err(e) => {
+            step.fail(&format!("{e}"));
+            result.failed.push(repo.to_string());
+        }
+    }
 }

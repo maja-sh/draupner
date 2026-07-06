@@ -96,9 +96,19 @@ pub fn prepare(
     // load here — injecting a local port number into a server-side command or a
     // synced config file would just be wrong. `WS_HOST_*` is unaffected: the
     // routed hostname is location-transparent, identical local or remote.
+    let host = is_host_repo(cfg, repo);
     let port_map = if phase.allocates() && cfg.remote.is_none() {
-        let needs: Vec<String> =
-            services.iter().filter(|(_, s)| !s.is_http()).map(|(n, _)| n.clone()).collect();
+        // A container only needs a host port for its raw-TCP services — HTTP
+        // ones are dialed on the container network. An explicit host repo
+        // allocates one for EVERY service: N host processes on a single machine
+        // can't share a port the way N isolated containers can, so even an HTTP
+        // host service needs its own port to bind (Caddy then routes the host to
+        // `host.containers.internal:<port>`).
+        let needs: Vec<String> = services
+            .iter()
+            .filter(|(_, s)| host || !s.is_http())
+            .map(|(n, _)| n.clone())
+            .collect();
         ports::resolve(root, branch_sanitized, repo, &needs)?
     } else if cfg.remote.is_none() {
         ports::load(root, branch_sanitized, repo)
@@ -117,6 +127,16 @@ pub fn prepare(
         render_all(worktree, rc, &vars)?;
     }
     Ok(env_pairs(rc, &vars))
+}
+
+/// Whether `repo` is an **explicit** `kind: host` process — the trigger for
+/// `systemd --user` supervision and per-service port allocation. Deliberately
+/// requires the explicit kind rather than inferring host from a missing compose
+/// file: supervision changes how `up` runs (detached, journald-logged instead
+/// of a blocking streamed script), so it's opt-in, not a surprise for every
+/// non-compose repo.
+pub fn is_host_repo(cfg: &WsConfig, repo: &str) -> bool {
+    cfg.repo_config(repo).map(|rc| matches!(rc.kind, Some(RepoKind::Host))).unwrap_or(false)
 }
 
 /// The effective services for a repo: for a container repo (explicit `kind` or a
@@ -156,7 +176,7 @@ fn effective_services(
 /// service set (not the raw `.ws-meta` map, which can retain a stale port for a
 /// service that was since removed or flipped to HTTP). HTTP services yield a
 /// hostname (only when a top-level `domain` is set — without one there's no
-/// routing target yet); raw-TCP services yield their recorded host port.
+/// routing target yet); any service that was allocated a host port yields it.
 fn ws_vars(
     services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
@@ -165,17 +185,16 @@ fn ws_vars(
 ) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
     for (name, svc) in services {
-        match svc.subdomain(name) {
-            Some(sub) => {
-                if let Some(d) = domain {
-                    vars.insert(format!("WS_HOST_{name}"), format!("{branch_sanitized}.{sub}.{d}"));
-                }
+        // An HTTP service yields a routed hostname; ANY service that was
+        // allocated a host port yields `WS_PORT` — so a host HTTP service gets
+        // both (its `up` script binds the port, Caddy routes the host to it).
+        if let Some(sub) = svc.subdomain(name) {
+            if let Some(d) = domain {
+                vars.insert(format!("WS_HOST_{name}"), format!("{branch_sanitized}.{sub}.{d}"));
             }
-            None => {
-                if let Some(port) = port_map.get(name) {
-                    vars.insert(format!("WS_PORT_{name}"), port.to_string());
-                }
-            }
+        }
+        if let Some(port) = port_map.get(name) {
+            vars.insert(format!("WS_PORT_{name}"), port.to_string());
         }
     }
     vars

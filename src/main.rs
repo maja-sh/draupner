@@ -12,6 +12,7 @@ mod ports;
 mod remote;
 mod signal;
 mod skills;
+mod supervise;
 mod ui;
 mod workspace;
 
