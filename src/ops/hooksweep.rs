@@ -57,15 +57,14 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
-        let hook_override = cfg.hook_override(repo, event);
-        let Some(rel) = hooks::lookup(&ws.root, repo, event, hook_override) else {
+        let Some(action) = hooks::resolve(&cfg, &ws.root, repo, event) else {
             crate::ui::skip(repo, &format!("no {event} hook"));
             result.skipped.push(repo.clone());
             continue;
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run(&ws.root, &rel, wt, repo, &sanitized, event) {
+        match hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action) {
             Ok(()) => {
                 step.ok();
                 result.ran.push(repo.clone());

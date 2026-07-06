@@ -31,8 +31,12 @@ stub; `git` always runs against real repositories.
 
 ### Set by `ws` for child processes
 
-Hooks (`post-create`, `up`, `down`, `post-remove`, `status`) receive:
-`WS_WORKSPACE_ROOT`, `WS_REPO`, `WS_BRANCH_SANITIZED`, `WS_HOOK_NAME`.
+Lifecycle commands — declared as `scripts` in `.ws.json` (`post-create`, `up`,
+`down`, `post-remove`, `status`), or legacy `.ws-hooks/<repo>/<event>` files as a
+fallback — receive: `WS_WORKSPACE_ROOT`, `WS_REPO`, `WS_BRANCH_SANITIZED`,
+`WS_HOOK_NAME`. Declarative `scripts` run **in the worktree** (cwd) and also get
+`WS_WORKTREE`; legacy hook files run from the workspace root with the worktree
+path as `$1`.
 
 `ws exec` commands receive `WS_REPO` and `WS_BRANCH_SANITIZED` (identical on the
 local and remote paths). Per-worktree routing vars (`WS_HOST_<svc>` /

@@ -20,8 +20,8 @@ pub fn run(
         return refresh_schema_only(&cwd);
     }
 
-    let remote_cfg = build_remote(&cwd, remote, remote_path, domain)?;
-    init_local(&cwd, remote_cfg, no_verify)
+    let remote_cfg = build_remote(&cwd, remote, remote_path)?;
+    init_local(&cwd, remote_cfg, domain, no_verify)
 }
 
 /// Client-side readiness for a remote workspace, checked at config time so a
@@ -46,15 +46,15 @@ fn verify_remote(r: &RemoteConfig) -> Result<()> {
     Ok(())
 }
 
-/// Turn the `--remote[=host]` / `--remote-path` / `--domain` flags into a
-/// `RemoteConfig`, or `None` when `--remote` wasn't given. A bare `--remote`
-/// falls back to `$WS_REMOTE_HOST`. `workspace_path` is written explicitly
-/// (defaulting to the workspace dir name) so it's visible in `.ws.json`.
+/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, or
+/// `None` when `--remote` wasn't given. A bare `--remote` falls back to
+/// `$WS_REMOTE_HOST`. `workspace_path` is written explicitly (defaulting to the
+/// workspace dir name) so it's visible in `.ws.json`. `--domain` is handled
+/// separately — it's top-level now (routing is location-transparent).
 fn build_remote(
     root: &Path,
     remote: Option<Option<String>>,
     remote_path: Option<String>,
-    domain: Option<String>,
 ) -> Result<Option<RemoteConfig>> {
     let Some(conn) = remote else { return Ok(None) };
     let connection = conn
@@ -65,7 +65,7 @@ fn build_remote(
             )
         })?;
     let workspace_path = remote_path.or_else(|| dir_name(root));
-    Ok(Some(RemoteConfig::new(connection, workspace_path, domain)))
+    Ok(Some(RemoteConfig::new(connection, workspace_path)))
 }
 
 /// The basename of `root` as an owned String (the workspace's own dir name).
@@ -73,7 +73,12 @@ fn dir_name(root: &Path) -> Option<String> {
     root.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-fn init_local(root: &Path, remote: Option<RemoteConfig>, no_verify: bool) -> Result<()> {
+fn init_local(
+    root: &Path,
+    remote: Option<RemoteConfig>,
+    domain: Option<String>,
+    no_verify: bool,
+) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
     // Blocks *creating* a nested root, not running `ws` from a subdir (that
@@ -121,6 +126,10 @@ fn init_local(root: &Path, remote: Option<RemoteConfig>, no_verify: bool) -> Res
     let step_config = crate::ui::step("cfg", ".ws.json");
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
+        domain,
+        // Written explicitly (like workspace_path) so the routing runtime is
+        // visible/discoverable in the scaffolded .ws.json.
+        runtime: Some("podman".to_string()),
         remote,
         repos: repos.iter().map(|r| RepoEntry::Name(r.clone())).collect(),
     };

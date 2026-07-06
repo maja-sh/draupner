@@ -1,14 +1,22 @@
-//! Per-repo hook runner. Streams stdout + stderr through `ui::hook_line`
-//! so hook output lands with the correct gutter/indent instead of dumping
-//! raw to the terminal. See `spec-output-formatting.md` for the visual language.
+//! Per-repo lifecycle execution. Two mechanisms behind one interface:
+//!
+//! - **Declarative `scripts`** in `.ws.json` (preferred) — one or more shell
+//!   commands run via `sh -c` in the worktree, with the `WS_*` env.
+//! - **Legacy `.ws-hooks/<repo>/<event>` files** (fallback) — an executable run
+//!   with the worktree path as `$1`, cwd = the workspace root.
+//!
+//! `resolve` picks scripts-first-then-file; `run_action` / `capture_action`
+//! dispatch. Streamed output goes through `ui::hook_line` so it lands with the
+//! correct gutter/indent. See `spec-output-formatting.md`.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config::{Script, WsConfig};
 use crate::ui;
 
 /// Max bytes buffered per streamed line. A hook that emits an unterminated
@@ -16,12 +24,42 @@ use crate::ui;
 /// up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
-/// Find a hook for the given repo and event. Returns the relative path to the
-/// hook if it exists and is executable, or `None` if absent/non-executable.
+/// A resolved lifecycle action for a (repo, event): a declarative `scripts`
+/// entry (preferred) or a legacy `.ws-hooks/` file path (fallback).
+pub enum Action<'a> {
+    Script(&'a Script),
+    /// Path to the hook file, relative to the workspace root.
+    File(String),
+}
+
+/// Resolve the action for `event`: declared `scripts` win; else a `.ws-hooks/`
+/// file (via `lookup`). `None` when neither exists — the caller treats that as
+/// a dim skip.
+pub fn resolve<'a>(
+    cfg: &'a WsConfig,
+    workspace_root: &Path,
+    repo: &str,
+    event: &str,
+) -> Option<Action<'a>> {
+    let rc = cfg.repo_config(repo);
+    if let Some(s) = rc.and_then(|c| c.scripts.get(event)) {
+        return Some(Action::Script(s));
+    }
+    let override_path = rc.and_then(|c| c.hooks.get(event).map(String::as_str));
+    lookup(workspace_root, repo, event, override_path).map(Action::File)
+}
+
+/// Find a legacy hook file for the given repo and event. Returns the relative
+/// path if it exists and is executable, or `None` if absent/non-executable.
 ///
 /// Checks the override path first (from `RepoConfig.hooks`), then falls back
 /// to the convention path `.ws-hooks/<repo>/<event>`.
-pub fn lookup(workspace_root: &Path, repo: &str, event: &str, override_path: Option<&str>) -> Option<String> {
+fn lookup(
+    workspace_root: &Path,
+    repo: &str,
+    event: &str,
+    override_path: Option<&str>,
+) -> Option<String> {
     if let Some(ovr) = override_path {
         let full = workspace_root.join(ovr);
         if full.exists() && is_executable(&full) {
@@ -50,8 +88,8 @@ fn is_executable(_p: &Path) -> bool {
     true
 }
 
-/// The `WS_*` context every hook receives. Single source of truth for the hook
-/// environment contract, applied by both `run` (streamed) and `capture`.
+/// The `WS_*` context every hook/script receives. Single source of truth for the
+/// env contract, applied by streamed and captured runs alike.
 fn ws_env(cmd: &mut Command, workspace_root: &Path, repo: &str, branch_sanitized: &str, event: &str) {
     cmd.env("WS_WORKSPACE_ROOT", workspace_root)
         .env("WS_REPO", repo)
@@ -59,7 +97,85 @@ fn ws_env(cmd: &mut Command, workspace_root: &Path, repo: &str, branch_sanitized
         .env("WS_HOOK_NAME", event);
 }
 
-pub fn run(
+/// Build the process for a declarative script command: `sh -c <cmd>` with
+/// cwd = the worktree and the `WS_*` env plus `WS_WORKTREE`. The single home for
+/// the script env contract. Stdio is left to the caller.
+fn script_command(
+    workspace_root: &Path,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    cmd: &str,
+) -> Command {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(cmd).current_dir(worktree_path);
+    ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
+    c.env("WS_WORKTREE", worktree_path);
+    c
+}
+
+/// Build the process for a legacy hook file: executed directly (honoring its
+/// shebang) with the worktree path as `$1`, cwd = the workspace root. `hook_rel`
+/// must be relative (callers guard). Stdio is left to the caller.
+fn file_command(
+    workspace_root: &Path,
+    hook_rel: &str,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+) -> Command {
+    let mut c = Command::new(workspace_root.join(hook_rel));
+    c.arg(worktree_path).current_dir(workspace_root);
+    ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
+    c
+}
+
+/// Run a resolved streaming action (`up` / `down` / `post-create` / `post-remove`).
+pub fn run_action(
+    workspace_root: &Path,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    action: &Action,
+) -> Result<()> {
+    match action {
+        Action::Script(s) => {
+            run_script(workspace_root, worktree_path, repo, branch_sanitized, event, s)
+        }
+        Action::File(rel) => run(workspace_root, rel, worktree_path, repo, branch_sanitized, event),
+    }
+}
+
+/// Run a declarative script in the worktree via one `sh -c` with cwd = the
+/// worktree and the `WS_*` env (plus `WS_WORKTREE`). A `Many` is joined with
+/// `&&` — sequential and fail-fast, in a single shell so `cd`/env carry across
+/// commands (the same shape `capture_action` uses, so the two agree). Output is
+/// streamed like a hook.
+fn run_script(
+    workspace_root: &Path,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    script: &Script,
+) -> Result<()> {
+    let joined = script.commands().join(" && ");
+    let mut c = script_command(workspace_root, worktree_path, repo, branch_sanitized, event, &joined);
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = c.spawn().with_context(|| format!("spawn `sh -c` for {event} script"))?;
+    let status = stream_and_wait(child, &format!("{repo}-{event}"))?;
+    if !status.success() {
+        bail!("{event} script exited {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+/// Run a legacy hook file: executed directly (honoring its shebang) with the
+/// worktree path as `$1` and cwd = the workspace root.
+fn run(
     workspace_root: &Path,
     hook_rel: &str,
     worktree_path: &Path,
@@ -70,24 +186,27 @@ pub fn run(
     if Path::new(hook_rel).is_absolute() {
         bail!("hook path must be relative to the workspace root: {hook_rel}");
     }
-    let hook = workspace_root.join(hook_rel);
     let tag = format!("{repo}-{event}");
-
-    let mut cmd = Command::new(&hook);
-    cmd.arg(worktree_path)
-        .current_dir(workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    ws_env(&mut cmd, workspace_root, repo, branch_sanitized, event);
-    let mut child = cmd
+    let mut cmd = file_command(workspace_root, hook_rel, worktree_path, repo, branch_sanitized, event);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd
         .spawn()
-        .with_context(|| format!("spawn {}", hook.display()))?;
+        .with_context(|| format!("spawn {}", workspace_root.join(hook_rel).display()))?;
 
+    let status = stream_and_wait(child, &tag)?;
+    if !status.success() {
+        bail!("{hook_rel} exited {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+/// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
+/// wait for exit. Shared by file-hook `run` and declarative `run_script`.
+fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
-    let tag_out = tag.clone();
-    let tag_err = tag.clone();
+    let tag_out = tag.to_string();
+    let tag_err = tag.to_string();
 
     let out_h = thread::spawn(move || pipe(stdout, &tag_out, false));
     let err_h = thread::spawn(move || pipe(stderr, &tag_err, true));
@@ -95,43 +214,43 @@ pub fn run(
     let status = child.wait()?;
     let _ = out_h.join();
     let _ = err_h.join();
-
-    if !status.success() {
-        bail!("{hook_rel} exited {}", status.code().unwrap_or(-1));
-    }
-    Ok(())
+    Ok(status)
 }
 
-/// Run a hook and capture its first non-empty stdout line, giving up after
-/// `timeout`. Used by `ws list` for the read-only `status` hook — output is
-/// captured (not streamed) and a wedged hook can't hang the whole listing.
-///
-/// Returns `None` on spawn failure, non-zero exit, timeout, or empty output.
-pub fn capture(
+/// Run a resolved action for a read-only `status`-style event and capture its
+/// first non-empty stdout line, giving up after `timeout`. Used by `ws list`.
+pub fn capture_action(
     workspace_root: &Path,
-    hook_rel: &str,
     worktree_path: &Path,
     repo: &str,
     branch_sanitized: &str,
     event: &str,
+    action: &Action,
     timeout: Duration,
 ) -> Option<String> {
-    if Path::new(hook_rel).is_absolute() {
-        return None;
-    }
-    let hook = workspace_root.join(hook_rel);
+    let mut cmd = match action {
+        // A status probe is normally one command; a `Many` runs as a fail-fast
+        // `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output is
+        // captured.
+        Action::Script(s) => {
+            let joined = s.commands().join(" && ");
+            script_command(workspace_root, worktree_path, repo, branch_sanitized, event, &joined)
+        }
+        Action::File(rel) => {
+            if Path::new(rel).is_absolute() {
+                return None;
+            }
+            file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event)
+        }
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    capture_child(cmd.spawn().ok()?, timeout)
+}
 
-    let mut cmd = Command::new(&hook);
-    cmd.arg(worktree_path)
-        .current_dir(workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    ws_env(&mut cmd, workspace_root, repo, branch_sanitized, event);
-    let mut child = cmd.spawn().ok()?;
-
-    // Drain stdout on a helper thread so a hook that fills the pipe buffer
-    // can't deadlock against our wait loop.
+/// Drain a child's stdout on a helper thread (so a full pipe buffer can't
+/// deadlock the wait loop), enforce `timeout`, and return its first non-empty
+/// line. `None` on non-zero exit, timeout, or empty output.
+fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
     let mut stdout = child.stdout.take()?;
     let reader = thread::spawn(move || {
         let mut s = String::new();

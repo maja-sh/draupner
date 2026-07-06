@@ -36,10 +36,9 @@ pub fn remove_task(
         // Resource teardown hooks — best-effort. A failing hook is reported but
         // doesn't stop removal (the user wants the worktree gone).
         for event in ["down", "post-remove"] {
-            let hook_override = cfg.hook_override(repo, event);
-            if let Some(rel) = hooks::lookup(root, repo, event, hook_override) {
+            if let Some(action) = hooks::resolve(cfg, root, repo, event) {
                 let step = crate::ui::step(repo, &format!("{event} hook"));
-                match hooks::run(root, &rel, wt, repo, &sanitized, event) {
+                match hooks::run_action(root, wt, repo, &sanitized, event, &action) {
                     Ok(()) => step.ok(),
                     Err(e) => {
                         step.fail(&format!("{e}"));

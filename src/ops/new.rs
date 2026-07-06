@@ -88,10 +88,9 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         write_worktree_excludes(&wt_path, &excludes)
             .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
-        let hook_override = repo_entry.hook_override("post-create");
-        if let Some(hook_rel) = hooks::lookup(&ws.root, repo_name, "post-create", hook_override) {
+        if let Some(action) = hooks::resolve(&cfg, &ws.root, repo_name, "post-create") {
             let step = crate::ui::step(repo_name, "Post-create hook");
-            hooks::run(&ws.root, &hook_rel, &wt_path, repo_name, &sanitized, "post-create")?;
+            hooks::run_action(&ws.root, &wt_path, repo_name, &sanitized, "post-create", &action)?;
             step.ok();
         }
 

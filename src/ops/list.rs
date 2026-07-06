@@ -46,11 +46,10 @@ pub fn run() -> Result<()> {
             let dirty = git::is_dirty(&wt_path);
 
             let status = if managed {
-                let hook_override = repo_entry.hook_override("status");
-                hooks::lookup(&ws.root, repo, "status", hook_override).and_then(|rel| {
+                hooks::resolve(&cfg, &ws.root, repo, "status").and_then(|action| {
                     let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
-                    hooks::capture(
-                        &ws.root, &rel, &wt_path, repo, &sanitized, "status", STATUS_TIMEOUT,
+                    hooks::capture_action(
+                        &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
                     )
                 })
             } else {

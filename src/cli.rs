@@ -20,8 +20,8 @@ enum Cmd {
         /// Server dir the worktrees live under (default: this workspace's dir name)
         #[arg(long, value_name = "PATH", requires = "remote")]
         remote_path: Option<String>,
-        /// Private TLD for per-worktree hostnames (routing; used later)
-        #[arg(long, value_name = "DOMAIN", requires = "remote")]
+        /// Private TLD for per-worktree hostnames (routing; local or remote)
+        #[arg(long, value_name = "DOMAIN")]
         domain: Option<String>,
         /// Skip the SSH reachability check (init refuses an unreachable host by default)
         #[arg(long, requires = "remote")]
