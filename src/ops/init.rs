@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{RemoteConfig, RepoEntry, WsConfig};
-use crate::{mutagen, remote as remotelib};
+use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
+use crate::{compose, mutagen, remote as remotelib};
 
 const HOOK_EVENTS: &[&str] = &["post-create", "up", "down", "post-remove", "status", "test"];
 
@@ -12,6 +12,7 @@ pub fn run(
     remote: Option<Option<String>>,
     remote_path: Option<String>,
     domain: Option<String>,
+    runtime: Option<String>,
     no_verify: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -21,7 +22,7 @@ pub fn run(
     }
 
     let remote_cfg = build_remote(&cwd, remote, remote_path)?;
-    init_local(&cwd, remote_cfg, domain, no_verify)
+    init_local(&cwd, remote_cfg, domain, runtime, no_verify)
 }
 
 /// Client-side readiness for a remote workspace, checked at config time so a
@@ -77,9 +78,12 @@ fn init_local(
     root: &Path,
     remote: Option<RemoteConfig>,
     domain: Option<String>,
+    runtime: Option<String>,
     no_verify: bool,
 ) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
+
+    let runtime = runtime.unwrap_or_else(|| "podman".to_string());
 
     // Blocks *creating* a nested root, not running `ws` from a subdir (that
     // still resolves upward). The hazard: under the outer's `.worktrees/`, an
@@ -129,9 +133,9 @@ fn init_local(
         domain,
         // Written explicitly (like workspace_path) so the routing runtime is
         // visible/discoverable in the scaffolded .ws.json.
-        runtime: Some("podman".to_string()),
+        runtime: Some(runtime.clone()),
         remote,
-        repos: repos.iter().map(|r| RepoEntry::Name(r.clone())).collect(),
+        repos: repos.iter().map(|r| scaffold_repo(root, r, &runtime)).collect(),
     };
     let cfg_path = root.join(".ws.json");
     crate::config::write_json_pretty(&cfg_path, &cfg)?;
@@ -188,6 +192,32 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
         .skip(1)
         .find(|dir| dir.join(".ws.json").is_file())
         .map(Path::to_path_buf)
+}
+
+/// Build a repo entry, scaffolding the auto-derived `services` block when the
+/// repo is a compose project so the routing is visible in `.ws.json` from day
+/// one. Best-effort: if the repo has no compose file, or `compose config` can't
+/// run (runtime absent), it stays a bare-name entry — `ws up` re-derives live
+/// regardless.
+fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
+    let repo_dir = root.join(name);
+    if compose::has_compose_file(&repo_dir) {
+        if let Ok(services) = compose::derive(runtime, &repo_dir) {
+            if !services.is_empty() {
+                return RepoEntry::Extended(RepoConfig {
+                    name: name.to_string(),
+                    kind: None,
+                    services,
+                    scripts: Default::default(),
+                    env: Default::default(),
+                    templates: Vec::new(),
+                    hooks: Default::default(),
+                    worktree_excludes: Vec::new(),
+                });
+            }
+        }
+    }
+    RepoEntry::Name(name.to_string())
 }
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {

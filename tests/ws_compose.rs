@@ -150,6 +150,33 @@ fn explicit_container_hard_fails_when_derivation_fails() {
     assert!(err.contains("container repo"), "expected the container-derive error:\n{err}");
 }
 
+#[test]
+fn init_scaffolds_derived_services() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(
+        f.path().join("api/docker-compose.yml"),
+        "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
+        \x20 db:\n    image: mysql:8\n    ports: [\"3306\"]\n",
+    )
+    .unwrap();
+
+    // No .ws.json yet — init creates it, scaffolding the derived services.
+    let out = f.run(&["init", "--runtime", "docker"]);
+    assert!(out.status.success(), "init failed:\n{}", stderr(&out));
+
+    let ws_json = std::fs::read_to_string(f.path().join(".ws.json")).unwrap();
+    assert!(ws_json.contains("\"runtime\": \"docker\""), "runtime should be docker:\n{ws_json}");
+    assert!(ws_json.contains("\"services\""), "expected a scaffolded services block:\n{ws_json}");
+    assert!(ws_json.contains("\"web\""), "expected the web service:\n{ws_json}");
+    assert!(ws_json.contains("\"db\""), "expected the db service:\n{ws_json}");
+}
+
 /// Parse the digits in `<marker>NNNNN]`.
 fn port_after(haystack: &str, marker: &str) -> u16 {
     let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
