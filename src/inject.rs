@@ -27,7 +27,8 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::config::{RepoConfig, WsConfig};
+use crate::compose;
+use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
 use crate::git;
 use crate::ports;
 
@@ -54,6 +55,13 @@ impl Phase {
     fn renders(self) -> bool {
         matches!(self, Phase::Activate)
     }
+    /// Whether to auto-derive services from `compose config`. Only when
+    /// activating — deriving shells out to the runtime, too heavy for the
+    /// read-only `ws list`/exec paths, which use the declared `services` and the
+    /// already-recorded ports.
+    fn derives(self) -> bool {
+        matches!(self, Phase::Activate)
+    }
 }
 
 /// Compute the injection env (`WS_HOST_*`/`WS_PORT_*` + declared `env` mappings)
@@ -70,6 +78,18 @@ pub fn prepare(
 ) -> Result<Vec<(String, String)>> {
     let Some(rc) = cfg.repo_config(repo) else { return Ok(Vec::new()) };
 
+    // On an activating event, the live compose derivation is authoritative
+    // (declared `services` overlaid on top); elsewhere use the declared block
+    // and the ports already recorded at `up` time (borrowed — no clone on the
+    // read-only paths, which are the widest fan-out).
+    let derived;
+    let services: &BTreeMap<String, ServiceConfig> = if phase.derives() {
+        derived = effective_services(cfg, worktree, repo, rc)?;
+        &derived
+    } else {
+        &rc.services
+    };
+
     // Host ports are a LOCAL concept: `ws` allocates them on the machine that
     // runs the stack. For a remote workspace the server owns its own ports
     // (allocation there is a later offload slice), so we neither allocate nor
@@ -77,12 +97,8 @@ pub fn prepare(
     // synced config file would just be wrong. `WS_HOST_*` is unaffected: the
     // routed hostname is location-transparent, identical local or remote.
     let port_map = if phase.allocates() && cfg.remote.is_none() {
-        let needs: Vec<String> = rc
-            .services
-            .iter()
-            .filter(|(_, s)| !s.is_http())
-            .map(|(n, _)| n.clone())
-            .collect();
+        let needs: Vec<String> =
+            services.iter().filter(|(_, s)| !s.is_http()).map(|(n, _)| n.clone()).collect();
         ports::resolve(root, branch_sanitized, repo, &needs)?
     } else if cfg.remote.is_none() {
         ports::load(root, branch_sanitized, repo)
@@ -90,24 +106,59 @@ pub fn prepare(
         BTreeMap::new()
     };
 
-    let vars = ws_vars(rc, branch_sanitized, cfg.domain.as_deref(), &port_map);
+    let vars = ws_vars(services, branch_sanitized, cfg.domain.as_deref(), &port_map);
     if phase.renders() {
         render_all(worktree, rc, &vars)?;
     }
     Ok(env_pairs(rc, &vars))
 }
 
-/// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map. HTTP services yield a
-/// hostname (only when a top-level `domain` is set — without one there's no
-/// routing target yet); raw-TCP services yield their allocated host port.
-fn ws_vars(
+/// The effective services for a repo: for a container repo (explicit `kind` or a
+/// compose file present), the live `compose config` derivation with the declared
+/// `services` overlaid on top (declared wins per key); otherwise the declared
+/// block alone.
+///
+/// A failed derivation is fatal for an **explicit** `kind: container` — the user
+/// said it's a container, so a broken compose must surface, not silently bring
+/// up an unrouted stack. When container-ness was merely *inferred* from a compose
+/// file, we fall back to the declared block with a note (the inference is a guess,
+/// and the local-first path shouldn't hard-fail just because the runtime is out).
+fn effective_services(
+    cfg: &WsConfig,
+    worktree: &Path,
+    repo: &str,
     rc: &RepoConfig,
+) -> Result<BTreeMap<String, ServiceConfig>> {
+    if rc.is_container(|| compose::has_compose_file(worktree)) {
+        match compose::derive(cfg.runtime(), worktree) {
+            Ok(mut services) => {
+                services.extend(rc.services.clone());
+                return Ok(services);
+            }
+            Err(e) if rc.kind == Some(RepoKind::Container) => {
+                return Err(e.context(format!("{repo}: `{}` is a container repo but compose config failed", repo)));
+            }
+            Err(e) => {
+                crate::ui::note(&format!("{repo}: compose derive failed ({e}); using declared services"));
+            }
+        }
+    }
+    Ok(rc.services.clone())
+}
+
+/// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*
+/// service set (not the raw `.ws-meta` map, which can retain a stale port for a
+/// service that was since removed or flipped to HTTP). HTTP services yield a
+/// hostname (only when a top-level `domain` is set — without one there's no
+/// routing target yet); raw-TCP services yield their recorded host port.
+fn ws_vars(
+    services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
     domain: Option<&str>,
     port_map: &BTreeMap<String, u16>,
 ) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
-    for (name, svc) in &rc.services {
+    for (name, svc) in services {
         match svc.subdomain(name) {
             Some(sub) => {
                 if let Some(d) = domain {
@@ -223,6 +274,11 @@ mod tests {
         }
     }
 
+    /// The repo's declared services as the sorted map `ws_vars` now takes.
+    fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
+        rc.services.clone()
+    }
+
     #[test]
     fn substitute_only_touches_known_ws_braces() {
         let mut vars = BTreeMap::new();
@@ -254,7 +310,7 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert("mysql".to_string(), 54321u16);
 
-        let vars = ws_vars(&rc, "feat-x", Some("myapp.test"), &ports);
+        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_HOST_admin"], "feat-x.admin.myapp.test");
         assert_eq!(vars["WS_PORT_mysql"], "54321");
@@ -264,7 +320,7 @@ mod tests {
     #[test]
     fn ws_vars_skips_host_without_domain() {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
-        let vars = ws_vars(&rc, "feat-x", None, &BTreeMap::new());
+        let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new());
         assert!(vars.is_empty(), "no domain ⇒ no WS_HOST var: {vars:?}");
     }
 

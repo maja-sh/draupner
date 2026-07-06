@@ -1,5 +1,6 @@
 mod cli;
 mod compat;
+mod compose;
 mod config;
 mod git;
 mod hooks;

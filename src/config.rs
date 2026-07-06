@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 #[derive(Deserialize, Serialize, Default, schemars::JsonSchema)]
@@ -80,8 +80,9 @@ pub struct RepoConfig {
     /// Routing + per-service ports. For a compose repo this is auto-derived from
     /// `<runtime> compose config` at `ws up` and this block is an optional
     /// override layer; for a host repo it's required (nothing to introspect).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub services: HashMap<String, ServiceConfig>,
+    /// A `BTreeMap` so iteration/serialization order is stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub services: BTreeMap<String, ServiceConfig>,
     /// Declarative lifecycle commands, keyed by event (`post-create`, `up`,
     /// `down`, `post-remove`, `status`). Each is one command or an array of
     /// commands, run via `sh -c` with the `WS_*` env forwarded. A value may be a
@@ -132,6 +133,20 @@ pub struct ServiceConfig {
     /// false (isolated). Right for redis/ES; wrong for the SQL DB.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
+}
+
+impl RepoConfig {
+    /// Whether this repo launches as a container (compose) rather than a host
+    /// process. Explicit `kind` wins; otherwise inferred from whether a compose
+    /// file is present (`has_compose` is evaluated lazily, only when needed).
+    /// The single home for the container-vs-host rule the `kind` field documents.
+    pub fn is_container(&self, has_compose: impl FnOnce() -> bool) -> bool {
+        match self.kind {
+            Some(RepoKind::Container) => true,
+            Some(RepoKind::Host) => false,
+            None => has_compose(),
+        }
+    }
 }
 
 impl ServiceConfig {
