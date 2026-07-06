@@ -90,6 +90,48 @@ fn declared_services_override_the_derivation() {
 }
 
 #[test]
+fn read_phases_resolve_derived_services_after_up() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(
+        f.path().join("api/docker-compose.yml"),
+        "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
+        \x20 db:\n    image: mysql:8\n    ports: [\"3306\"]\n",
+    )
+    .unwrap();
+    f.git("api", &["add", "docker-compose.yml"]);
+    f.git("api", &["commit", "-q", "-m", "add compose"]);
+
+    // No declared services — `web`/`db` exist only via derivation. `up` records
+    // the effective set so a later `ws exec` (a read-only, non-deriving phase)
+    // can still resolve their host/port.
+    f.write_ws_json(
+        r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
+            "scripts":{"up":"echo up"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/foo"]);
+    f.run_ok(&["up", "feat/foo"]);
+
+    let out = f.run_in(
+        ".worktrees/feat-foo/api",
+        &["exec", "api", "--", "sh", "-c", "echo H=$WS_HOST_web DB=[$WS_PORT_db]"],
+    );
+    assert!(out.status.success(), "exec failed:\n{}", stderr(&out));
+    let combined = format!("{}{}", common::stdout(&out), stderr(&out));
+    assert!(
+        combined.contains("H=feat-foo.web.myapp.test"),
+        "exec should resolve the derived host from the recorded service set:\n{combined}"
+    );
+    let db = port_after(&combined, "DB=[");
+    assert!((20000..40000).contains(&db), "exec should resolve the derived port ({db}):\n{combined}");
+}
+
+#[test]
 fn explicit_container_hard_fails_when_derivation_fails() {
     // No runtime needed: an explicit `kind: container` pointed at a bogus runtime
     // can't derive, and that must surface loudly rather than bring up an

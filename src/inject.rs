@@ -78,16 +78,16 @@ pub fn prepare(
 ) -> Result<Vec<(String, String)>> {
     let Some(rc) = cfg.repo_config(repo) else { return Ok(Vec::new()) };
 
-    // On an activating event, the live compose derivation is authoritative
-    // (declared `services` overlaid on top); elsewhere use the declared block
-    // and the ports already recorded at `up` time (borrowed — no clone on the
-    // read-only paths, which are the widest fan-out).
-    let derived;
-    let services: &BTreeMap<String, ServiceConfig> = if phase.derives() {
-        derived = effective_services(cfg, worktree, repo, rc)?;
-        &derived
+    // On an activating event the live compose derivation is authoritative
+    // (declared `services` overlaid on top); on read-only phases prefer the
+    // effective set recorded at the last `up` — it covers services that were
+    // auto-derived from compose and never declared — falling back to the
+    // declared block for a worktree that predates the record.
+    let services: BTreeMap<String, ServiceConfig> = if phase.derives() {
+        effective_services(cfg, worktree, repo, rc)?
     } else {
-        &rc.services
+        let recorded = ports::services(root, branch_sanitized, repo);
+        if recorded.is_empty() { rc.services.clone() } else { recorded }
     };
 
     // Host ports are a LOCAL concept: `ws` allocates them on the machine that
@@ -106,7 +106,13 @@ pub fn prepare(
         BTreeMap::new()
     };
 
-    let vars = ws_vars(services, branch_sanitized, cfg.domain.as_deref(), &port_map);
+    // Record the effective service set at `up` so the read-only phases above can
+    // reconstruct hosts/ports for auto-derived services.
+    if phase.derives() {
+        ports::record_services(root, branch_sanitized, repo, &services)?;
+    }
+
+    let vars = ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map);
     if phase.renders() {
         render_all(worktree, rc, &vars)?;
     }

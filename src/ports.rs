@@ -24,6 +24,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::config::ServiceConfig;
+
 /// Port scan window: above the common service defaults, below the ephemeral
 /// range, with room for many parallel worktrees.
 const RANGE: std::ops::Range<u16> = 20000..40000;
@@ -42,6 +44,12 @@ struct Meta {
     /// service name → allocated host port
     #[serde(default)]
     ports: BTreeMap<String, u16>,
+    /// The effective service set recorded at the last `up` (derived + declared),
+    /// so read-only phases (`down`/`status`/`list`/`exec`) can reconstruct
+    /// `WS_HOST_*`/`WS_PORT_*` for services that were auto-derived from compose
+    /// and never declared. Empty for a workspace that predates this.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    services: BTreeMap<String, ServiceConfig>,
 }
 
 fn read_meta(path: &Path) -> Meta {
@@ -59,6 +67,28 @@ fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
 /// when nothing has been allocated yet. Used by read-only / teardown paths.
 pub fn load(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, u16> {
     read_meta(&meta_file(root, branch_sanitized, repo)).ports
+}
+
+/// The effective service set recorded at the last `up`, or empty if none. Read
+/// paths use it so a derived-but-undeclared service still resolves its host/port.
+pub fn services(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, ServiceConfig> {
+    read_meta(&meta_file(root, branch_sanitized, repo)).services
+}
+
+/// Persist the effective service set for a worktree (called at `up`, preserving
+/// the recorded ports). Best-effort context on write failure.
+pub fn record_services(
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+) -> Result<()> {
+    let dir = meta_dir(root);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = meta_file(root, branch_sanitized, repo);
+    let mut meta = read_meta(&path);
+    meta.services = services.clone();
+    write_meta(&path, &meta)
 }
 
 /// Ensure every service in `needs` has a host port, allocating (and persisting)
