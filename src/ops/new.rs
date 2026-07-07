@@ -25,6 +25,15 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
 
     crate::ui::header("ws-new", &format!("{repos_arg} {branch}"));
 
+    // A container repo's post-create (Activate) writes an override that joins the
+    // external `ws-net`; ensure it exists first so a post-create that runs compose
+    // (`compose run --rm app composer install`) doesn't fail on a missing network.
+    if cfg.routing_active() {
+        if let Err(e) = crate::caddy::ensure_net(cfg.runtime()) {
+            crate::ui::note(&format!("ws-net: {e}"));
+        }
+    }
+
     let task_dir = workspace::task_dir(&ws.root, branch);
 
     let mut conflicts = Vec::new();

@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::caddy::WS_NET;
 use crate::config::{HttpDecl, ServiceConfig};
 
 /// Compose files `compose config` discovers, in the order it prefers them. Used
@@ -94,8 +95,9 @@ pub fn write_override(
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
+    join_ws_net: bool,
 ) -> Result<bool> {
-    match render_override(services, port_map, env) {
+    match render_override(services, port_map, env, join_ws_net) {
         Some(content) => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -119,22 +121,24 @@ pub fn write_override(
 /// container). `None` when there's nothing to override — no allocated raw-TCP
 /// port and no declared env.
 ///
-/// **Deliberately partial (see the build plan):** no `ws-net` join and no
-/// `!reset` of HTTP host-ports. An external `ws-net` that doesn't exist yet
-/// would break `compose up`, and dropping the HTTP publish is pointless before
-/// Caddy routes it — both move to slice 6.2.
+/// `join_ws_net` (slice 6.2) adds each HTTP service to the shared `ws-net` so
+/// the containerized Caddy can dial it, plus the top-level external-network
+/// declaration. Still **no `!reset` of HTTP host-ports** — dropping the publish
+/// is 6.2b, once routing is proven the sole path. When `join_ws_net` is false
+/// (no `domain` / remote) this is the 6.1 form: raw-TCP `!override` + env only.
 fn render_override(
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
+    join_ws_net: bool,
 ) -> Option<String> {
     // Compose services that also publish an HTTP port. `ports: !override`
     // replaces a service's *entire* ports list, so reissuing a raw-TCP port on
-    // such a service would clobber its HTTP host-publish — which 6.1 must leave
-    // intact (Caddy/`!reset` is 6.2). So a service mixing HTTP + raw-TCP ports
-    // keeps its base ports untouched; its raw port isn't reissued until 6.2 can
-    // reset the HTTP one cleanly. (The common case — a service is purely HTTP or
-    // purely raw-TCP — is unaffected.)
+    // such a service would clobber its HTTP host-publish — which must stay intact
+    // until 6.2b `!reset`s it. So a service mixing HTTP + raw-TCP ports keeps its
+    // base ports untouched; its raw port isn't reissued yet. (The common case — a
+    // service is purely HTTP or purely raw-TCP — is unaffected.) These are also
+    // exactly the services that join `ws-net` (the ones Caddy dials).
     let http_services: BTreeSet<&str> = services
         .iter()
         .filter(|(_, s)| s.is_http())
@@ -157,15 +161,23 @@ fn render_override(
             ports.entry(name.to_string()).or_default().push((host, svc.port));
         }
     }
-    if ports.is_empty() && env.is_empty() {
+    // Services that join `ws-net` (only when routing is active): the HTTP ones.
+    // Raw-TCP services are reached via their published host port, not by Caddy,
+    // so they stay off the shared network (less cross-project alias exposure).
+    // Borrow `http_services` rather than clone it into a second set.
+    let no_join = BTreeSet::new();
+    let join: &BTreeSet<&str> = if join_ws_net { &http_services } else { &no_join };
+
+    if ports.is_empty() && env.is_empty() && join.is_empty() {
         return None;
     }
 
-    // Services needing an entry: those with a ports override, plus — when
-    // there's declared env — every effective compose service (the `env` block
-    // is repo-level, so it goes to the whole stack; compose merges it into each
-    // service's own `environment`).
+    // Services needing an entry: those with a ports override or a ws-net join,
+    // plus — when there's declared env — every effective compose service (the
+    // `env` block is repo-level, so it goes to the whole stack; compose merges it
+    // into each service's own `environment`).
     let mut names: BTreeSet<String> = ports.keys().cloned().collect();
+    names.extend(join.iter().map(|s| s.to_string()));
     if !env.is_empty() {
         names.extend(services.iter().map(|(k, s)| compose_service(k, s.port).to_string()));
     }
@@ -179,12 +191,18 @@ fn render_override(
                 out.push_str(&format!("      - \"{host}:{internal}\"\n"));
             }
         }
+        if join.contains(name.as_str()) {
+            out.push_str(&format!("    networks:\n      - default\n      - {WS_NET}\n"));
+        }
         if !env.is_empty() {
             out.push_str("    environment:\n");
             for (k, v) in env {
                 out.push_str(&format!("      {k}: {}\n", yaml_dquote(v)));
             }
         }
+    }
+    if !join.is_empty() {
+        out.push_str(&format!("networks:\n  {WS_NET}:\n    external: true\n"));
     }
     Some(out)
 }
@@ -194,7 +212,7 @@ fn render_override(
 /// `<svc>_<internal-port>`, so strip a trailing `_<port>`. (A service literally
 /// named `<x>_<port>` publishing that port collides here — the same accepted
 /// ambiguity `derive` already carries.)
-fn compose_service(key: &str, internal_port: u16) -> &str {
+pub(crate) fn compose_service(key: &str, internal_port: u16) -> &str {
     key.strip_suffix(&format!("_{internal_port}")).unwrap_or(key)
 }
 
@@ -385,7 +403,7 @@ mod tests {
             ("db", svc(None, 3306)),
         ]);
         let ports = [("db".to_string(), 20001u16)].into_iter().collect();
-        let out = render_override(&services, &ports, &[]).expect("some override");
+        let out = render_override(&services, &ports, &[], false).expect("some override");
 
         assert!(out.contains("  db:\n    ports: !override\n      - \"20001:3306\""), "{out}");
         // The HTTP service keeps its host publish in 6.1 (Caddy/`!reset` is 6.2).
@@ -404,7 +422,7 @@ mod tests {
             [("mailpit_1025".to_string(), 20002u16), ("mailpit_8025".to_string(), 20003u16)]
                 .into_iter()
                 .collect();
-        let out = render_override(&services, &ports, &[]).expect("some override");
+        let out = render_override(&services, &ports, &[], false).expect("some override");
 
         assert_eq!(out.matches("mailpit:").count(), 1, "one grouped entry: {out}");
         assert!(out.contains("      - \"20002:1025\""), "{out}");
@@ -419,7 +437,7 @@ mod tests {
         ]);
         let ports = [("db".to_string(), 20001u16)].into_iter().collect();
         let env = [("APP_URL".to_string(), "https://feat-x.web.myapp.test".to_string())];
-        let out = render_override(&services, &ports, &env).expect("some override");
+        let out = render_override(&services, &ports, &env, false).expect("some override");
 
         // Both real compose services get the env (repo-level `env` → whole stack).
         assert_eq!(out.matches("APP_URL:").count(), 2, "{out}");
@@ -431,7 +449,28 @@ mod tests {
     fn override_is_none_when_nothing_to_reissue() {
         // All-HTTP stack, no declared env → nothing for 6.1 to override.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
-        assert!(render_override(&services, &BTreeMap::new(), &[]).is_none());
+        assert!(render_override(&services, &BTreeMap::new(), &[], false).is_none());
+    }
+
+    #[test]
+    fn join_ws_net_adds_http_services_and_external_network() {
+        let services = map(&[
+            ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
+            ("db", svc(None, 3306)),
+        ]);
+        let ports = [("db".to_string(), 20001u16)].into_iter().collect();
+
+        // join off → 6.1 form: db override only, no networks.
+        let off = render_override(&services, &ports, &[], false).unwrap();
+        assert!(!off.contains("ws-net"), "join off must not touch ws-net:\n{off}");
+
+        // join on → web joins ws-net; db keeps its raw-TCP reissue; external net declared.
+        let on = render_override(&services, &ports, &[], true).unwrap();
+        assert!(on.contains("  web:\n    networks:\n      - default\n      - ws-net\n"), "{on}");
+        assert!(on.contains("  db:\n    ports: !override\n"), "db still reissued:\n{on}");
+        assert!(on.contains("networks:\n  ws-net:\n    external: true\n"), "external net decl:\n{on}");
+        // The HTTP publish is not dropped in 6.2a.
+        assert!(!on.contains("!reset"), "{on}");
     }
 
     #[test]
@@ -445,7 +484,7 @@ mod tests {
         ]);
         let ports = [("web_9000".to_string(), 20005u16)].into_iter().collect();
         // No env either → nothing safe to override at all.
-        assert!(render_override(&services, &ports, &[]).is_none());
+        assert!(render_override(&services, &ports, &[], false).is_none());
     }
 
     #[test]

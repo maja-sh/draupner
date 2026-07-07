@@ -239,6 +239,13 @@ impl WsConfig {
     pub fn is_host_repo(&self, repo: &str) -> bool {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
+
+    /// Whether per-worktree HTTP routing is in play: a `domain` is configured
+    /// and the workspace runs locally (remote routing is a later offload slice).
+    /// The single home for the "is routing on" policy the ops consult.
+    pub fn routing_active(&self) -> bool {
+        self.domain.is_some() && self.remote.is_none()
+    }
 }
 
 impl RepoEntry {

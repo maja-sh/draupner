@@ -180,6 +180,10 @@ impl WorkspaceFixture {
             .env_remove("RUST_LOG")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
+            // Treat Caddy as externally managed (dead endpoint) so a test `ws up`
+            // never spins up a real Caddy container / `ws-net`; route calls fail
+            // fast and non-fatally. A routing test can override this.
+            .env("WS_CADDY_ADMIN", "http://127.0.0.1:1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "test")

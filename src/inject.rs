@@ -148,7 +148,12 @@ pub fn prepare(
     if !host && cfg.remote.is_none() && rc.is_container(|| compose::has_compose_file(worktree)) {
         let override_path = ports::override_file(root, branch_sanitized, repo);
         let project = compose::project_name(branch_sanitized, repo);
-        env.extend(compose_env(worktree, &override_path, &project, &services, &port_map, &declared, phase)?);
+        // Join `ws-net` (so Caddy can dial the HTTP services) only when routing
+        // is active. Without it, referencing the external `ws-net` would just
+        // make `compose up` fail for nothing. The op layer (`ws up`/`new`)
+        // ensures the network exists before this override is used.
+        let join_ws_net = cfg.routing_active();
+        env.extend(compose_env(worktree, &override_path, &project, &services, &port_map, &declared, phase, join_ws_net)?);
     }
     Ok(env)
 }
@@ -165,6 +170,7 @@ pub fn prepare(
 ///
 /// Empty when no compose file is present (an explicit `kind: container` with
 /// nothing to find — the derive path already surfaces that fatally on activation).
+#[allow(clippy::too_many_arguments)]
 fn compose_env(
     worktree: &Path,
     override_path: &Path,
@@ -173,6 +179,7 @@ fn compose_env(
     port_map: &BTreeMap<String, u16>,
     declared: &[(String, String)],
     phase: Phase,
+    join_ws_net: bool,
 ) -> Result<Vec<(String, String)>> {
     let base = compose::base_files(worktree);
     if base.is_empty() {
@@ -181,7 +188,7 @@ fn compose_env(
 
     let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
     if phase.writes_override()
-        && compose::write_override(override_path, services, port_map, declared)?
+        && compose::write_override(override_path, services, port_map, declared, join_ws_net)?
     {
         let mut files: Vec<String> =
             base.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -189,6 +196,71 @@ fn compose_env(
         env.push(("COMPOSE_FILE".to_string(), files.join(":")));
     }
     Ok(env)
+}
+
+/// The Caddy routes for a repo's HTTP services: one per HTTP service, matching
+/// `<branch>.<subdomain>.<domain>` and proxying to the worktree's container
+/// (`<project>-<service>-1:<port>`) or host process
+/// (`host.containers.internal:<WS_PORT>`).
+///
+/// Read-only: it uses the effective service set recorded at the last `up` (so
+/// `down`/`rm` resolve the same `@id`s `up` created) and never allocates or
+/// derives. Empty when the repo has no config or no `domain` is set (no routing).
+pub fn routes(
+    cfg: &WsConfig,
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+) -> Vec<crate::caddy::RouteSpec> {
+    let (Some(rc), Some(domain)) = (cfg.repo_config(repo), cfg.domain.as_deref()) else {
+        return Vec::new();
+    };
+    // Prefer the set recorded at `up` (covers auto-derived services); fall back
+    // to the declared block for a worktree that predates the record.
+    let recorded = ports::services(root, branch_sanitized, repo);
+    let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
+    // Only the branch actually taken pays its lookup: a host repo loads the port
+    // map (upstream is its allocated port); a container repo computes the project
+    // name (upstream is the project-qualified container name).
+    let host = rc.is_host();
+    let port_map = if host { ports::load(root, branch_sanitized, repo) } else { BTreeMap::new() };
+    let project = if host { String::new() } else { compose::project_name(branch_sanitized, repo) };
+
+    route_specs(&services, &port_map, host, &project, branch_sanitized, repo, domain)
+}
+
+/// The pure core of [`routes`]: given a resolved service set, build one route
+/// spec per HTTP service. A host service without an allocated port is skipped.
+fn route_specs(
+    services: &BTreeMap<String, ServiceConfig>,
+    port_map: &BTreeMap<String, u16>,
+    host: bool,
+    project: &str,
+    branch_sanitized: &str,
+    repo: &str,
+    domain: &str,
+) -> Vec<crate::caddy::RouteSpec> {
+    let mut out = Vec::new();
+    for (name, svc) in services {
+        let Some(sub) = svc.subdomain(name) else { continue }; // HTTP services only
+        let hostname = ws_host(branch_sanitized, sub, domain);
+        let upstream = if host {
+            // A host process is reached at its allocated port on the host.
+            match port_map.get(name) {
+                Some(port) => format!("host.containers.internal:{port}"),
+                None => continue,
+            }
+        } else {
+            // A container is dialed by its project-qualified name on `ws-net`.
+            format!("{project}-{}-1:{}", compose::compose_service(name, svc.port), svc.port)
+        };
+        out.push(crate::caddy::RouteSpec {
+            id: crate::caddy::route_id(branch_sanitized, repo, name),
+            hostname,
+            upstream,
+        });
+    }
+    out
 }
 
 /// The effective services for a repo: for a container repo (explicit `kind` or a
@@ -232,6 +304,13 @@ fn effective_services(
 /// allocates a port for (`host` repo → every service; container → raw-TCP only),
 /// so a host HTTP service gets both while a container HTTP service never gets a
 /// (possibly stale) port.
+/// The per-worktree hostname for an HTTP service: `<branch>.<subdomain>.<domain>`.
+/// Shared by the `WS_HOST_*` env var and the Caddy route match so the two can't
+/// drift.
+fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
+    format!("{branch_sanitized}.{subdomain}.{domain}")
+}
+
 fn ws_vars(
     services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
@@ -243,7 +322,7 @@ fn ws_vars(
     for (name, svc) in services {
         if let Some(sub) = svc.subdomain(name) {
             if let Some(d) = domain {
-                vars.insert(format!("WS_HOST_{name}"), format!("{branch_sanitized}.{sub}.{d}"));
+                vars.insert(format!("WS_HOST_{name}"), ws_host(branch_sanitized, sub, d));
             }
         }
         if host || !svc.is_http() {
@@ -353,6 +432,42 @@ mod tests {
     /// The repo's declared services as the sorted map `ws_vars` now takes.
     fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
         rc.services.clone()
+    }
+
+    #[test]
+    fn route_specs_container_upstreams_and_http_filter() {
+        // web (HTTP 80) + admin (HTTP 8080) + mysql (raw-TCP) — only the HTTP
+        // ones route, each dialing its project-qualified container name.
+        let services = services(&repo_with(&[
+            ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
+            ("admin", svc(Some(HttpDecl::Enabled(true)), 8080)),
+            ("mysql", svc(None, 3306)),
+        ]));
+        let specs = route_specs(
+            &services, &BTreeMap::new(), false, "feat-x-api", "feat-x", "api", "myapp.test",
+        );
+        assert_eq!(specs.len(), 2, "only HTTP services route: {:?}", specs.iter().map(|r| &r.id).collect::<Vec<_>>());
+        let web = specs.iter().find(|r| r.id == "ws-feat-x-api-web").unwrap();
+        assert_eq!(web.hostname, "feat-x.web.myapp.test");
+        assert_eq!(web.upstream, "feat-x-api-web-1:80");
+        let admin = specs.iter().find(|r| r.id == "ws-feat-x-api-admin").unwrap();
+        assert_eq!(admin.hostname, "feat-x.admin.myapp.test");
+        assert_eq!(admin.upstream, "feat-x-api-admin-1:8080");
+    }
+
+    #[test]
+    fn route_specs_host_upstreams_and_drop_when_no_port() {
+        let services = services(&repo_with(&[
+            ("web", svc(Some(HttpDecl::Subdomain("web".into())), 8080)),
+            ("api", svc(Some(HttpDecl::Enabled(true)), 9000)),
+        ]));
+        // Host repo: upstream is the allocated port via host.containers.internal.
+        // Only `web` has an allocation → `api` (no port) is dropped.
+        let ports = [("web".to_string(), 20001u16)].into_iter().collect();
+        let specs = route_specs(&services, &ports, true, "", "feat-x", "svc", "myapp.test");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].id, "ws-feat-x-svc-web");
+        assert_eq!(specs[0].upstream, "host.containers.internal:20001");
     }
 
     #[test]

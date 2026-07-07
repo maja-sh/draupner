@@ -76,6 +76,20 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // teardown-side event that only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
+    // Bring up the shared routing infra once before the loop. The generated
+    // override joins the external `ws-net`, so a *network* failure would make the
+    // up-hook's `compose up` fail hard — that's fatal and gets a clear error, not
+    // a misleading "skipped". Caddy itself is best-effort: if it won't start, the
+    // HTTP services still publish their host ports in 6.2a (not `!reset` yet), so
+    // the stack is reachable, just unrouted until Caddy is back.
+    if event == "up" && cfg.routing_active() {
+        crate::caddy::ensure_net(cfg.runtime())
+            .map_err(|e| super::op_failure(format!("routing needs the `{}` network: {e}", crate::caddy::WS_NET)))?;
+        if let Err(e) = crate::caddy::ensure_running(cfg.runtime()) {
+            crate::ui::note(&format!("caddy: {e}; services on host ports but unrouted"));
+        }
+    }
+
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
@@ -107,10 +121,51 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
         let res = hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action, &extra_env);
+        let up_ok = res.is_ok();
         result.record(repo, step, res);
+
+        // Sync Caddy routes: add after a successful `up`, remove on `down`.
+        if cfg.routing_active() && (event == "down" || up_ok) {
+            sync_routes(&cfg, &ws.root, &sanitized, repo, event);
+        }
     }
 
     Ok(result)
+}
+
+/// Add (`up`) or remove (`down`) the Caddy routes for a repo's HTTP services.
+/// Best-effort: a routing failure is surfaced but doesn't fail the op — in 6.2
+/// the service is still reachable on its published host port.
+fn sync_routes(
+    cfg: &config::WsConfig,
+    root: &std::path::Path,
+    sanitized: &str,
+    repo: &str,
+    event: &str,
+) {
+    let routes = inject::routes(cfg, root, sanitized, repo);
+    if routes.is_empty() {
+        return;
+    }
+    if event == "down" {
+        for r in &routes {
+            crate::caddy::route_down(&r.id);
+        }
+        return;
+    }
+    let mut hosts = Vec::new();
+    let mut err = None;
+    for r in &routes {
+        match crate::caddy::route_up(&r.id, &r.hostname, &r.upstream) {
+            Ok(()) => hosts.push(r.hostname.clone()),
+            Err(e) => err = Some(format!("{e}")),
+        }
+    }
+    let step = crate::ui::step(repo, "routed");
+    match err {
+        None => step.ok_with(&hosts.join(", ")),
+        Some(e) => step.fail(&e),
+    }
 }
 
 /// Handle one host repo in a sweep. `up` starts its declared `up` script as a
@@ -132,6 +187,9 @@ fn sweep_host(
     if event == "down" {
         let step = crate::ui::step(repo, "stop (systemd)");
         result.record(repo, step, crate::supervise::down(&unit));
+        if cfg.routing_active() {
+            sync_routes(cfg, root, sanitized, repo, "down");
+        }
         return;
     }
 
@@ -160,6 +218,9 @@ fn sweep_host(
             let label = if started { "start (systemd)" } else { "already running (ws down to apply changes)" };
             crate::ui::step(repo, label).ok();
             result.ran.push(repo.to_string());
+            if cfg.routing_active() {
+                sync_routes(cfg, root, sanitized, repo, "up");
+            }
         }
         Err(e) => {
             crate::ui::step(repo, "start (systemd)").fail(&format!("{e}"));

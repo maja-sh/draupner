@@ -69,6 +69,14 @@ pub fn remove_task(
             }
         }
 
+        // Remove this worktree's Caddy routes before `forget` drops the recorded
+        // service set they're derived from. Best-effort: Caddy may not be running.
+        if cfg.routing_active() {
+            for r in inject::routes(cfg, root, &sanitized, repo) {
+                crate::caddy::route_down(&r.id);
+            }
+        }
+
         // Free the host ports this worktree held, now that its teardown hooks
         // have run. Done before the worktree removal so a failed `git worktree
         // remove` (which aborts the op) can't leak the `.ws-meta` reservation.

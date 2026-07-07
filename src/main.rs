@@ -1,3 +1,4 @@
+mod caddy;
 mod cli;
 mod compat;
 mod compose;
