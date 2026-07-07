@@ -47,6 +47,19 @@ pub const HTTPS_PORT: u16 = 8443;
 /// admin unix socket — bind-mounted from `config_dir()` so the host reaches the
 /// socket while `ws-net` cannot.
 const SOCK_MOUNT: &str = "/sock";
+/// Named volume for Caddy's data dir (`/data`): the internal CA root + issued
+/// leaf certs. Persisting it keeps the root stable across container recreation
+/// (so a client trusts it once) and avoids reissuing every leaf on restart.
+const DATA_VOLUME: &str = "ws-caddy-data";
+/// Named volume for Caddy's config dir (`/config`): where `caddy run --resume`
+/// reads and writes its autosave. Persisting it means a recreated `ws-caddy`
+/// reloads every worktree route from its last-known config instead of coming up
+/// empty (routes otherwise live only in Caddy's in-memory admin config).
+const CONFIG_VOLUME: &str = "ws-caddy-config";
+/// The `@id` of the catch-all "stopped stack" route (a hostname with no live
+/// worktree route falls through to it). Distinct from any `route_id`, so route
+/// CRUD for worktree services never touches it.
+const STOPPED_STACK_ID: &str = "ws-stopped-stack";
 
 /// The curl args to reach the admin API for `path`: over the unix socket
 /// (default — no TCP interface, so `ws-net` tenants can't reach it), or the
@@ -131,35 +144,76 @@ pub fn ensure_running(runtime: &str) -> Result<()> {
     let _ = std::fs::remove_file(dir.join("admin.sock"));
 
     if run_caddy(runtime, &dir) {
-        wait_admin_ready();
-        return Ok(());
+        return wait_admin_ready();
     }
     // The run failed — either a peer already started it (name taken, now
     // running → done) or a stale stopped container holds the name (remove it,
     // never a running one, and retry once).
     if container_running(runtime, CADDY_CONTAINER) {
-        return Ok(());
+        return wait_admin_ready();
     }
     let _ = Command::new(runtime).args(["rm", "-f", CADDY_CONTAINER]).output();
     if run_caddy(runtime, &dir) || container_running(runtime, CADDY_CONTAINER) {
-        wait_admin_ready();
-        return Ok(());
+        return wait_admin_ready();
     }
-    bail!("could not start {CADDY_CONTAINER}")
+    bail!("could not start the {CADDY_CONTAINER} container — is the `{runtime}` runtime healthy? (`{runtime} logs {CADDY_CONTAINER}`)")
+}
+
+/// Bring up the shared routing infra for a workspace whose `domain` is set:
+/// create `ws-net`, start Caddy, then probe DNS. Returns a user-facing hint when
+/// `*.<domain>` doesn't resolve yet (routes are live, but a browser won't find
+/// them until `ws setup` (slice 6.3) wires the wildcard), or `None` when DNS is
+/// ready. Both infra steps are **fatal** on failure: since the override drops
+/// HTTP host-ports (`!reset`), Caddy is the only path to an HTTP service, so a
+/// stack brought "up" without it would be a lie. The one owner of the routing
+/// bring-up sequence — callers decide only whether to surface the returned hint.
+pub fn ensure_routing(runtime: &str, domain: &str) -> Result<Option<String>> {
+    ensure_net(runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
+    ensure_running(runtime).context("caddy must be running to route HTTP services")?;
+    Ok((!domain_resolves(domain)).then(|| resolve_hint(domain)))
+}
+
+/// The recipe for reaching a route before `*.<domain>` resolves — the single
+/// owner of this user-facing string (also referenced in the module doc).
+fn resolve_hint(domain: &str) -> String {
+    format!(
+        "`*.{domain}` doesn't resolve yet — reach a route with \
+         `curl --resolve <host>:{HTTPS_PORT}:127.0.0.1 https://<host>:{HTTPS_PORT}`"
+    )
 }
 
 /// `<runtime> run -d` the Caddy container. `dir` (the host config dir) is mounted
 /// so Caddy reads its config and writes the admin socket where the host can reach
-/// it. Only the HTTPS data-plane port is published — the admin API stays on the
-/// unix socket, off every network. Returns whether it started; a name clash (a
-/// peer's container) or any other failure is `false`, not an error.
+/// it; two named volumes persist Caddy's data (`/data`: internal CA + certs) and
+/// config (`/config`: the `--resume` autosave) across recreation. Only the HTTPS
+/// data-plane port is published — the admin API stays on the unix socket, off
+/// every network.
+///
+/// `--resume` reloads the autosaved config when `/config` already holds one (so a
+/// recreated container restores every worktree route); on a fresh box there's no
+/// autosave and `--config` seeds the pinned boot config instead. Returns whether
+/// it started; a name clash (a peer's container) or any other failure is `false`,
+/// not an error.
+///
+/// **Known trade-off (persistence vs the stopped-stack page):** persistence is
+/// aimed at a *Caddy-only* restart (the worktree containers stay up, so restoring
+/// their routes keeps them reachable). After a full host reboot the worktree
+/// containers are usually gone while Caddy's persisted routes remain, so a
+/// restored route to a now-dead upstream yields a 502 rather than the friendly
+/// "run `ws up`" page (which only fires for hostnames with *no* route). Re-running
+/// `ws up` re-homes the route to the live container and heals it. A future
+/// refinement (health-check the upstream, or reconcile routes against live
+/// containers on boot) could close the gap.
 fn run_caddy(runtime: &str, dir: &Path) -> bool {
     Command::new(runtime)
         .args(["run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always"])
         .arg("-p").arg(format!("127.0.0.1:{HTTPS_PORT}:{HTTPS_PORT}"))
         .arg("-v").arg(format!("{}:{SOCK_MOUNT}:Z", dir.display()))
+        .arg("-v").arg(format!("{DATA_VOLUME}:/data"))
+        .arg("-v").arg(format!("{CONFIG_VOLUME}:/config"))
         .arg(CADDY_IMAGE)
         .args(["caddy", "run", "--config"]).arg(format!("{SOCK_MOUNT}/caddy.json"))
+        .arg("--resume")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -167,16 +221,47 @@ fn run_caddy(runtime: &str, dir: &Path) -> bool {
 
 /// Poll the admin API until it answers — Caddy's listener isn't up the instant
 /// `run -d` returns, so the immediately-following `route_up` could otherwise hit
-/// a not-yet-listening socket. Best-effort with a short budget.
-fn wait_admin_ready() {
+/// a not-yet-listening socket. Fails with a clear message if it never answers
+/// within the budget (a started-but-wedged Caddy, so routing can't proceed).
+fn wait_admin_ready() -> Result<()> {
     for _ in 0..50 {
         let mut args = vec!["-o".to_string(), "/dev/null".to_string()];
         args.extend(admin_args("/config/"));
         if curl(&args).map(|o| o.ok).unwrap_or(false) {
-            return;
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    bail!("{CADDY_CONTAINER} started but its admin API never answered within 5s — it may be crash-looping (check the {CADDY_CONTAINER} container logs)")
+}
+
+/// Whether the wildcard `*.<domain>` resolves to loopback on this host. Used only
+/// to warn: routing works via `curl --resolve` regardless, and wiring
+/// `*.<domain>` → `127.0.0.1` into the resolver is a privileged one-time step
+/// that `ws setup` (slice 6.3) owns. A `false` here means "routes are live but a
+/// browser won't find them yet".
+///
+/// It requires a **loopback** address specifically, not just any answer: routing
+/// is local-only (the caller gates on `remote.is_none()`), so a correctly wired
+/// wildcard points at `127.0.0.1`. A resolver that synthesizes a public IP for
+/// every unknown name (ISP NXDOMAIN hijacking, a captive portal) would otherwise
+/// read as "resolved" and wrongly suppress the hint.
+///
+/// The probe name normally does *not* resolve (that's what fires the warning),
+/// so it's run on a scratch thread with a short deadline: a slow or unreachable
+/// resolver must not stall every `ws up` for seconds just to print a hint. A
+/// timeout counts as "doesn't resolve" — the safe default (show the hint).
+fn domain_resolves(domain: &str) -> bool {
+    // A label a real service is unlikely to shadow, so a hit means the wildcard
+    // (not a coincidental host) resolves. The port is irrelevant to resolution.
+    let probe = format!("ws-dns-probe.{domain}:{HTTPS_PORT}");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::net::ToSocketAddrs;
+        let ok = probe.to_socket_addrs().map(|mut a| a.any(|s| s.ip().is_loopback())).unwrap_or(false);
+        let _ = tx.send(ok); // receiver may have already timed out; ignore
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or(false)
 }
 
 /// Whether a container by this name is running.
@@ -221,8 +306,25 @@ fn write_boot_config() -> Result<PathBuf> {
 }
 
 /// The Caddy boot config: admin API on a **unix socket** (off every network —
-/// see the module doc), one HTTPS server with an empty route set, and `tls
-/// internal` (Caddy is the local CA).
+/// see the module doc), one HTTPS server whose only route is the catch-all
+/// stopped-stack page (worktree routes prepend ahead of it), and `tls internal`
+/// (Caddy is the local CA).
+///
+/// **On-demand internal TLS.** The catch-all matches hostnames `ws` never
+/// registered as a route (a stack that's down, or never came up), so Caddy has
+/// no ahead-of-time cert for them — `on_demand` lets it mint one from its
+/// internal CA at handshake time, turning what was a raw `tlsv1 internal error`
+/// into the friendly page. Newer Caddy requires an `on_demand.permission` module
+/// before it will issue on-demand — but that gate does **not** apply to the
+/// `internal` issuer (local + free, no exhaustion risk). Verified against the
+/// pinned image (`caddy:2`, v2.11.4): with only `on_demand: true` on an
+/// `internal` policy it minted a cert for an unregistered host and served the
+/// 503 page. So do *not* "fix" this by adding a permission endpoint.
+///
+/// **Seeds only a fresh box.** `run_caddy` passes `--resume`, so once an autosave
+/// exists this boot config is ignored in favour of the persisted one — a change
+/// here won't reach a box that already has a `ws-caddy` autosave (bring it down
+/// / clear the config volume to re-seed).
 fn boot_config() -> serde_json::Value {
     serde_json::json!({
         "admin": { "listen": format!("unix/{SOCK_MOUNT}/admin.sock") },
@@ -230,11 +332,36 @@ fn boot_config() -> serde_json::Value {
             "http": {
                 "https_port": HTTPS_PORT,
                 "servers": {
-                    SERVER: { "listen": [format!(":{HTTPS_PORT}")], "routes": [] }
+                    SERVER: { "listen": [format!(":{HTTPS_PORT}")], "routes": [ stopped_stack_route() ] }
                 }
             },
-            "tls": { "automation": { "policies": [ { "issuers": [ { "module": "internal" } ] } ] } }
+            "tls": { "automation": {
+                "policies": [ { "issuers": [ { "module": "internal" } ], "on_demand": true } ]
+            } }
         }
+    })
+}
+
+/// The catch-all route (no host match ⇒ matches everything). It sits last in the
+/// route list — worktree routes prepend ahead of it (see `route_up`) — so it only
+/// fires for a hostname with no live stack, returning a self-explanatory
+/// "run `ws up`" page (HTTP 503) instead of a bare TLS/connection error.
+fn stopped_stack_route() -> serde_json::Value {
+    let body = "<!doctype html><meta charset=utf-8>\
+        <title>ws — no stack here</title>\
+        <style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1.5rem;line-height:1.5}\
+        code{background:#eee;padding:.15em .4em;border-radius:.3em}</style>\
+        <h1>No stack is running here</h1>\
+        <p>Nothing is routed for this hostname yet. Bring its worktree up with:</p>\
+        <p><code>ws up &lt;branch&gt;</code></p>";
+    serde_json::json!({
+        "@id": STOPPED_STACK_ID,
+        "handle": [ {
+            "handler": "static_response",
+            "status_code": 503,
+            "headers": { "Content-Type": [ "text/html; charset=utf-8" ] },
+            "body": body
+        } ]
     })
 }
 
@@ -254,16 +381,19 @@ fn route(id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
 
 /// Add (or replace) the route for a worktree service. Deletes any prior route
 /// with the same `@id` first so a re-`up` with a changed upstream takes effect,
-/// then appends the fresh one — both scoped operations, never `/load`.
+/// then **inserts the fresh one at index 0** — ahead of the catch-all
+/// stopped-stack route, which must stay last so a specific host match wins.
+/// Both are scoped operations, never `/load`. Order among worktree routes is
+/// irrelevant (each has a distinct host match), so prepending is safe.
 pub fn route_up(id: &str, hostname: &str, upstream: &str) -> Result<()> {
     delete_id(id); // ignore-absent
     let body = route(id, hostname, upstream).to_string();
     let mut args = vec![
-        "-X".to_string(), "POST".to_string(),
+        "-X".to_string(), "PUT".to_string(),
         "-H".to_string(), "Content-Type: application/json".to_string(),
         "-d".to_string(), body,
     ];
-    args.extend(admin_args(&format!("/config/apps/http/servers/{SERVER}/routes")));
+    args.extend(admin_args(&format!("/config/apps/http/servers/{SERVER}/routes/0")));
     check(&curl(&args)?, || format!("add route {id}"))
 }
 
@@ -333,11 +463,29 @@ mod tests {
     }
 
     #[test]
-    fn boot_config_has_internal_tls_and_empty_routes() {
+    fn boot_config_has_on_demand_internal_tls_and_the_catch_all() {
         let c = boot_config();
-        assert_eq!(c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"], "internal");
-        assert_eq!(c["apps"]["http"]["servers"][SERVER]["routes"].as_array().unwrap().len(), 0);
+        let policy = &c["apps"]["tls"]["automation"]["policies"][0];
+        assert_eq!(policy["issuers"][0]["module"], "internal");
+        // On-demand issuance so an unregistered hostname (a down stack) still gets
+        // a cert for the stopped-stack page instead of a TLS error.
+        assert_eq!(policy["on_demand"], true);
         assert_eq!(c["apps"]["http"]["servers"][SERVER]["listen"][0], format!(":{HTTPS_PORT}"));
+
+        // The one boot route is the catch-all; worktree routes prepend ahead of it.
+        let routes = c["apps"]["http"]["servers"][SERVER]["routes"].as_array().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["@id"], STOPPED_STACK_ID);
+    }
+
+    #[test]
+    fn stopped_stack_route_is_an_unmatched_static_page() {
+        let r = stopped_stack_route();
+        // No `match` ⇒ it catches every hostname that no worktree route claimed.
+        assert!(r.get("match").is_none(), "catch-all must not filter by host: {r}");
+        assert_eq!(r["handle"][0]["handler"], "static_response");
+        assert_eq!(r["handle"][0]["status_code"], 503);
+        assert!(r["handle"][0]["body"].as_str().unwrap().contains("ws up"));
     }
 
     #[test]

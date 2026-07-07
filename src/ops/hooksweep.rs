@@ -37,6 +37,7 @@ impl SweepResult {
             }
         }
     }
+
 }
 
 /// Run `event`'s hook across every worktree of `branch`. Prints the op header
@@ -76,17 +77,24 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // teardown-side event that only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
-    // Bring up the shared routing infra once before the loop. The generated
-    // override joins the external `ws-net`, so a *network* failure would make the
-    // up-hook's `compose up` fail hard — that's fatal and gets a clear error, not
-    // a misleading "skipped". Caddy itself is best-effort: if it won't start, the
-    // HTTP services still publish their host ports in 6.2a (not `!reset` yet), so
-    // the stack is reachable, just unrouted until Caddy is back.
-    if event == "up" && cfg.routing_active() {
-        crate::caddy::ensure_net(cfg.runtime())
-            .map_err(|e| super::op_failure(format!("routing needs the `{}` network: {e}", crate::caddy::WS_NET)))?;
-        if let Err(e) = crate::caddy::ensure_running(cfg.runtime()) {
-            crate::ui::note(&format!("caddy: {e}; services on host ports but unrouted"));
+    // Bring up the shared routing infra once before the loop, fatally: since the
+    // override `!reset`s HTTP host-ports, Caddy is the only path to an HTTP
+    // service, so a stack brought "up" without it would be a lie. `ensure_routing`
+    // owns the Caddy-side sequencing (create `ws-net`, start Caddy) + the
+    // DNS-not-ready hint; we decide fatality and surface the hint it returns.
+    //
+    // KNOWN LIMITATION: `routing_active()` is workspace-wide, so this is fatal
+    // even for a sweep whose repos are all raw-TCP (no HTTP service ⇒ no route,
+    // no `ws-net` join) and thus need no Caddy. Niche — a `domain` is set because
+    // some repo routes — and the alternative (deriving every repo's services here
+    // just to decide) isn't worth it. Documented in HANDOFF.
+    if event == "up" {
+        if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
+            match crate::caddy::ensure_routing(cfg.runtime(), domain) {
+                Ok(Some(hint)) => crate::ui::note(&hint),
+                Ok(None) => {}
+                Err(e) => return Err(super::op_failure(format!("{e:#}"))),
+            }
         }
     }
 
@@ -125,6 +133,10 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         result.record(repo, step, res);
 
         // Sync Caddy routes: add after a successful `up`, remove on `down`.
+        // Best-effort per repo — Caddy itself is already confirmed up (the fatal
+        // `ensure_routing` above), so a route failure here is a rare transient
+        // admin error, surfaced on its own step line and recoverable by re-running
+        // `ws up`; the containers are healthy either way.
         if cfg.routing_active() && (event == "down" || up_ok) {
             sync_routes(&cfg, &ws.root, &sanitized, repo, event);
         }
@@ -134,8 +146,10 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 }
 
 /// Add (`up`) or remove (`down`) the Caddy routes for a repo's HTTP services.
-/// Best-effort: a routing failure is surfaced but doesn't fail the op — in 6.2
-/// the service is still reachable on its published host port.
+/// Best-effort per repo: a route-sync failure is surfaced on its own step line
+/// but doesn't fail the op. Caddy itself is already confirmed up (the fatal
+/// `ensure_routing` above), so a failure here is a rare per-route admin error,
+/// recoverable by re-running `ws up`; the containers are healthy either way.
 fn sync_routes(
     cfg: &config::WsConfig,
     root: &std::path::Path,

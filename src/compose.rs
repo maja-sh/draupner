@@ -115,83 +115,112 @@ pub fn write_override(
     }
 }
 
-/// Render the slice-6.1 compose override: a `!override` ports list per raw-TCP
-/// service, republishing it on its allocated host port, plus the declared `env`
-/// materialized as `environment:` entries (a shell env doesn't cross into a
-/// container). `None` when there's nothing to override — no allocated raw-TCP
-/// port and no declared env.
+/// The `ports:` directive to emit for a service. A service that needs no ports
+/// line (base ports left alone) simply gets no entry in the `ports` map.
+enum PortsDirective {
+    /// `ports: !reset []` — drop the host publish entirely (Caddy routes it).
+    Reset,
+    /// `ports: !override [...]` — replace the whole list with these
+    /// `host:internal` reissues.
+    Override(Vec<(u16, u16)>),
+}
+
+/// What the override does to one real compose service.
+#[derive(Default)]
+struct ServicePlan {
+    /// The service publishes an HTTP port (80/443) that Caddy fronts.
+    is_http: bool,
+    /// Allocated host ports to republish for this service's raw-TCP ports.
+    reissue: Vec<(u16, u16)>,
+}
+
+/// Render the compose override: a `ports:` directive per service plus the
+/// declared `env` materialized as `environment:` entries (a shell env doesn't
+/// cross into a container). `None` when there's nothing to emit.
 ///
-/// `join_ws_net` (slice 6.2) adds each HTTP service to the shared `ws-net` so
-/// the containerized Caddy can dial it, plus the top-level external-network
-/// declaration. Still **no `!reset` of HTTP host-ports** — dropping the publish
-/// is 6.2b, once routing is proven the sole path. When `join_ws_net` is false
-/// (no `domain` / remote) this is the 6.1 form: raw-TCP `!override` + env only.
+/// `join_ws_net` (routing active) is the **6.2b flip**: HTTP services join the
+/// shared `ws-net` so the containerized Caddy can dial them, and their host
+/// publish is dropped (`ports: !reset []`, or `!override` with just the raw
+/// reissue for a service that mixes an HTTP and a raw-TCP port) — after this an
+/// HTTP service is reachable *only* through Caddy. When `join_ws_net` is false
+/// (no `domain` / remote) this is the standalone form: raw-TCP `!override` + env,
+/// HTTP services left publishing their host ports (there's no Caddy to route
+/// them, so dropping the publish would strand them).
 fn render_override(
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
     join_ws_net: bool,
 ) -> Option<String> {
-    // Compose services that also publish an HTTP port. `ports: !override`
-    // replaces a service's *entire* ports list, so reissuing a raw-TCP port on
-    // such a service would clobber its HTTP host-publish — which must stay intact
-    // until 6.2b `!reset`s it. So a service mixing HTTP + raw-TCP ports keeps its
-    // base ports untouched; its raw port isn't reissued yet. (The common case — a
-    // service is purely HTTP or purely raw-TCP — is unaffected.) These are also
-    // exactly the services that join `ws-net` (the ones Caddy dials).
-    let http_services: BTreeSet<&str> = services
-        .iter()
-        .filter(|(_, s)| s.is_http())
-        .map(|(k, s)| compose_service(k, s.port))
-        .collect();
-
-    // Group allocated host ports by real compose service name. A `!override`
-    // replaces a service's whole ports list, so a multi-port service's ports
-    // must be collected into one entry.
-    let mut ports: BTreeMap<String, Vec<(u16, u16)>> = BTreeMap::new();
+    // Aggregate the effective services by real compose service name — a
+    // multi-port compose service derives as several `<svc>_<port>` keys that all
+    // fold back onto one service block (a `ports:` directive replaces the whole
+    // list, so a service's ports must be planned together).
+    let mut plans: BTreeMap<String, ServicePlan> = BTreeMap::new();
     for (key, svc) in services {
+        let plan = plans.entry(compose_service(key, svc.port).to_string()).or_default();
         if svc.is_http() {
-            continue;
-        }
-        let name = compose_service(key, svc.port);
-        if http_services.contains(name) {
-            continue;
-        }
-        if let Some(&host) = port_map.get(key) {
-            ports.entry(name.to_string()).or_default().push((host, svc.port));
+            plan.is_http = true;
+        } else if let Some(&host) = port_map.get(key) {
+            plan.reissue.push((host, svc.port));
         }
     }
-    // Services that join `ws-net` (only when routing is active): the HTTP ones.
-    // Raw-TCP services are reached via their published host port, not by Caddy,
-    // so they stay off the shared network (less cross-project alias exposure).
-    // Borrow `http_services` rather than clone it into a second set.
-    let no_join = BTreeSet::new();
-    let join: &BTreeSet<&str> = if join_ws_net { &http_services } else { &no_join };
 
-    if ports.is_empty() && env.is_empty() && join.is_empty() {
+    // Decide each service's ports directive and whether it joins `ws-net`. A
+    // service left publishing its base ports gets no `ports` entry at all.
+    let mut ports: BTreeMap<String, PortsDirective> = BTreeMap::new();
+    let mut join: BTreeSet<String> = BTreeSet::new();
+    for (name, plan) in &plans {
+        if plan.is_http && join_ws_net {
+            // Routing active: this HTTP service is dialed by Caddy over `ws-net`,
+            // so drop its host publish. A pure-HTTP service resets to nothing; a
+            // service that also has a raw-TCP port keeps only that (reissued),
+            // which `!override` expresses in one replacement.
+            join.insert(name.clone());
+            let directive = if plan.reissue.is_empty() {
+                PortsDirective::Reset
+            } else {
+                PortsDirective::Override(plan.reissue.clone())
+            };
+            ports.insert(name.clone(), directive);
+        } else if plan.is_http {
+            // No routing (standalone form): leave HTTP (and mixed HTTP+raw)
+            // services publishing their host ports — nothing routes them yet, so
+            // dropping the publish would only strand them. (No `ports` entry.)
+        } else if !plan.reissue.is_empty() {
+            // Raw-TCP-only service: republish on the allocated host port(s).
+            ports.insert(name.clone(), PortsDirective::Override(plan.reissue.clone()));
+        }
+    }
+
+    if ports.is_empty() && env.is_empty() {
         return None;
     }
 
-    // Services needing an entry: those with a ports override or a ws-net join,
-    // plus — when there's declared env — every effective compose service (the
-    // `env` block is repo-level, so it goes to the whole stack; compose merges it
-    // into each service's own `environment`).
+    // Services needing an entry: those with a ports directive (which already
+    // includes every ws-net join — a joined service always gets one), plus —
+    // when there's declared env — every effective compose service (the `env`
+    // block is repo-level, so it goes to the whole stack; compose merges it into
+    // each service's own `environment`).
     let mut names: BTreeSet<String> = ports.keys().cloned().collect();
-    names.extend(join.iter().map(|s| s.to_string()));
     if !env.is_empty() {
-        names.extend(services.iter().map(|(k, s)| compose_service(k, s.port).to_string()));
+        names.extend(plans.keys().cloned());
     }
 
     let mut out = String::from("# Generated by ws — do not edit. Regenerated on `ws up`.\nservices:\n");
     for name in &names {
         out.push_str(&format!("  {name}:\n"));
-        if let Some(list) = ports.get(name) {
-            out.push_str("    ports: !override\n");
-            for (host, internal) in list {
-                out.push_str(&format!("      - \"{host}:{internal}\"\n"));
+        match ports.get(name) {
+            Some(PortsDirective::Reset) => out.push_str("    ports: !reset []\n"),
+            Some(PortsDirective::Override(list)) => {
+                out.push_str("    ports: !override\n");
+                for (host, internal) in list {
+                    out.push_str(&format!("      - \"{host}:{internal}\"\n"));
+                }
             }
+            None => {}
         }
-        if join.contains(name.as_str()) {
+        if join.contains(name) {
             out.push_str(&format!("    networks:\n      - default\n      - {WS_NET}\n"));
         }
         if !env.is_empty() {
@@ -453,38 +482,51 @@ mod tests {
     }
 
     #[test]
-    fn join_ws_net_adds_http_services_and_external_network() {
+    fn join_ws_net_resets_http_publish_and_declares_external_network() {
         let services = map(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("db", svc(None, 3306)),
         ]);
         let ports = [("db".to_string(), 20001u16)].into_iter().collect();
 
-        // join off → 6.1 form: db override only, no networks.
+        // join off → standalone form: db override only, no networks, HTTP web
+        // keeps its host publish (no Caddy to route it).
         let off = render_override(&services, &ports, &[], false).unwrap();
         assert!(!off.contains("ws-net"), "join off must not touch ws-net:\n{off}");
+        assert!(!off.contains("web:"), "HTTP web untouched when routing off:\n{off}");
 
-        // join on → web joins ws-net; db keeps its raw-TCP reissue; external net declared.
+        // join on (6.2b flip) → web drops its host publish and joins ws-net; db
+        // keeps its raw-TCP reissue; the external net is declared.
         let on = render_override(&services, &ports, &[], true).unwrap();
-        assert!(on.contains("  web:\n    networks:\n      - default\n      - ws-net\n"), "{on}");
+        assert!(
+            on.contains("  web:\n    ports: !reset []\n    networks:\n      - default\n      - ws-net\n"),
+            "web must reset its publish and join ws-net:\n{on}"
+        );
         assert!(on.contains("  db:\n    ports: !override\n"), "db still reissued:\n{on}");
         assert!(on.contains("networks:\n  ws-net:\n    external: true\n"), "external net decl:\n{on}");
-        // The HTTP publish is not dropped in 6.2a.
-        assert!(!on.contains("!reset"), "{on}");
     }
 
     #[test]
-    fn override_skips_service_that_also_publishes_http() {
+    fn mixed_http_and_raw_service_keeps_only_the_raw_port_when_routing() {
         // A service publishing 80 (HTTP) + 9000 (raw) derives as `web` + `web_9000`.
-        // Reissuing 9000 via `!override` would wipe the 80 publish, so 6.1 must
-        // leave the whole service's ports alone.
         let services = map(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("web_9000", svc(None, 9000)),
         ]);
         let ports = [("web_9000".to_string(), 20005u16)].into_iter().collect();
-        // No env either → nothing safe to override at all.
+
+        // Routing off: leave the whole service's ports alone (dropping the 80
+        // publish would strand it — nothing routes it yet).
         assert!(render_override(&services, &ports, &[], false).is_none());
+
+        // Routing on: `!override` with just the raw reissue drops the 80 publish
+        // (Caddy routes it) while keeping 9000 reachable on its allocated port.
+        let on = render_override(&services, &ports, &[], true).unwrap();
+        assert!(
+            on.contains("  web:\n    ports: !override\n      - \"20005:9000\"\n    networks:"),
+            "mixed service keeps only its raw port + joins ws-net:\n{on}"
+        );
+        assert!(!on.contains("!reset"), "a mixed service uses !override, not !reset:\n{on}");
     }
 
     #[test]
