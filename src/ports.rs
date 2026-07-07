@@ -39,6 +39,12 @@ fn meta_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
     meta_dir(root).join(format!("{branch_sanitized}-{repo}.json"))
 }
 
+/// The generated compose override for a worktree, alongside its port record in
+/// `.ws-meta`. Gitignored and per-worktree; regenerated on each `up`.
+pub fn override_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
+    meta_dir(root).join(format!("{branch_sanitized}-{repo}.override.yml"))
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Meta {
     /// service name → allocated host port
@@ -133,10 +139,12 @@ pub fn resolve(
     Ok(meta.ports)
 }
 
-/// Drop the persisted allocation for a worktree (frees its ports for reuse).
-/// Best-effort — called from teardown, where a missing file is fine.
+/// Drop the persisted allocation for a worktree (frees its ports for reuse) and
+/// its generated compose override. Best-effort — called from teardown, where a
+/// missing file is fine.
 pub fn forget(root: &Path, branch_sanitized: &str, repo: &str) {
     let _ = std::fs::remove_file(meta_file(root, branch_sanitized, repo));
+    let _ = std::fs::remove_file(override_file(root, branch_sanitized, repo));
 }
 
 /// Every port recorded across the whole `.ws-meta` dir — the set a new

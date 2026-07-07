@@ -91,8 +91,10 @@ pub struct RepoConfig {
     pub scripts: HashMap<String, Script>,
     /// Explicit env-var injection: your app's var name → a `${WS_*}` template.
     /// `ws` owns `WS_HOST_*`/`WS_PORT_*`; you declare which of your vars get them.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
+    /// A `BTreeMap` so injection order (and the generated override's
+    /// `environment:` lines) is deterministic rather than hash-random.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Format-blind config templates (the escape hatch): a committed `src`
     /// rendered to a gitignored `dest` with `${WS_*}` tokens substituted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

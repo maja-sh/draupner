@@ -62,6 +62,13 @@ impl Phase {
     fn derives(self) -> bool {
         matches!(self, Phase::Activate)
     }
+    /// Whether to (re)write the container compose override. Only when
+    /// activating — the same activating concept as `renders`/`derives`, but
+    /// named on its own so the override's write-vs-reuse decision reads
+    /// independently (read/teardown phases reuse the file the last `up` wrote).
+    fn writes_override(self) -> bool {
+        matches!(self, Phase::Activate)
+    }
 }
 
 /// Compute the injection env (`WS_HOST_*`/`WS_PORT_*` + declared `env` mappings)
@@ -126,7 +133,62 @@ pub fn prepare(
     if phase.renders() {
         render_all(worktree, rc, &vars)?;
     }
-    Ok(env_pairs(rc, &vars))
+
+    // Declared `env` mappings with their `${WS_*}` tokens substituted. Fed both
+    // into the script env and (for a container) the override's `environment:`.
+    let declared = declared_env(rc, &vars);
+    let mut env: Vec<(String, String)> =
+        vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    env.extend(declared.iter().cloned());
+
+    // Container repos get the generated compose override + project namespacing
+    // via `COMPOSE_*` env, so N parallel worktrees de-conflict their raw-TCP
+    // host ports. Host repos (not compose) and remote workspaces (the server
+    // owns its ports/override) are excluded.
+    if !host && cfg.remote.is_none() && rc.is_container(|| compose::has_compose_file(worktree)) {
+        let override_path = ports::override_file(root, branch_sanitized, repo);
+        let project = compose::project_name(branch_sanitized, repo);
+        env.extend(compose_env(worktree, &override_path, &project, &services, &port_map, &declared, phase)?);
+    }
+    Ok(env)
+}
+
+/// The `COMPOSE_*` env for a container repo. `COMPOSE_PROJECT_NAME` is set on
+/// every phase (isolation — compose's default project name is the worktree's
+/// dir basename `api`, identical across branches, so distinct stacks would
+/// collide on containers/networks/volumes). `COMPOSE_FILE` (base files plus the
+/// generated override) is set **only on an activating phase**, which is also the
+/// only phase that (re)writes the override: read/teardown/exec phases don't
+/// re-create containers — `down`/`ps`/`exec` target the project by name, and the
+/// override carries only ports/env — so they leave `COMPOSE_FILE` unset rather
+/// than risk referencing an override an edited compose file left stale.
+///
+/// Empty when no compose file is present (an explicit `kind: container` with
+/// nothing to find — the derive path already surfaces that fatally on activation).
+fn compose_env(
+    worktree: &Path,
+    override_path: &Path,
+    project: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    port_map: &BTreeMap<String, u16>,
+    declared: &[(String, String)],
+    phase: Phase,
+) -> Result<Vec<(String, String)>> {
+    let base = compose::base_files(worktree);
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
+    if phase.writes_override()
+        && compose::write_override(override_path, services, port_map, declared)?
+    {
+        let mut files: Vec<String> =
+            base.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        files.push(override_path.to_string_lossy().into_owned());
+        env.push(("COMPOSE_FILE".to_string(), files.join(":")));
+    }
+    Ok(env)
 }
 
 /// The effective services for a repo: for a container repo (explicit `kind` or a
@@ -193,15 +255,11 @@ fn ws_vars(
     vars
 }
 
-/// The final env pairs: every `WS_HOST_*`/`WS_PORT_*` var, then each declared
-/// `env` entry with its `${WS_*}` tokens substituted. Declared entries come last
-/// so a mapping onto an app var name can reference the vars above it.
-fn env_pairs(rc: &RepoConfig, vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    for (key, template) in &rc.env {
-        out.push((key.clone(), substitute(template, vars)));
-    }
-    out
+/// The declared `env` entries with their `${WS_*}` tokens substituted, in
+/// deterministic key order (`rc.env` is a `BTreeMap`). `ws` owns the `WS_*`
+/// values in `vars`; these map them onto the app's own var names.
+fn declared_env(rc: &RepoConfig, vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    rc.env.iter().map(|(k, t)| (k.clone(), substitute(t, vars))).collect()
 }
 
 /// Render every declared template into the worktree, then register all of their
@@ -366,13 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn env_pairs_substitutes_declared_mappings() {
+    fn declared_env_substitutes_declared_mappings() {
         let mut rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
         rc.env.insert("APP_URL".into(), "https://${WS_HOST_app}".into());
         let mut vars = BTreeMap::new();
         vars.insert("WS_HOST_app".to_string(), "feat-x.api.myapp.test".to_string());
 
-        let pairs = env_pairs(&rc, &vars);
+        let pairs = declared_env(&rc, &vars);
         let app_url = pairs.iter().find(|(k, _)| k == "APP_URL").unwrap();
         assert_eq!(app_url.1, "https://feat-x.api.myapp.test");
     }

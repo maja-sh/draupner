@@ -177,6 +177,100 @@ fn init_scaffolds_derived_services() {
     assert!(ws_json.contains("\"db\""), "expected the db service:\n{ws_json}");
 }
 
+#[test]
+fn container_override_deconflicts_raw_tcp_ports() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    // web (HTTP, host-published) + db (raw-TCP). 6.1 reissues db's host port to
+    // the allocated one and leaves web's publish alone.
+    std::fs::write(
+        f.path().join("api/docker-compose.yml"),
+        "services:\n\
+        \x20 web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
+        \x20 db:\n    image: mysql:8\n    ports: [\"3306:3306\"]\n",
+    )
+    .unwrap();
+    f.git("api", &["add", "docker-compose.yml"]);
+    f.git("api", &["commit", "-q", "-m", "add compose"]);
+
+    // The up script validates the merged config (proves `!override` parses on
+    // this compose) and echoes the project name ws injected.
+    f.write_ws_json(
+        r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
+            "scripts":{"up":"docker compose config -q && echo PROJ=$COMPOSE_PROJECT_NAME"}}]}"#,
+    );
+
+    // Two parallel worktrees.
+    f.run_ok(&["new", "api", "feat/a"]);
+    f.run_ok(&["new", "api", "feat/b"]);
+    let err_a = stderr(&f.run_ok(&["up", "feat/a"]));
+    let err_b = stderr(&f.run_ok(&["up", "feat/b"]));
+
+    assert!(err_a.contains("PROJ=feat-a-api"), "project name not namespaced:\n{err_a}");
+    assert!(err_b.contains("PROJ=feat-b-api"), "project name not namespaced:\n{err_b}");
+
+    // The generated overrides reissue db on distinct allocated host ports; web
+    // is untouched (no `!reset` in 6.1).
+    let ov_a = read_override(&f, "feat-a-api");
+    let ov_b = read_override(&f, "feat-b-api");
+    assert!(ov_a.contains("db:") && ov_a.contains("ports: !override"), "no db override:\n{ov_a}");
+    assert!(!ov_a.contains("web:"), "HTTP web must not be in the override:\n{ov_a}");
+    let a = override_port(&ov_a);
+    let b = override_port(&ov_b);
+    assert!((20000..40000).contains(&a), "db host port out of range ({a}):\n{ov_a}");
+    assert_ne!(a, b, "parallel worktrees must reissue db on distinct host ports");
+}
+
+#[test]
+fn container_override_injects_declared_env() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(
+        f.path().join("api/docker-compose.yml"),
+        "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n",
+    )
+    .unwrap();
+    f.git("api", &["add", "docker-compose.yml"]);
+    f.git("api", &["commit", "-q", "-m", "add compose"]);
+
+    f.write_ws_json(
+        r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
+            "env":{"APP_URL":"https://${WS_HOST_web}"},
+            "scripts":{"up":"docker compose config -q && echo OK"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/a"]);
+    assert!(stderr(&f.run_ok(&["up", "feat/a"])).contains("OK"), "merged config should validate");
+
+    let ov = read_override(&f, "feat-a-api");
+    assert!(
+        ov.contains("APP_URL: \"https://feat-a.web.myapp.test\""),
+        "declared env not materialized into the override:\n{ov}"
+    );
+}
+
+/// Read a worktree's generated compose override from `.ws-meta`.
+fn read_override(f: &WorkspaceFixture, stem: &str) -> String {
+    std::fs::read_to_string(f.path().join(".ws-meta").join(format!("{stem}.override.yml")))
+        .unwrap_or_else(|e| panic!("read override for {stem}: {e}"))
+}
+
+/// The host port from the first `"<host>:<internal>"` mapping in an override.
+fn override_port(ov: &str) -> u16 {
+    let line = ov.lines().find(|l| l.trim_start().starts_with("- \"")).expect("a ports mapping");
+    let inside = line.trim().trim_start_matches("- \"").trim_end_matches('"');
+    inside.split(':').next().unwrap().parse().unwrap_or(0)
+}
+
 /// Parse the digits in `<marker>NNNNN]`.
 fn port_after(haystack: &str, marker: &str) -> u16 {
     let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
