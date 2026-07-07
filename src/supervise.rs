@@ -33,11 +33,14 @@ pub fn unit_name(branch: &str, repo: &str) -> String {
 }
 
 /// Start `cmd` as a transient `--user` unit named `unit`, in `worktree`, with
-/// the given env. Idempotent: if the unit is already active it's left alone (a
-/// watcher reloads on file change — no need to bounce a running server).
-pub fn up(unit: &str, worktree: &Path, cmd: &str, env: &[(String, String)]) -> Result<()> {
+/// the given env. Idempotent: if the unit is already active it's left running (a
+/// watcher reloads on file change — no need to bounce a healthy server) and
+/// `Ok(false)` is returned so the caller can say so rather than imply a fresh
+/// start. `Ok(true)` when it actually launched. A changed `up` command/env only
+/// takes effect after `ws down` — the returned flag lets the UI hint that.
+pub fn up(unit: &str, worktree: &Path, cmd: &str, env: &[(String, String)]) -> Result<bool> {
     if is_active(unit) {
-        return Ok(());
+        return Ok(false);
     }
     // Clear any lingering failed state so the unit name is free to reuse.
     reset_failed(unit);
@@ -59,11 +62,13 @@ pub fn up(unit: &str, worktree: &Path, cmd: &str, env: &[(String, String)]) -> R
     if !out.status.success() {
         bail!("systemd-run --user: {}", first_line(&String::from_utf8_lossy(&out.stderr)));
     }
-    Ok(())
+    Ok(true)
 }
 
-/// Stop a host unit (and clear failed state). Best-effort: a unit that was never
-/// started, or is already gone, is not an error.
+/// Stop a host unit (and clear failed state). A unit that was never started, or
+/// is already gone, is fine — but a stop that leaves the unit *still running* is
+/// an error, so a caller (teardown) doesn't remove the worktree out from under a
+/// live process.
 pub fn down(unit: &str) -> Result<()> {
     let _ = Command::new(systemctl_bin())
         .args(["--user", "stop", unit])
@@ -72,6 +77,9 @@ pub fn down(unit: &str) -> Result<()> {
         .stderr(Stdio::null())
         .status();
     reset_failed(unit);
+    if is_active(unit) {
+        bail!("unit {unit} is still active after stop");
+    }
     Ok(())
 }
 

@@ -18,6 +18,16 @@ fn host_fixture() -> WorkspaceFixture {
     f
 }
 
+/// A fake `systemctl` that records its argv to `$ARGS_FILE` and reports the unit
+/// as **stopped** (`is-active` → exit 1), so `supervise::down` (which re-checks
+/// is-active after `stop`) sees a clean stop.
+fn recording_systemctl(f: &WorkspaceFixture) -> std::path::PathBuf {
+    f.stub(
+        "fake-systemctl",
+        "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\ncase \"$2\" in is-active) exit 1 ;; *) exit 0 ;; esac",
+    )
+}
+
 #[test]
 fn host_up_launches_a_systemd_unit_with_the_injected_env() {
     let f = host_fixture();
@@ -60,13 +70,13 @@ fn host_up_launches_a_systemd_unit_with_the_injected_env() {
 fn host_down_stops_the_unit() {
     let f = host_fixture();
     let sc_args = f.path().join("systemctl.args");
-    let recorder = f.arg_recorder("fake-systemctl");
+    let systemctl = recording_systemctl(&f);
 
     f.run_ok(&["new", "api", "feat/foo"]);
     let out = f.run_with_env(
         &["down", "feat/foo"],
         &[
-            ("WS_SYSTEMCTL", recorder.to_str().unwrap()),
+            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
             ("ARGS_FILE", sc_args.to_str().unwrap()),
         ],
     );
@@ -75,6 +85,53 @@ fn host_down_stops_the_unit() {
     let args = std::fs::read_to_string(&sc_args).expect("systemctl should have been invoked");
     assert!(args.contains("stop"), "down should stop the unit:\n{args}");
     assert!(args.contains("ws-feat-foo-api"), "unit name missing:\n{args}");
+}
+
+#[test]
+fn host_rm_stops_the_unit() {
+    let f = host_fixture();
+    let sc_args = f.path().join("systemctl.args");
+    let systemctl = recording_systemctl(&f);
+
+    f.run_ok(&["new", "api", "feat/foo"]);
+    // `ws rm --force` tears down the worktree; a host repo's teardown must stop
+    // its unit (not run down/post-remove hooks).
+    let out = f.run_with_env(
+        &["rm", "feat/foo", "--force"],
+        &[
+            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
+            ("ARGS_FILE", sc_args.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "rm failed:\n{}", stderr(&out));
+    let args = std::fs::read_to_string(&sc_args).expect("systemctl should have been invoked");
+    assert!(args.contains("stop") && args.contains("ws-feat-foo-api"), "rm should stop the unit:\n{args}");
+}
+
+#[test]
+fn host_up_with_no_up_script_is_skipped() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    // kind: host but no `up` script → nothing to launch.
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"http":"web","port":8080}}}]}"#,
+    );
+    let sdr_args = f.path().join("systemd-run.args");
+    let recorder = f.arg_recorder("fake-systemd-run");
+    let systemctl = f.stub("fake-systemctl", "exit 1");
+
+    f.run_ok(&["new", "api", "feat/foo"]);
+    let out = f.run_with_env(
+        &["up", "feat/foo"],
+        &[
+            ("WS_SYSTEMD_RUN", recorder.to_str().unwrap()),
+            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
+            ("ARGS_FILE", sdr_args.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "up failed:\n{}", stderr(&out));
+    assert!(!sdr_args.exists(), "nothing to launch → systemd-run must not run");
+    assert!(stderr(&out).contains("no up script"), "expected a skip note:\n{}", stderr(&out));
 }
 
 #[test]

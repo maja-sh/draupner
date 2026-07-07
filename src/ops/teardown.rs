@@ -35,30 +35,35 @@ pub fn remove_task(
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
-        // Host process → stop its `systemd --user` unit before the worktree it
-        // runs in is removed. (Containers are torn down by the `down` hook.)
-        if inject::is_host_repo(cfg, repo) {
+        // A host process's lifecycle IS its `systemd --user` unit, so teardown
+        // stops the unit *instead of* running down/post-remove hooks — same
+        // exclusive split as `ws down` (hooksweep). A container's resources are
+        // torn down by its down/post-remove hooks.
+        if cfg.is_host_repo(repo) {
             let step = crate::ui::step(repo, "stop (systemd)");
             match crate::supervise::down(&crate::supervise::unit_name(branch, repo)) {
                 Ok(()) => step.ok(),
-                Err(e) => step.fail(&format!("{e}")),
+                Err(e) => {
+                    step.fail(&format!("{e}"));
+                    hook_failed = true;
+                }
             }
-        }
+        } else {
+            // Read the existing allocation (never allocate) for the hook env.
+            let extra_env =
+                inject::prepare(cfg, root, wt, &sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
 
-        // Teardown events only read the existing allocation (never allocate).
-        let extra_env =
-            inject::prepare(cfg, root, wt, &sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
-
-        // Resource teardown hooks — best-effort. A failing hook is reported but
-        // doesn't stop removal (the user wants the worktree gone).
-        for event in ["down", "post-remove"] {
-            if let Some(action) = hooks::resolve(cfg, root, repo, event) {
-                let step = crate::ui::step(repo, &format!("{event} hook"));
-                match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
-                    Ok(()) => step.ok(),
-                    Err(e) => {
-                        step.fail(&format!("{e}"));
-                        hook_failed = true;
+            // Resource teardown hooks — best-effort. A failing hook is reported
+            // but doesn't stop removal (the user wants the worktree gone).
+            for event in ["down", "post-remove"] {
+                if let Some(action) = hooks::resolve(cfg, root, repo, event) {
+                    let step = crate::ui::step(repo, &format!("{event} hook"));
+                    match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
+                        Ok(()) => step.ok(),
+                        Err(e) => {
+                            step.fail(&format!("{e}"));
+                            hook_failed = true;
+                        }
                     }
                 }
             }

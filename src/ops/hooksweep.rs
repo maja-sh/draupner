@@ -22,6 +22,23 @@ pub struct SweepResult {
     pub failed: Vec<String>,
 }
 
+impl SweepResult {
+    /// Finish a step and file the repo under `ran` or `failed`. The shared
+    /// tail every per-repo action (container hook, host up/down) ends with.
+    fn record(&mut self, repo: &str, step: crate::ui::Step, res: Result<()>) {
+        match res {
+            Ok(()) => {
+                step.ok();
+                self.ran.push(repo.to_string());
+            }
+            Err(e) => {
+                step.fail(&format!("{e}"));
+                self.failed.push(repo.to_string());
+            }
+        }
+    }
+}
+
 /// Run `event`'s hook across every worktree of `branch`. Prints the op header
 /// (`◐ ws-<op> <branch>`), a step line per repo, and streams hook output. A
 /// missing hook is a dim skip; a failing hook is reported but does not stop the
@@ -65,7 +82,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         // Host processes are supervised as `systemd --user` units, not run as a
         // blocking hook — `up` launches (detached, crash-restarting), `down`
         // stops. Their `up` script binds the injected `WS_PORT_*`.
-        if inject::is_host_repo(&cfg, repo) {
+        if cfg.is_host_repo(repo) {
             sweep_host(&cfg, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
             continue;
         }
@@ -89,16 +106,8 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action, &extra_env) {
-            Ok(()) => {
-                step.ok();
-                result.ran.push(repo.clone());
-            }
-            Err(e) => {
-                step.fail(&format!("{e}"));
-                result.failed.push(repo.clone());
-            }
-        }
+        let res = hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action, &extra_env);
+        result.record(repo, step, res);
     }
 
     Ok(result)
@@ -122,16 +131,7 @@ fn sweep_host(
 
     if event == "down" {
         let step = crate::ui::step(repo, "stop (systemd)");
-        match crate::supervise::down(&unit) {
-            Ok(()) => {
-                step.ok();
-                result.ran.push(repo.to_string());
-            }
-            Err(e) => {
-                step.fail(&format!("{e}"));
-                result.failed.push(repo.to_string());
-            }
-        }
+        result.record(repo, step, crate::supervise::down(&unit));
         return;
     }
 
@@ -155,14 +155,14 @@ fn sweep_host(
         }
     };
 
-    let step = crate::ui::step(repo, "start (systemd)");
     match crate::supervise::up(&unit, wt, &cmd, &extra_env) {
-        Ok(()) => {
-            step.ok();
+        Ok(started) => {
+            let label = if started { "start (systemd)" } else { "already running (ws down to apply changes)" };
+            crate::ui::step(repo, label).ok();
             result.ran.push(repo.to_string());
         }
         Err(e) => {
-            step.fail(&format!("{e}"));
+            crate::ui::step(repo, "start (systemd)").fail(&format!("{e}"));
             result.failed.push(repo.to_string());
         }
     }

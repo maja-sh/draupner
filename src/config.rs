@@ -70,7 +70,7 @@ pub enum RepoEntry {
     Extended(RepoConfig),
 }
 
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Default)]
 pub struct RepoConfig {
     pub name: String,
     /// How `ws` launches and de-conflicts this repo's stack. `None` → inferred
@@ -147,6 +147,16 @@ impl RepoConfig {
             None => has_compose(),
         }
     }
+
+    /// Whether this repo is an **explicit** `kind: host` process — the trigger
+    /// for `systemd --user` supervision and per-service port allocation.
+    /// Deliberately requires the explicit kind rather than inferring host from a
+    /// missing compose file (contrast `is_container`, which treats `kind: None`
+    /// as inferred-from-compose): supervision changes how `up` runs, so it's
+    /// opt-in.
+    pub fn is_host(&self) -> bool {
+        matches!(self.kind, Some(RepoKind::Host))
+    }
 }
 
 impl ServiceConfig {
@@ -220,6 +230,12 @@ impl WsConfig {
     /// name). The single repo→config lookup shared by script/hook resolution.
     pub fn repo_config(&self, repo: &str) -> Option<&RepoConfig> {
         self.repos.iter().find(|r| r.name() == repo).and_then(|r| r.config())
+    }
+
+    /// Whether `repo` is an explicit `kind: host` process (supervised via
+    /// `systemd --user`). A bare-name repo, or one without config, is not.
+    pub fn is_host_repo(&self, repo: &str) -> bool {
+        self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
 }
 

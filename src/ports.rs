@@ -85,6 +85,10 @@ pub fn record_services(
 ) -> Result<()> {
     let dir = meta_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    // Under the same lock `resolve` takes: read → set services → write. Without
+    // it, a concurrent `resolve` (another terminal) that allocated a port
+    // between our read and write would be silently clobbered.
+    let _lock = Lock::acquire(&dir);
     let path = meta_file(root, branch_sanitized, repo);
     let mut meta = read_meta(&path);
     meta.services = services.clone();

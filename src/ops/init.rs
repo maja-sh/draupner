@@ -201,23 +201,16 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
 /// regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
-    if compose::has_compose_file(&repo_dir) {
-        if let Ok(services) = compose::derive(runtime, &repo_dir) {
-            if !services.is_empty() {
-                return RepoEntry::Extended(RepoConfig {
-                    name: name.to_string(),
-                    kind: None,
-                    services,
-                    scripts: Default::default(),
-                    env: Default::default(),
-                    templates: Vec::new(),
-                    hooks: Default::default(),
-                    worktree_excludes: Vec::new(),
-                });
-            }
+    let services = compose::has_compose_file(&repo_dir)
+        .then(|| compose::derive(runtime, &repo_dir).ok())
+        .flatten()
+        .filter(|s| !s.is_empty());
+    match services {
+        Some(services) => {
+            RepoEntry::Extended(RepoConfig { name: name.to_string(), services, ..Default::default() })
         }
+        None => RepoEntry::Name(name.to_string()),
     }
-    RepoEntry::Name(name.to_string())
 }
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {

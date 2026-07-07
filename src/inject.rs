@@ -96,7 +96,7 @@ pub fn prepare(
     // load here — injecting a local port number into a server-side command or a
     // synced config file would just be wrong. `WS_HOST_*` is unaffected: the
     // routed hostname is location-transparent, identical local or remote.
-    let host = is_host_repo(cfg, repo);
+    let host = rc.is_host();
     let port_map = if phase.allocates() && cfg.remote.is_none() {
         // A container only needs a host port for its raw-TCP services — HTTP
         // ones are dialed on the container network. An explicit host repo
@@ -122,21 +122,11 @@ pub fn prepare(
         ports::record_services(root, branch_sanitized, repo, &services)?;
     }
 
-    let vars = ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map);
+    let vars = ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, host);
     if phase.renders() {
         render_all(worktree, rc, &vars)?;
     }
     Ok(env_pairs(rc, &vars))
-}
-
-/// Whether `repo` is an **explicit** `kind: host` process — the trigger for
-/// `systemd --user` supervision and per-service port allocation. Deliberately
-/// requires the explicit kind rather than inferring host from a missing compose
-/// file: supervision changes how `up` runs (detached, journald-logged instead
-/// of a blocking streamed script), so it's opt-in, not a surprise for every
-/// non-compose repo.
-pub fn is_host_repo(cfg: &WsConfig, repo: &str) -> bool {
-    cfg.repo_config(repo).map(|rc| matches!(rc.kind, Some(RepoKind::Host))).unwrap_or(false)
 }
 
 /// The effective services for a repo: for a container repo (explicit `kind` or a
@@ -173,28 +163,31 @@ fn effective_services(
 }
 
 /// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*
-/// service set (not the raw `.ws-meta` map, which can retain a stale port for a
-/// service that was since removed or flipped to HTTP). HTTP services yield a
-/// hostname (only when a top-level `domain` is set — without one there's no
-/// routing target yet); any service that was allocated a host port yields it.
+/// service set and the current allocation policy — never the raw `.ws-meta` map,
+/// which can retain a stale port for a service that was since removed or flipped
+/// to HTTP. HTTP services yield a hostname (only when a top-level `domain` is
+/// set). `WS_PORT` is emitted only when the service is one `ws` currently
+/// allocates a port for (`host` repo → every service; container → raw-TCP only),
+/// so a host HTTP service gets both while a container HTTP service never gets a
+/// (possibly stale) port.
 fn ws_vars(
     services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
     domain: Option<&str>,
     port_map: &BTreeMap<String, u16>,
+    host: bool,
 ) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
     for (name, svc) in services {
-        // An HTTP service yields a routed hostname; ANY service that was
-        // allocated a host port yields `WS_PORT` — so a host HTTP service gets
-        // both (its `up` script binds the port, Caddy routes the host to it).
         if let Some(sub) = svc.subdomain(name) {
             if let Some(d) = domain {
                 vars.insert(format!("WS_HOST_{name}"), format!("{branch_sanitized}.{sub}.{d}"));
             }
         }
-        if let Some(port) = port_map.get(name) {
-            vars.insert(format!("WS_PORT_{name}"), port.to_string());
+        if host || !svc.is_http() {
+            if let Some(port) = port_map.get(name) {
+                vars.insert(format!("WS_PORT_{name}"), port.to_string());
+            }
         }
     }
     vars
@@ -335,7 +328,8 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert("mysql".to_string(), 54321u16);
 
-        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports);
+        // container repo (host = false): HTTP services get no WS_PORT.
+        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_HOST_admin"], "feat-x.admin.myapp.test");
         assert_eq!(vars["WS_PORT_mysql"], "54321");
@@ -343,9 +337,31 @@ mod tests {
     }
 
     #[test]
+    fn ws_vars_host_repo_gives_http_service_both_host_and_port() {
+        let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 8080))]);
+        let mut ports = BTreeMap::new();
+        ports.insert("app".to_string(), 20001u16);
+        // host = true: an HTTP service gets WS_HOST *and* the port to bind.
+        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, true);
+        assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
+        assert_eq!(vars["WS_PORT_app"], "20001");
+    }
+
+    #[test]
+    fn ws_vars_container_http_ignores_stale_port() {
+        // A now-HTTP service with a lingering .ws-meta port must NOT leak WS_PORT
+        // on a container repo (host = false).
+        let rc = repo_with(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
+        let mut ports = BTreeMap::new();
+        ports.insert("web".to_string(), 20001u16); // stale allocation from a raw-TCP era
+        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
+        assert!(!vars.contains_key("WS_PORT_web"), "stale port must not leak: {vars:?}");
+    }
+
+    #[test]
     fn ws_vars_skips_host_without_domain() {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
-        let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new());
+        let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new(), false);
         assert!(vars.is_empty(), "no domain ⇒ no WS_HOST var: {vars:?}");
     }
 
