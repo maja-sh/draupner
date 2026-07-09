@@ -31,6 +31,7 @@ use crate::compose;
 use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
 use crate::git;
 use crate::ports;
+use crate::remote::{self, Site};
 
 /// The lifecycle phase an event belongs to. Decides port allocation and
 /// template rendering so callers state intent, not mechanics.
@@ -75,8 +76,14 @@ impl Phase {
 /// for a repo's worktree, allocating host ports and rendering templates as the
 /// `phase` dictates. A bare-name repo, or one with no services/env, yields an
 /// empty vec. This is the one function every op calls.
+///
+/// Location-transparent via `site`: derivation, port-freeness probes, and the
+/// generated compose override all happen where the stack runs (locally, or on
+/// the server for a remote workspace) — `worktree` is always the local (synced)
+/// path, used for the file checks and template rendering that `ws` does host-side.
 pub fn prepare(
     cfg: &WsConfig,
+    site: &Site,
     root: &Path,
     worktree: &Path,
     branch_sanitized: &str,
@@ -85,26 +92,31 @@ pub fn prepare(
 ) -> Result<Vec<(String, String)>> {
     let Some(rc) = cfg.repo_config(repo) else { return Ok(Vec::new()) };
 
+    // The worktree path at the execution site: the local path, or the synced dir
+    // on the server (absolute — see `site_worktree_path`). `compose config`/the
+    // override run there; file checks and template renders below stay on the local
+    // (synced) copy.
+    let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
+
     // On an activating event the live compose derivation is authoritative
     // (declared `services` overlaid on top); on read-only phases prefer the
     // effective set recorded at the last `up` — it covers services that were
     // auto-derived from compose and never declared — falling back to the
     // declared block for a worktree that predates the record.
     let services: BTreeMap<String, ServiceConfig> = if phase.derives() {
-        effective_services(cfg, worktree, repo, rc)?
+        effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
     } else {
         let recorded = ports::services(root, branch_sanitized, repo);
         if recorded.is_empty() { rc.services.clone() } else { recorded }
     };
 
-    // Host ports are a LOCAL concept: `ws` allocates them on the machine that
-    // runs the stack. For a remote workspace the server owns its own ports
-    // (allocation there is a later offload slice), so we neither allocate nor
-    // load here — injecting a local port number into a server-side command or a
-    // synced config file would just be wrong. `WS_HOST_*` is unaffected: the
-    // routed hostname is location-transparent, identical local or remote.
+    // Allocate a host port per raw-TCP service (host repos: every service). The
+    // record + lock stay host-side (the host drives every `ws` call); only the
+    // freeness probe follows `site`, so a remote service is de-conflicted on the
+    // server that publishes it. `WS_HOST_*` needs no port — the routed hostname is
+    // location-transparent.
     let host = rc.is_host();
-    let port_map = if phase.allocates() && cfg.remote.is_none() {
+    let port_map = if phase.allocates() {
         // A container only needs a host port for its raw-TCP services — HTTP
         // ones are dialed on the container network. An explicit host repo
         // allocates one for EVERY service: N host processes on a single machine
@@ -116,11 +128,9 @@ pub fn prepare(
             .filter(|(_, s)| host || !s.is_http())
             .map(|(n, _)| n.clone())
             .collect();
-        ports::resolve(root, branch_sanitized, repo, &needs)?
-    } else if cfg.remote.is_none() {
-        ports::load(root, branch_sanitized, repo)
+        ports::resolve(site, root, branch_sanitized, repo, &needs)?
     } else {
-        BTreeMap::new()
+        ports::load(root, branch_sanitized, repo)
     };
 
     // Record the effective service set at `up` so the read-only phases above can
@@ -143,19 +153,76 @@ pub fn prepare(
 
     // Container repos get the generated compose override + project namespacing
     // via `COMPOSE_*` env, so N parallel worktrees de-conflict their raw-TCP
-    // host ports. Host repos (not compose) and remote workspaces (the server
-    // owns its ports/override) are excluded.
-    if !host && cfg.remote.is_none() && rc.is_container(|| compose::has_compose_file(worktree)) {
-        let override_path = ports::override_file(root, branch_sanitized, repo);
+    // host ports. Host repos (not compose) are excluded. For a remote workspace
+    // the override is written on the server and `COMPOSE_FILE` uses server paths.
+    if !host && rc.is_container(|| compose::has_compose_file(worktree)) {
         let project = compose::project_name(branch_sanitized, repo);
         // Join `ws-net` (so Caddy can dial the HTTP services) only when routing
         // is active. Without it, referencing the external `ws-net` would just
         // make `compose up` fail for nothing. The op layer (`ws up`/`new`)
         // ensures the network exists before this override is used.
         let join_ws_net = cfg.routing_active();
-        env.extend(compose_env(worktree, &override_path, &project, &services, &port_map, &declared, phase, join_ws_net)?);
+        let base = base_files_at(worktree, &site_worktree);
+        let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
+        env.extend(compose_env(
+            site, &base, &override_path, &project, &services, &port_map, &declared, phase, join_ws_net,
+        )?);
     }
     Ok(env)
+}
+
+/// The worktree path at the execution site: the local path for a local
+/// workspace, or the server-side synced dir (`<workspace_path>/<task>/<repo>`)
+/// for a remote one.
+fn site_worktree_path(
+    cfg: &WsConfig,
+    site: &Site,
+    root: &Path,
+    worktree: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+) -> String {
+    match &cfg.remote {
+        None => worktree.to_string_lossy().into_owned(),
+        // Absolute (home-resolved): the server dir feeds `COMPOSE_FILE`, which must
+        // be absolute or the `cd`'d up script would double-resolve it.
+        Some(r) => {
+            remote::worktree_path(&site.abs_base(&r.worktree_base(root)), branch_sanitized, repo)
+        }
+    }
+}
+
+/// The base compose file(s) as paths *at the site*: `compose::base_files` finds
+/// which files exist in the local (synced) worktree, then each is re-homed under
+/// `site_worktree` (a no-op for a local site, where the two dirs coincide).
+fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
+    let base = site_worktree.trim_end_matches('/');
+    compose::base_files(worktree)
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| format!("{base}/{}", n.to_string_lossy())))
+        .collect()
+}
+
+/// The generated compose override's path at the execution site. Local: under the
+/// host `.ws-meta`. Remote: under a `.ws-meta` sibling of the server's synced
+/// worktrees (`<workspace_path>/.ws-meta/...`), so it lives beside the stack it
+/// overrides and is torn down with it. `pub(crate)` so teardown can remove the
+/// server-side file it wrote.
+pub(crate) fn override_path_at(
+    cfg: &WsConfig,
+    site: &Site,
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+) -> String {
+    match &cfg.remote {
+        None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
+        // Absolute (home-resolved), same reason as `site_worktree_path`.
+        Some(r) => format!(
+            "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
+            site.abs_base(&r.worktree_base(root)).trim_end_matches('/')
+        ),
+    }
 }
 
 /// The `COMPOSE_*` env for a container repo. `COMPOSE_PROJECT_NAME` is set on
@@ -172,8 +239,9 @@ pub fn prepare(
 /// nothing to find — the derive path already surfaces that fatally on activation).
 #[allow(clippy::too_many_arguments)]
 fn compose_env(
-    worktree: &Path,
-    override_path: &Path,
+    site: &Site,
+    base: &[String],
+    override_path: &str,
     project: &str,
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
@@ -181,18 +249,16 @@ fn compose_env(
     phase: Phase,
     join_ws_net: bool,
 ) -> Result<Vec<(String, String)>> {
-    let base = compose::base_files(worktree);
     if base.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
     if phase.writes_override()
-        && compose::write_override(override_path, services, port_map, declared, join_ws_net)?
+        && compose::write_override(site, override_path, services, port_map, declared, join_ws_net)?
     {
-        let mut files: Vec<String> =
-            base.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-        files.push(override_path.to_string_lossy().into_owned());
+        let mut files: Vec<String> = base.to_vec();
+        files.push(override_path.to_string());
         env.push(("COMPOSE_FILE".to_string(), files.join(":")));
     }
     Ok(env)
@@ -275,12 +341,14 @@ fn route_specs(
 /// and the local-first path shouldn't hard-fail just because the runtime is out).
 fn effective_services(
     cfg: &WsConfig,
-    worktree: &Path,
+    site: &Site,
+    site_worktree: &str,
+    local_worktree: &Path,
     repo: &str,
     rc: &RepoConfig,
 ) -> Result<BTreeMap<String, ServiceConfig>> {
-    if rc.is_container(|| compose::has_compose_file(worktree)) {
-        match compose::derive(cfg.runtime(), worktree) {
+    if rc.is_container(|| compose::has_compose_file(local_worktree)) {
+        match compose::derive(site, cfg.runtime(), site_worktree) {
             Ok(mut services) => {
                 services.extend(rc.services.clone());
                 return Ok(services);
@@ -536,6 +604,25 @@ mod tests {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
         let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new(), false);
         assert!(vars.is_empty(), "no domain ⇒ no WS_HOST var: {vars:?}");
+    }
+
+    #[test]
+    fn override_path_at_is_absolute_for_a_relative_remote_base() {
+        // A remote workspace with the default (home-relative) workspace_path must
+        // produce an ABSOLUTE server override path, else `COMPOSE_FILE` would
+        // double-resolve under the `cd`'d worktree and the remote `up` would fail.
+        let cfg = WsConfig {
+            remote: Some(crate::config::RemoteConfig::new("srv".into(), Some("myapp".into()))),
+            ..Default::default()
+        };
+        let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
+        let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
+        assert_eq!(p, "/home/u/myapp/.ws-meta/feat-x-api.override.yml");
+
+        // Local: under the host `.ws-meta`, unchanged.
+        let local = WsConfig::default();
+        let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
+        assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
     }
 
     #[test]

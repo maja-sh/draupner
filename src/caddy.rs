@@ -31,8 +31,9 @@
 //! binary let tests substitute fakes.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+
+use crate::remote::Site;
 
 /// Shared user-defined network every worktree's stack and Caddy join.
 pub const WS_NET: &str = "ws-net";
@@ -67,16 +68,17 @@ const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// CRUD for worktree services never touches it.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
 
-/// The curl args to reach the admin API for `path`: over the unix socket
-/// (default — no TCP interface, so `ws-net` tenants can't reach it), or the
-/// `WS_CADDY_ADMIN` URL verbatim (BYO / test seam).
-fn admin_args(path: &str) -> Vec<String> {
+/// The curl args to reach the admin API for `path`: over the unix socket at
+/// `site` (default — no TCP interface, so `ws-net` tenants can't reach it), or
+/// the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam). For a remote site the
+/// socket path is the server's; `curl` itself runs there (see [`curl`]).
+fn admin_args(site: &Site, path: &str) -> Vec<String> {
     if let Ok(url) = std::env::var("WS_CADDY_ADMIN") {
         vec![format!("{}{}", url.trim_end_matches('/'), path)]
     } else {
         vec![
             "--unix-socket".to_string(),
-            socket_path().to_string_lossy().into_owned(),
+            socket_path(site),
             format!("http://localhost{path}"),
         ]
     }
@@ -138,13 +140,13 @@ pub struct RouteSpec {
     pub upstream: String,
 }
 
-/// Ensure the shared `ws-net` exists (idempotent rootless create).
-pub fn ensure_net(runtime: &str) -> Result<()> {
+/// Ensure the shared `ws-net` exists (idempotent rootless create) at `site`.
+pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
     }
-    let out = Command::new(runtime)
-        .args(["network", "create", WS_NET])
+    let out = site
+        .command(&[runtime, "network", "create", WS_NET])
         .output()
         .with_context(|| format!("spawn `{runtime} network create`"))?;
     if out.status.success() {
@@ -170,11 +172,11 @@ pub fn ensure_net(runtime: &str) -> Result<()> {
 /// only a stale *stopped* container is removed and retried. (A brief residual
 /// TOCTOU between the not-running check and the `rm` is accepted — the common
 /// paths, already-running and fresh-box, are safe.)
-pub fn ensure_running(runtime: &str) -> Result<()> {
+pub fn ensure_running(site: &Site, runtime: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
     }
-    if container_running(runtime, CADDY_CONTAINER) {
+    if container_running(site, runtime, CADDY_CONTAINER) {
         // A running Caddy is normally left strictly alone (its live routes are the
         // whole point). The one exception is a deliberate **port move**: `--resume`
         // pins the port from the persisted autosave, so `ws setup --port 443` only
@@ -182,7 +184,7 @@ pub fn ensure_running(runtime: &str) -> Result<()> {
         // actually serving differs from the desired one — comparing the live port,
         // not a recorded marker, so a routine `ws up` (or a `ws` upgrade that
         // didn't change the port) never needlessly tears a peer's routes down.
-        match served_port() {
+        match served_port(site) {
             // Already on the right port, or we can't tell (admin momentarily
             // unreachable) → never destroy a working Caddy.
             Some(p) if p == https_port() => return Ok(()),
@@ -191,34 +193,34 @@ pub fn ensure_running(runtime: &str) -> Result<()> {
             // we'd tear down a working Caddy for one that fails to start (e.g.
             // `:443` before the sysctl), leaving nothing running. Keep the old one
             // and let `ws setup` report the gap.
-            Some(_) if !port_bindable(https_port()) => return Ok(()),
+            Some(_) if !port_bindable(site, https_port()) => return Ok(()),
             Some(_) => {
                 crate::ui::note(&format!(
                     "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `ws up`",
                     https_port()
                 ));
-                reseed(runtime);
+                reseed(site, runtime);
             }
         }
     }
-    ensure_net(runtime)?;
-    let dir = write_boot_config()?;
+    ensure_net(site, runtime)?;
+    let dir = write_boot_config(site)?;
     // A stale admin socket from a prior run would make Caddy's bind fail; we're
     // the only one starting (container isn't running), so clearing it is safe.
-    let _ = std::fs::remove_file(dir.join("admin.sock"));
+    site.remove_file(&format!("{dir}/admin.sock"));
 
-    if run_caddy(runtime, &dir) {
-        return wait_admin_ready();
+    if run_caddy(site, runtime, &dir) {
+        return wait_admin_ready(site);
     }
     // The run failed — either a peer already started it (name taken, now
     // running → done) or a stale stopped container holds the name (remove it,
     // never a running one, and retry once).
-    if container_running(runtime, CADDY_CONTAINER) {
-        return wait_admin_ready();
+    if container_running(site, runtime, CADDY_CONTAINER) {
+        return wait_admin_ready(site);
     }
-    let _ = Command::new(runtime).args(["rm", "-f", CADDY_CONTAINER]).output();
-    if run_caddy(runtime, &dir) || container_running(runtime, CADDY_CONTAINER) {
-        return wait_admin_ready();
+    let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
+    if run_caddy(site, runtime, &dir) || container_running(site, runtime, CADDY_CONTAINER) {
+        return wait_admin_ready(site);
     }
     bail!("could not start the {CADDY_CONTAINER} container — is the `{runtime}` runtime healthy? (`{runtime} logs {CADDY_CONTAINER}`)")
 }
@@ -226,8 +228,8 @@ pub fn ensure_running(runtime: &str) -> Result<()> {
 /// The HTTPS port the running Caddy is actually listening on, read from its admin
 /// config (`.../servers/ws/listen` = `[":8443"]`). `None` when the admin can't be
 /// reached or the shape is unexpected — callers treat that as "don't touch it".
-fn served_port() -> Option<u16> {
-    let out = curl(&admin_args(&format!("/config/apps/http/servers/{SERVER}/listen"))).ok()?;
+fn served_port(site: &Site) -> Option<u16> {
+    let out = curl(site, &admin_args(site, &format!("/config/apps/http/servers/{SERVER}/listen"))).ok()?;
     if !out.ok || !(200..300).contains(&out.code) {
         return None;
     }
@@ -247,9 +249,9 @@ fn parse_listen_port(body: &str) -> Option<u16> {
 /// old port. Routes live there too, so they're reinstalled on the next `ws up`
 /// (acceptable for a deliberate, one-time port move). Keeps `ws-caddy-data` (the
 /// CA + certs) so the root stays stable and trusted.
-fn reseed(runtime: &str) {
-    let _ = Command::new(runtime).args(["rm", "-f", CADDY_CONTAINER]).output();
-    let _ = Command::new(runtime).args(["volume", "rm", CONFIG_VOLUME]).output();
+fn reseed(site: &Site, runtime: &str) {
+    let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
+    let _ = site.command(&[runtime, "volume", "rm", CONFIG_VOLUME]).output();
 }
 
 /// Whether a rootless process may bind `port` on this host. Privileged ports
@@ -257,13 +259,23 @@ fn reseed(runtime: &str) {
 /// host where we can't verify that (non-Linux, or the knob is unreadable) a
 /// privileged port reads as **not** bindable — better to report a gap than to
 /// tear down a working Caddy (or claim "ready") for a port that may not bind.
-/// The single owner of this check, shared by `ensure_running` and the setup probe.
-pub fn port_bindable(port: u16) -> bool {
+/// The single owner of this check, shared by `ensure_running` and the setup
+/// probe. Checks the sysctl at `site` (the server's `/proc` for a remote stack).
+pub fn port_bindable(site: &Site, port: u16) -> bool {
     if port >= 1024 {
         return true;
     }
-    std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
-        .ok()
+    let sysctl = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+    let start = match site {
+        Site::Local => std::fs::read_to_string(sysctl).ok(),
+        Site::Remote { .. } => site
+            .command(&["cat", sysctl])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()),
+    };
+    start
         .and_then(|s| s.trim().parse::<u16>().ok())
         .map(|start| start <= port)
         .unwrap_or(false)
@@ -277,20 +289,28 @@ pub fn port_bindable(port: u16) -> bool {
 /// HTTP host-ports (`!reset`), Caddy is the only path to an HTTP service, so a
 /// stack brought "up" without it would be a lie. The one owner of the routing
 /// bring-up sequence — callers decide only whether to surface the returned hint.
-pub fn ensure_routing(runtime: &str, domain: &str) -> Result<Option<String>> {
-    ensure_net(runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
-    ensure_running(runtime).context("caddy must be running to route HTTP services")?;
-    Ok((!domain_resolves(domain)).then(|| resolve_hint(domain)))
+pub fn ensure_routing(site: &Site, runtime: &str, domain: &str) -> Result<Option<String>> {
+    ensure_net(site, runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
+    ensure_running(site, runtime).context("caddy must be running to route HTTP services")?;
+    Ok((!domain_resolves(site, domain)).then(|| resolve_hint(site, domain)))
 }
 
 /// The recipe for reaching a route before `*.<domain>` resolves — the single
-/// owner of this user-facing string (also referenced in the module doc).
-fn resolve_hint(domain: &str) -> String {
+/// owner of this user-facing string (also referenced in the module doc). For a
+/// remote stack the wildcard must point at the server's tailnet IP (Tailscale
+/// split-DNS), not loopback, so the hint differs.
+fn resolve_hint(site: &Site, domain: &str) -> String {
     let port = https_port();
-    format!(
-        "`*.{domain}` doesn't resolve yet — reach a route with \
-         `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
-    )
+    match site {
+        Site::Local => format!(
+            "`*.{domain}` doesn't resolve yet — reach a route with \
+             `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
+        ),
+        Site::Remote { .. } => format!(
+            "`*.{domain}` doesn't resolve yet — point it at the server's tailnet IP \
+             (Tailscale split-DNS), then reach a route on `https://<host>:{port}`"
+        ),
+    }
 }
 
 /// `<runtime> run -d` the Caddy container. `dir` (the host config dir) is mounted
@@ -315,31 +335,40 @@ fn resolve_hint(domain: &str) -> String {
 /// `ws up` re-homes the route to the live container and heals it. A future
 /// refinement (health-check the upstream, or reconcile routes against live
 /// containers on boot) could close the gap.
-fn run_caddy(runtime: &str, dir: &Path) -> bool {
+fn run_caddy(site: &Site, runtime: &str, dir: &str) -> bool {
     let port = https_port();
-    Command::new(runtime)
-        .args(["run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always"])
-        .arg("-p").arg(format!("127.0.0.1:{port}:{port}"))
-        .arg("-v").arg(format!("{}:{SOCK_MOUNT}:Z", dir.display()))
-        .arg("-v").arg(format!("{DATA_VOLUME}:/data"))
-        .arg("-v").arg(format!("{CONFIG_VOLUME}:/config"))
-        .arg(CADDY_IMAGE)
-        .args(["caddy", "run", "--config"]).arg(format!("{SOCK_MOUNT}/caddy.json"))
-        .arg("--resume")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // Local publishes on loopback; so does a remote stack for now — the
+    // self-SSH-to-localhost path reaches it there, and a genuinely remote server
+    // needs its tailnet IP published (paired with the Tailscale split-DNS wiring)
+    // — a DNS-slice concern, tracked with `resolve_hint`.
+    let publish = format!("127.0.0.1:{port}:{port}");
+    let sock_mount = format!("{dir}:{SOCK_MOUNT}:Z");
+    let data_vol = format!("{DATA_VOLUME}:/data");
+    let config_vol = format!("{CONFIG_VOLUME}:/config");
+    let config_json = format!("{SOCK_MOUNT}/caddy.json");
+    site.command(&[
+        runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always",
+        "-p", &publish,
+        "-v", &sock_mount,
+        "-v", &data_vol,
+        "-v", &config_vol,
+        CADDY_IMAGE,
+        "caddy", "run", "--config", &config_json, "--resume",
+    ])
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Poll the admin API until it answers — Caddy's listener isn't up the instant
 /// `run -d` returns, so the immediately-following `route_up` could otherwise hit
 /// a not-yet-listening socket. Fails with a clear message if it never answers
 /// within the budget (a started-but-wedged Caddy, so routing can't proceed).
-fn wait_admin_ready() -> Result<()> {
+fn wait_admin_ready(site: &Site) -> Result<()> {
     for _ in 0..50 {
         let mut args = vec!["-o".to_string(), "/dev/null".to_string()];
-        args.extend(admin_args("/config/"));
-        if curl(&args).map(|o| o.ok).unwrap_or(false) {
+        args.extend(admin_args(site, "/config/"));
+        if curl(site, &args).map(|o| o.ok).unwrap_or(false) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -354,24 +383,29 @@ fn wait_admin_ready() -> Result<()> {
 /// that `ws setup` (slice 6.3) owns. A `false` here means "routes are live but a
 /// browser won't find them yet".
 ///
-/// It requires a **loopback** address specifically, not just any answer: routing
-/// is local-only (the caller gates on `remote.is_none()`), so a correctly wired
-/// wildcard points at `127.0.0.1`. A resolver that synthesizes a public IP for
-/// every unknown name (ISP NXDOMAIN hijacking, a captive portal) would otherwise
-/// read as "resolved" and wrongly suppress the hint.
+/// Resolution is checked against `site`: a **local** stack wants the wildcard to
+/// point at loopback (`127.0.0.1`); a **remote** stack wants it to point at the
+/// server (a non-loopback tailnet IP). Requiring the right *kind* of address, not
+/// just any answer, means a resolver that synthesizes a public IP for every
+/// unknown name (ISP NXDOMAIN hijacking, a captive portal) can't read as
+/// "resolved" and wrongly suppress the hint locally.
 ///
 /// The probe name normally does *not* resolve (that's what fires the warning),
 /// so it's run on a scratch thread with a short deadline: a slow or unreachable
 /// resolver must not stall every `ws up` for seconds just to print a hint. A
 /// timeout counts as "doesn't resolve" — the safe default (show the hint).
-pub fn domain_resolves(domain: &str) -> bool {
+pub fn domain_resolves(site: &Site, domain: &str) -> bool {
     // A label a real service is unlikely to shadow, so a hit means the wildcard
     // (not a coincidental host) resolves. The port is irrelevant to resolution.
     let probe = format!("ws-dns-probe.{domain}:{}", https_port());
+    let want_loopback = !site.is_remote();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
-        let ok = probe.to_socket_addrs().map(|mut a| a.any(|s| s.ip().is_loopback())).unwrap_or(false);
+        let ok = probe
+            .to_socket_addrs()
+            .map(|mut a| a.any(|s| s.ip().is_loopback() == want_loopback))
+            .unwrap_or(false);
         let _ = tx.send(ok); // receiver may have already timed out; ignore
     });
     rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or(false)
@@ -380,15 +414,15 @@ pub fn domain_resolves(domain: &str) -> bool {
 /// Whether the singleton Caddy is currently running (for the setup readiness
 /// probe). Externally-managed mode reports `true` — a BYO/test admin is "up" as
 /// far as `ws` is concerned.
-pub fn is_running(runtime: &str) -> bool {
-    externally_managed() || container_running(runtime, CADDY_CONTAINER)
+pub fn is_running(site: &Site, runtime: &str) -> bool {
+    externally_managed() || container_running(site, runtime, CADDY_CONTAINER)
 }
 
 /// Fetch Caddy's internal root CA certificate (PEM) from the admin API, for the
 /// setup step that trusts it in the system store. Caddy exposes it at
 /// `/pki/ca/local` as `{ "root_certificate": "<PEM>", … }`.
-pub fn root_ca_pem() -> Result<String> {
-    let out = curl(&admin_args("/pki/ca/local"))?;
+pub fn root_ca_pem(site: &Site) -> Result<String> {
+    let out = curl(site, &admin_args(site, "/pki/ca/local"))?;
     if !out.ok || !(200..300).contains(&out.code) {
         bail!("fetch Caddy root CA: HTTP {} {}", out.code, out.body.trim());
     }
@@ -405,8 +439,11 @@ pub fn root_ca_pem() -> Result<String> {
 /// env-influenced temp dir — then return the path for the trust command. Keeping
 /// it off `$TMPDIR`/`/tmp` closes the predictable-path clobber/symlink window
 /// before a later `sudo` reads it.
-pub fn write_root_ca() -> Result<PathBuf> {
-    let pem = root_ca_pem()?;
+pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
+    // Fetch from Caddy where it runs (`site`), but write to the HOST config dir —
+    // the CA is trusted in the *client's* (host's) store regardless of where the
+    // stack lives.
+    let pem = root_ca_pem(site)?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("ws-caddy-root.crt");
@@ -419,10 +456,9 @@ pub fn write_root_ca() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Whether a container by this name is running.
-fn container_running(runtime: &str, name: &str) -> bool {
-    Command::new(runtime)
-        .args(["container", "inspect", "-f", "{{.State.Running}}", name])
+/// Whether a container by this name is running at `site`.
+fn container_running(site: &Site, runtime: &str, name: &str) -> bool {
+    site.command(&[runtime, "container", "inspect", "-f", "{{.State.Running}}", name])
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
@@ -440,23 +476,38 @@ fn config_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("ws")
 }
 
-/// The host path of the admin unix socket (Caddy writes it into the mounted
-/// config dir). Canonicalized so it matches the absolute bind-mount source; the
-/// dir exists by the time any admin call runs (`ensure_running` created it).
-fn socket_path() -> PathBuf {
-    let dir = config_dir();
-    std::fs::canonicalize(&dir).unwrap_or(dir).join("admin.sock")
+/// The absolute config dir at `site`, holding the pinned config and the admin
+/// unix socket (bind-mounted into the Caddy container). Local: the host
+/// `config_dir()`, created + canonicalized so the bind-mount source is absolute
+/// (a relative `./.config/ws` from an unset HOME is rejected by the runtime).
+/// Remote: `$HOME/.config/ws` on the server (already absolute — HOME was resolved
+/// when the `Site` was built).
+fn config_dir_at(site: &Site) -> PathBuf {
+    match site {
+        Site::Local => {
+            let dir = config_dir();
+            std::fs::create_dir_all(&dir).ok();
+            std::fs::canonicalize(&dir).unwrap_or(dir)
+        }
+        Site::Remote { .. } => {
+            PathBuf::from(site.home_path(".config/ws").expect("remote site carries a home"))
+        }
+    }
+}
+
+/// The path of the admin unix socket at `site` (Caddy writes it into the mounted
+/// config dir).
+fn socket_path(site: &Site) -> String {
+    config_dir_at(site).join("admin.sock").to_string_lossy().into_owned()
 }
 
 /// Write the pinned boot config (empty routes; everything else flows in over the
-/// admin API) and return the absolute config dir (mounted into the container).
-fn write_boot_config() -> Result<PathBuf> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    // The bind-mount source must be absolute — a relative path (HOME unset →
-    // `./.config/ws`) is rejected by the runtime. Canonicalize now that it exists.
-    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-    crate::config::write_json_pretty(&dir.join("caddy.json"), &boot_config())?;
+/// admin API) at `site` and return the absolute config dir (mounted into the
+/// container). For a remote site the file is streamed to the server over SSH.
+fn write_boot_config(site: &Site) -> Result<String> {
+    let dir = config_dir_at(site).to_string_lossy().into_owned();
+    let json = serde_json::to_string_pretty(&boot_config())? + "\n";
+    site.write_file(&format!("{dir}/caddy.json"), &json)?;
     Ok(dir)
 }
 
@@ -541,36 +592,42 @@ fn route(id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
 /// stopped-stack route, which must stay last so a specific host match wins.
 /// Both are scoped operations, never `/load`. Order among worktree routes is
 /// irrelevant (each has a distinct host match), so prepending is safe.
-pub fn route_up(id: &str, hostname: &str, upstream: &str) -> Result<()> {
-    delete_id(id); // ignore-absent
+pub fn route_up(site: &Site, id: &str, hostname: &str, upstream: &str) -> Result<()> {
+    delete_id(site, id); // ignore-absent
     let body = route(id, hostname, upstream).to_string();
     let mut args = vec![
         "-X".to_string(), "PUT".to_string(),
         "-H".to_string(), "Content-Type: application/json".to_string(),
         "-d".to_string(), body,
     ];
-    args.extend(admin_args(&format!("/config/apps/http/servers/{SERVER}/routes/0")));
-    check(&curl(&args)?, || format!("add route {id}"))
+    args.extend(admin_args(site, &format!("/config/apps/http/servers/{SERVER}/routes/0")));
+    check(&curl(site, &args)?, || format!("add route {id}"))
 }
 
 /// Remove a worktree service's route. A missing route, or an unreachable Caddy,
 /// is fine — teardown is best-effort (infallible by design).
-pub fn route_down(id: &str) {
-    delete_id(id);
+pub fn route_down(site: &Site, id: &str) {
+    delete_id(site, id);
 }
 
-fn delete_id(id: &str) {
+fn delete_id(site: &Site, id: &str) {
     // Best-effort: a 404 (no such route yet) is expected on first up / double down.
     let mut args = vec!["-X".to_string(), "DELETE".to_string()];
-    args.extend(admin_args(&format!("/id/{id}/")));
-    let _ = curl(&args);
+    args.extend(admin_args(site, &format!("/id/{id}/")));
+    let _ = curl(site, &args);
 }
 
-/// Run `curl` against the admin API, capturing the response and HTTP status.
-fn curl(args: &[String]) -> Result<CurlOut> {
-    let out = Command::new("curl")
-        .args(["-sS", "-m", "10", "-w", "\n%{http_code}"])
-        .args(args)
+/// Run `curl` against the admin API at `site`, capturing the response and HTTP
+/// status. Under an externally-managed Caddy (`WS_CADDY_ADMIN`, a BYO/test admin
+/// URL) the request always runs **locally** regardless of `site` — that URL is a
+/// host endpoint, not the server's unix socket.
+fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
+    let local = Site::Local;
+    let effective = if externally_managed() { &local } else { site };
+    let mut argv: Vec<&str> = vec!["curl", "-sS", "-m", "10", "-w", "\n%{http_code}"];
+    argv.extend(args.iter().map(String::as_str));
+    let out = effective
+        .command(&argv)
         .output()
         .context("spawn curl for Caddy admin API")?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -680,8 +737,8 @@ mod tests {
     #[test]
     fn port_bindable_gates_privileged_ports() {
         // Non-privileged ports are always bindable.
-        assert!(port_bindable(8443));
-        assert!(port_bindable(1024));
+        assert!(port_bindable(&Site::Local, 8443));
+        assert!(port_bindable(&Site::Local, 1024));
         // A privileged port depends on the sysctl; on the test host (which we
         // can't assume has it lowered) the result must at least be a clean bool,
         // and 443 is bindable iff ip_unprivileged_port_start <= 443.
@@ -689,7 +746,7 @@ mod tests {
             .ok()
             .and_then(|s| s.trim().parse::<u16>().ok());
         if let Some(start) = start {
-            assert_eq!(port_bindable(443), start <= 443);
+            assert_eq!(port_bindable(&Site::Local, 443), start <= 443);
         }
     }
 

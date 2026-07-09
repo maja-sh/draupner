@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::ServiceConfig;
+use crate::remote::Site;
 
 /// Port scan window: above the common service defaults, below the ephemeral
 /// range, with room for many parallel worktrees.
@@ -101,10 +102,20 @@ pub fn record_services(
     write_meta(&path, &meta)
 }
 
-/// Ensure every service in `needs` has a host port, allocating (and persisting)
-/// any that are missing while preserving existing allocations. Returns the full
-/// persisted map (may include services beyond `needs`).
+/// Ensure every service in `needs` has a host port at `site`, allocating (and
+/// persisting) any that are missing while preserving existing allocations.
+/// Returns the full persisted map (may include services beyond `needs`).
+///
+/// The record, the used-set scan, and the lock all stay **host-side** — every
+/// `ws` invocation for a workspace runs on the host, so the host's `.ws-meta` is
+/// the single source of truth for what this workspace reserved and the host lock
+/// serializes concurrent `ws up`s correctly. Only the *freeness probe* follows
+/// `site`: a candidate must be free on the machine that will actually publish it
+/// (the server, for a remote workspace). Because the fast path skips allocation
+/// when everything is already recorded, a steady-state remote `up` makes no probe
+/// round trips at all.
 pub fn resolve(
+    site: &Site,
     root: &Path,
     branch_sanitized: &str,
     repo: &str,
@@ -131,7 +142,7 @@ pub fn resolve(
         if meta.ports.contains_key(svc) {
             continue;
         }
-        let port = free_port(&used)?;
+        let port = free_port(&used, site)?;
         used.insert(port);
         meta.ports.insert(svc.clone(), port);
     }
@@ -162,18 +173,50 @@ fn used_ports(dir: &Path) -> HashSet<u16> {
     set
 }
 
-/// First port in `RANGE` that isn't already recorded and binds right now. The
-/// listener is dropped immediately — the `.ws-meta` record is the reservation.
-fn free_port(used: &HashSet<u16>) -> Result<u16> {
+/// First port in `RANGE` that isn't already recorded and is free at `site` right
+/// now. The reservation is the `.ws-meta` record; the probe just confirms nothing
+/// else currently holds the port on the machine that will publish it.
+fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
     for port in RANGE {
         if used.contains(&port) {
             continue;
         }
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if port_free_at(site, port) {
             return Ok(port);
         }
     }
     anyhow::bail!("no free host port in {}..{}", RANGE.start, RANGE.end)
+}
+
+/// Whether `port` is free at `site`. Local: try to bind it (the listener is
+/// dropped immediately). Remote: ask the server whether anything is listening on
+/// it (`ss`), since the port must be free where it will actually be published.
+/// Both are "no live holder right now"; the record is the durable reservation.
+///
+/// The remote probe echoes an explicit `free`/`busy` token rather than inferring
+/// freeness from a pipeline exit code — a bare `grep` exit also fires (as "no
+/// match") when `ss` is missing or the SSH errored, which would read as free and
+/// hand out a possibly-taken port. Requiring a literal `free` means any failure
+/// (no `ss`, unreachable) reads as **not free**, so `free_port` moves on / fails
+/// loudly rather than colliding silently. (`ss` — iproute2 — is a server
+/// prerequisite; without it every port reads busy and allocation bails clearly.)
+fn port_free_at(site: &Site, port: u16) -> bool {
+    match site {
+        Site::Local => TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        Site::Remote { .. } => {
+            // Match `:<port>` / `.<port>` at the end of the local-address column so
+            // `:200` can't match `:2000`.
+            let script = format!(
+                "command -v ss >/dev/null 2>&1 || exit 3; \
+                 if ss -Hltn 2>/dev/null | awk '{{print $4}}' | grep -qE '[.:]{port}$'; \
+                 then echo busy; else echo free; fi"
+            );
+            site.shell(&script)
+                .output()
+                .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "free")
+                .unwrap_or(false)
+        }
+    }
 }
 
 /// A best-effort inter-process lock over `.ws-meta` via an `O_EXCL` lockfile,
@@ -230,7 +273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        let first = resolve(root, "feat-x", "api", &["mysql".into(), "redis".into()]).unwrap();
+        let first = resolve(&Site::Local, root, "feat-x", "api", &["mysql".into(), "redis".into()]).unwrap();
         assert_eq!(first.len(), 2);
         let mysql = first["mysql"];
         let redis = first["redis"];
@@ -238,7 +281,7 @@ mod tests {
         assert!((RANGE.start..RANGE.end).contains(&mysql));
 
         // Second resolve reuses the recorded ports (stable across runs).
-        let again = resolve(root, "feat-x", "api", &["mysql".into()]).unwrap();
+        let again = resolve(&Site::Local, root, "feat-x", "api", &["mysql".into()]).unwrap();
         assert_eq!(again["mysql"], mysql);
 
         // Meta file is persisted where load() expects it.
@@ -249,31 +292,31 @@ mod tests {
     fn distinct_worktrees_get_distinct_ports() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let a = resolve(root, "feat-a", "api", &["mysql".into()]).unwrap()["mysql"];
-        let b = resolve(root, "feat-b", "api", &["mysql".into()]).unwrap()["mysql"];
+        let a = resolve(&Site::Local, root, "feat-a", "api", &["mysql".into()]).unwrap()["mysql"];
+        let b = resolve(&Site::Local, root, "feat-b", "api", &["mysql".into()]).unwrap()["mysql"];
         assert_ne!(a, b, "parallel worktrees must not share a host port");
     }
 
     #[test]
     fn free_port_avoids_used_set() {
         let mut used = HashSet::new();
-        let p1 = free_port(&used).unwrap();
+        let p1 = free_port(&used, &Site::Local).unwrap();
         used.insert(p1);
-        let p2 = free_port(&used).unwrap();
+        let p2 = free_port(&used, &Site::Local).unwrap();
         assert_ne!(p1, p2);
     }
 
     #[test]
     fn free_port_bails_when_range_exhausted() {
         let used: HashSet<u16> = (RANGE.start..RANGE.end).collect();
-        assert!(free_port(&used).is_err(), "a fully-used range must fail, not loop");
+        assert!(free_port(&used, &Site::Local).is_err(), "a fully-used range must fail, not loop");
     }
 
     #[test]
     fn forget_removes_the_allocation() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        resolve(root, "feat-x", "api", &["mysql".into()]).unwrap();
+        resolve(&Site::Local, root, "feat-x", "api", &["mysql".into()]).unwrap();
         assert!(!load(root, "feat-x", "api").is_empty());
         forget(root, "feat-x", "api");
         assert!(load(root, "feat-x", "api").is_empty());

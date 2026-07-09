@@ -15,6 +15,7 @@ use crate::hooks;
 use crate::inject;
 use crate::mutagen;
 use crate::ports;
+use crate::remote::Site;
 use crate::workspace;
 
 /// Tear down every worktree of a task. Runs teardown hooks, removes the
@@ -32,14 +33,20 @@ pub fn remove_task(
     let sanitized = workspace::sanitize_branch(branch);
     let mut hook_failed = false;
 
+    // Where the stack lives. `None` ⇒ a remote workspace whose server is
+    // unreachable — teardown then skips the server-side steps but still drops the
+    // local worktrees (you must be able to `ws rm` even with the server down).
+    let site = Site::resolve(cfg).ok();
+
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
-        // A host process's lifecycle IS its `systemd --user` unit, so teardown
-        // stops the unit *instead of* running down/post-remove hooks — same
-        // exclusive split as `ws down` (hooksweep). A container's resources are
-        // torn down by its down/post-remove hooks.
-        if cfg.is_host_repo(repo) {
+        // Run the resource-teardown lifecycle where the stack lives. A local host
+        // process's lifecycle IS its `systemd --user` unit, so teardown stops the
+        // unit instead of running hooks (the same exclusive split as `ws down`). A
+        // remote workspace runs its down/post-remove scripts on the server; a
+        // local container runs them as hooks here.
+        if cfg.remote.is_none() && cfg.is_host_repo(repo) {
             let step = crate::ui::step(repo, "stop (systemd)");
             match crate::supervise::down(&crate::supervise::unit_name(branch, repo)) {
                 Ok(()) => step.ok(),
@@ -48,10 +55,20 @@ pub fn remove_task(
                     hook_failed = true;
                 }
             }
+        } else if cfg.remote.is_some() {
+            // A remote `kind: host` repo is skipped by `ws up` (remote systemd
+            // supervision is a later slice), so it was never brought up — skip it
+            // here too, symmetrically, rather than run its scripts on the server.
+            if cfg.is_host_repo(repo) {
+                crate::ui::skip(repo, "remote host-process supervision isn't supported yet (kind: host)");
+            } else {
+                teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
+            }
         } else {
             // Read the existing allocation (never allocate) for the hook env.
             let extra_env =
-                inject::prepare(cfg, root, wt, &sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
+                inject::prepare(cfg, &Site::Local, root, wt, &sanitized, repo, inject::Phase::Inspect)
+                    .unwrap_or_default();
 
             // Resource teardown hooks — best-effort. A failing hook is reported
             // but doesn't stop removal (the user wants the worktree gone).
@@ -70,11 +87,20 @@ pub fn remove_task(
         }
 
         // Remove this worktree's Caddy routes before `forget` drops the recorded
-        // service set they're derived from. Best-effort: Caddy may not be running.
+        // service set they're derived from. Best-effort: Caddy may be down, or (for
+        // a remote workspace) the server unreachable.
         if cfg.routing_active() {
-            for r in inject::routes(cfg, root, &sanitized, repo) {
-                crate::caddy::route_down(&r.id);
+            if let Some(site) = site.as_ref() {
+                for r in inject::routes(cfg, root, &sanitized, repo) {
+                    crate::caddy::route_down(site, &r.id);
+                }
             }
+        }
+
+        // Drop the generated compose override on the server (the local one is
+        // removed by `ports::forget` just below).
+        if let Some(s @ Site::Remote { .. }) = site.as_ref() {
+            s.remove_file(&inject::override_path_at(cfg, s, root, &sanitized, repo));
         }
 
         // Free the host ports this worktree held, now that its teardown hooks
@@ -121,6 +147,42 @@ pub fn remove_task(
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
 
     Ok(hook_failed)
+}
+
+/// Run a remote workspace's `down` + `post-remove` scripts on the server
+/// (best-effort). Skips with a note when the server is unreachable — `ws rm` /
+/// `ws clean` must still drop the local worktree even when the server is gone.
+#[allow(clippy::too_many_arguments)]
+fn teardown_remote(
+    cfg: &WsConfig,
+    site: Option<&Site>,
+    root: &Path,
+    wt: &Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    hook_failed: &mut bool,
+) {
+    let Some(site @ Site::Remote { .. }) = site else {
+        crate::ui::skip(repo, "server unreachable — skipping remote down/post-remove");
+        return;
+    };
+    let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
+    let extra_env =
+        inject::prepare(cfg, site, root, wt, sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
+    for event in ["down", "post-remove"] {
+        let Some(cmd) = cfg.script_command(repo, event) else {
+            continue;
+        };
+        let step = crate::ui::step(repo, &format!("{event} hook"));
+        match super::run_remote_event(r, root, branch, sanitized, repo, event, &cmd, &extra_env) {
+            Ok(()) => step.ok(),
+            Err(e) => {
+                step.fail(&e.to_string());
+                *hook_failed = true;
+            }
+        }
+    }
 }
 
 fn remove_if_symlink(p: &Path) {

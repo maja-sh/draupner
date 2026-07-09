@@ -38,6 +38,34 @@ pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into(), silent: false }.into()
 }
 
+/// Run a repo's declared lifecycle `cmd` for `event` on the remote server: flush
+/// the worktree's mutagen sync so the server sees the latest files, dispatch the
+/// command over SSH in the synced worktree, and map the outcome to a `Result`.
+/// Shared by up/down (hooksweep), post-create (new), and down/post-remove
+/// (teardown) so the flush → dispatch → status-mapping spine lives in one place;
+/// callers keep only their own skip decision, step UI, and bookkeeping.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_remote_event(
+    r: &crate::config::RemoteConfig,
+    root: &std::path::Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    event: &str,
+    cmd: &str,
+    extra_env: &[(String, String)],
+) -> anyhow::Result<()> {
+    // Best-effort: the session may not exist yet, or mutagen may be absent (see
+    // `ws exec`) — a failed flush shouldn't block the dispatch.
+    let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
+    let base = r.worktree_base(root);
+    match crate::remote::run_event(&r.connection, &base, sanitized, repo, event, cmd, extra_env) {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(op_failure(format!("{event} script exited {}", s.code().unwrap_or(-1)))),
+        Err(e) => Err(op_failure(format!("{event} on {}: ssh error: {e}", r.connection))),
+    }
+}
+
 /// Propagate a child process's exit code without printing a failure banner.
 /// `ws exec` is a transparent runner — when the command it ran exits non-zero,
 /// the command has already reported why, so `ws` mirrors the code and stays

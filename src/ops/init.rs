@@ -203,8 +203,12 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
 /// regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
+    // `ws init` scaffolds from the local checkout on the host (there's no server
+    // yet — the workspace is being created), so derivation runs on the local site.
     let services = compose::has_compose_file(&repo_dir)
-        .then(|| compose::derive(runtime, &repo_dir).ok())
+        .then(|| {
+            compose::derive(&crate::remote::Site::Local, runtime, &repo_dir.to_string_lossy()).ok()
+        })
         .flatten()
         .filter(|s| !s.is_empty());
     match services {

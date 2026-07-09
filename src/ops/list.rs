@@ -49,9 +49,16 @@ pub fn run() -> Result<()> {
             let status = if managed {
                 hooks::resolve(&cfg, &ws.root, repo, "status").and_then(|action| {
                     let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
-                    let extra_env =
-                        inject::prepare(&cfg, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect)
-                            .unwrap_or_default();
+                    // Read-only status probe (Inspect): the injection site is
+                    // location-agnostic here (no derive/alloc/override), and it
+                    // runs the `status` script locally, so `Local` is right even
+                    // for a remote workspace — the recorded ports come from the
+                    // host `.ws-meta` either way.
+                    let extra_env = inject::prepare(
+                        &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
+                        inject::Phase::Inspect,
+                    )
+                    .unwrap_or_default();
                     hooks::capture_action(
                         &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
                         &extra_env,

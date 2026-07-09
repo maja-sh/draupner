@@ -93,14 +93,17 @@ pub fn render_report(report: &Report, domain: &str) {
 /// The single owner of "what counts as ready" — the auto-offer and `ws setup`
 /// both read the resulting `Report`.
 pub fn probe(runtime: &str, domain: &str, known_dns: Option<bool>) -> Report {
+    // `ws setup` is a host-role command: it wires the *client's* DNS/CA/port, so
+    // it always probes the local site (remote setup is a later slice).
+    let site = crate::remote::Site::Local;
     let port = crate::caddy::https_port();
     // CA trust only means something once Caddy is up to serve a cert to test.
-    let caddy_up = crate::caddy::is_running(runtime);
+    let caddy_up = crate::caddy::is_running(&site, runtime);
     Report {
         port,
-        dns_ok: known_dns.unwrap_or_else(|| crate::caddy::domain_resolves(domain)),
+        dns_ok: known_dns.unwrap_or_else(|| crate::caddy::domain_resolves(&site, domain)),
         ca_ok: caddy_up && ca_trusted(domain, port),
-        port_ok: crate::caddy::port_bindable(port),
+        port_ok: crate::caddy::port_bindable(&site, port),
     }
 }
 
@@ -194,7 +197,7 @@ pub fn run(domain: Option<&str>, runtime: &str, yes: bool, port: Option<u16>) ->
     // Rootless bits — no privilege, no prompt. ensure_running also re-seeds Caddy
     // if the port just changed.
     let step = crate::ui::step("caddy", "rootless network + Caddy container");
-    match crate::caddy::ensure_running(runtime) {
+    match crate::caddy::ensure_running(&crate::remote::Site::Local, runtime) {
         Ok(()) => step.ok(),
         Err(e) => {
             step.fail(&format!("{e}"));
@@ -254,7 +257,7 @@ fn apply_macos_gaps(domain: &str, report: &Report, yes: bool) -> Result<()> {
     if !report.ca_ok {
         // Fetch + persist the root CA (to ws's own config dir, not $TMPDIR) so the
         // trust command has a concrete, non-clobberable file to point at.
-        match crate::caddy::write_root_ca() {
+        match crate::caddy::write_root_ca(&crate::remote::Site::Local) {
             Ok(path) => steps.push(ca_step_macos(&path.to_string_lossy())),
             Err(e) => crate::ui::note(&format!(
                 "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is Caddy running?"

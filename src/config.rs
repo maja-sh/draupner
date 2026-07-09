@@ -246,11 +246,23 @@ impl WsConfig {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
 
-    /// Whether per-worktree HTTP routing is in play: a `domain` is configured
-    /// and the workspace runs locally (remote routing is a later offload slice).
-    /// The single home for the "is routing on" policy the ops consult.
+    /// The declarative lifecycle command for `(repo, event)`, if any: the repo's
+    /// `scripts[event]` joined into one fail-fast shell command (`cmd1 && cmd2`).
+    /// `None` for a bare-name repo, or one that declares no such event. The single
+    /// owner of "what shell command does this event run", shared by the host-repo
+    /// launch path and every remote-dispatch caller.
+    pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
+        self.repo_config(repo)
+            .and_then(|rc| rc.scripts.get(event))
+            .map(|s| s.commands().join(" && "))
+    }
+
+    /// Whether per-worktree HTTP routing is in play: a `domain` is configured.
+    /// Location-transparent — routing runs wherever the stack lives, driven
+    /// through a [`crate::remote::Site`] (local Caddy, or the server's Caddy over
+    /// SSH). The single home for the "is routing on" policy the ops consult.
     pub fn routing_active(&self) -> bool {
-        self.domain.is_some() && self.remote.is_none()
+        self.domain.is_some()
     }
 }
 

@@ -10,19 +10,31 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
         r#"{"repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
     );
     let mg = f.arg_recorder("fake-mutagen");
+    // A remote workspace resolves the server `$HOME` up front on new/rm; stub ssh
+    // to answer that probe (and swallow the server-side override cleanup) so the
+    // op doesn't dial a real host.
+    let ssh = f.stub("fake-ssh", "printf /home/test");
 
     // Create the worktree (also runs `sync create`, recorded elsewhere).
     let create_args = f.path().join("create-args.txt");
     f.run_with_env(
         &["new", "api", "feat/foo"],
-        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", create_args.to_str().unwrap())],
+        &[
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", create_args.to_str().unwrap()),
+            ("WS_SSH", ssh.to_str().unwrap()),
+        ],
     );
 
     // Tear it down — should terminate the same session.
     let term_args = f.path().join("term-args.txt");
     let out = f.run_with_env(
         &["rm", "feat/foo"],
-        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", term_args.to_str().unwrap())],
+        &[
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", term_args.to_str().unwrap()),
+            ("WS_SSH", ssh.to_str().unwrap()),
+        ],
     );
     assert!(out.status.success(), "ws rm failed:\n{}", stderr(&out));
 

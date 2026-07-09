@@ -13,6 +13,10 @@ use crate::workspace;
 pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
+    // Where the stack lives (local, or the server for a remote workspace). For a
+    // remote workspace this fetches the server `$HOME`, so an unreachable server
+    // fails here rather than part-way through creating worktrees.
+    let site = remote::Site::resolve(&cfg)?;
 
     let requested = parse_repos(repos_arg);
     let known: Vec<&str> = cfg.repos.iter().map(|r| r.name()).collect();
@@ -29,7 +33,7 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
     // external `ws-net`; ensure it exists first so a post-create that runs compose
     // (`compose run --rm app composer install`) doesn't fail on a missing network.
     if cfg.routing_active() {
-        if let Err(e) = crate::caddy::ensure_net(cfg.runtime()) {
+        if let Err(e) = crate::caddy::ensure_net(&site, cfg.runtime()) {
             crate::ui::note(&format!("ws-net: {e}"));
         }
     }
@@ -108,24 +112,11 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
             crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
         }
 
-        // Render templates + compute the injection env before post-create so
-        // one-time setup (composer install, migrate) sees the per-worktree
-        // config and `WS_HOST_*`/`WS_PORT_*` values.
-        let extra_env =
-            inject::prepare(&cfg, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate)?;
-
-        if let Some(action) = hooks::resolve(&cfg, &ws.root, repo_name, "post-create") {
-            let step = crate::ui::step(repo_name, "Post-create hook");
-            hooks::run_action(
-                &ws.root, &wt_path, repo_name, &sanitized, "post-create", &action, &extra_env,
-            )?;
-            step.ok();
-        }
-
-        // Remote workspace → establish the worktree's file sync to the server.
-        // Runs last so the initial sync includes anything post-create produced.
-        // The `excludes` (node_modules/vendor + configured) double as sync
-        // ignores so those per-host artifacts stay off the wire.
+        // A remote workspace establishes the file sync FIRST, so the injection
+        // (server-side compose derive + override) and post-create below run
+        // against files that exist on the server; a local workspace has them
+        // already. The `excludes` (node_modules/vendor + configured) double as
+        // sync ignores so those per-host artifacts stay off the wire.
         if let Some(r) = &cfg.remote {
             let step = crate::ui::step(repo_name, "Sync created");
             let session = mutagen::session_name(branch, repo_name);
@@ -137,7 +128,21 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
                     return Err(super::op_failure(format!("mutagen sync for {repo_name}: {e}")));
                 }
             }
+            // Settle the initial push before we derive/render against the server.
+            let _ = mutagen::flush(&session);
         }
+
+        // Render templates + compute the injection env before post-create so
+        // one-time setup (composer install, migrate) sees the per-worktree config
+        // and `WS_HOST_*`/`WS_PORT_*` values. Runs at the stack's site — derive,
+        // override, and port allocation land on the server for a remote workspace.
+        let extra_env = inject::prepare(
+            &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
+        )?;
+
+        // Post-create runs where the stack lives: over SSH on the server (in the
+        // synced worktree) for a remote workspace, or locally.
+        run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
 
         wt_paths.push((repo_name.clone(), wt_path));
     }
@@ -150,6 +155,50 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
     crate::ui::nudge(&format!("ws up {branch}"));
 
     Ok(())
+}
+
+/// Run a repo's `post-create` where its stack lives: on the server over SSH (in
+/// the synced worktree) for a remote workspace, or locally. A remote workspace
+/// runs the declarative `post-create` script (a legacy `.ws-hooks` file lives on
+/// the host and can't run there); a repo with nothing declared is a no-op.
+/// Failure is fatal for `new` (one-time setup that didn't complete).
+#[allow(clippy::too_many_arguments)]
+fn run_post_create(
+    cfg: &config::WsConfig,
+    site: &crate::remote::Site,
+    ws_root: &Path,
+    wt_path: &Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    extra_env: &[(String, String)],
+) -> Result<()> {
+    if site.is_remote() {
+        let Some(cmd) = cfg.script_command(repo, "post-create") else {
+            return Ok(());
+        };
+        let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
+        let step = crate::ui::step(repo, "Post-create hook");
+        // `run_remote_event` flushes the sync first so the just-rendered templates
+        // (and the initial sync) are on the server before post-create runs there.
+        match super::run_remote_event(r, ws_root, branch, sanitized, repo, "post-create", &cmd, extra_env) {
+            Ok(()) => {
+                step.ok();
+                Ok(())
+            }
+            Err(e) => {
+                step.fail(&e.to_string());
+                Err(e)
+            }
+        }
+    } else {
+        if let Some(action) = hooks::resolve(cfg, ws_root, repo, "post-create") {
+            let step = crate::ui::step(repo, "Post-create hook");
+            hooks::run_action(ws_root, wt_path, repo, sanitized, "post-create", &action, extra_env)?;
+            step.ok();
+        }
+        Ok(())
+    }
 }
 
 fn parse_repos(s: &str) -> Vec<String> {

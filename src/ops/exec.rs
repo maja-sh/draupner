@@ -46,11 +46,15 @@ pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) 
 
     // Give the command the same routing context as the scripts. A local run is
     // where the stack lives, so it allocates host ports (but doesn't render
-    // templates — exec is a command runner); a remote run only loads whatever
-    // was recorded, since the server owns the remote ports (out of scope here).
+    // templates — exec is a command runner); a remote run only *loads* the ports
+    // recorded at `ws up` (Inspect). The injection site is `Local` either way:
+    // the local branch must allocate locally, and the remote branch's Inspect
+    // phase neither allocates nor derives nor writes the override, so it's
+    // location-agnostic — this keeps `ws exec` from pre-dialing the server (its
+    // deliberate no-pre-check behavior) yet still surfaces the recorded ports.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let wt = workspace::task_dir(&ws.root, &task).join(&repo);
-    let injected = inject::prepare(&cfg, &ws.root, &wt, &task, &repo, phase)?;
+    let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
     let mut env: Vec<(&str, &str)> = vec![("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
     env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 

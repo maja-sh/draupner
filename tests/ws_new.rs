@@ -11,10 +11,17 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     );
     let mg = f.arg_recorder("fake-mutagen");
     let args = f.path().join("mutagen-args.txt");
+    // A remote workspace resolves the server `$HOME` up front (for server-side
+    // paths); stub ssh to answer that probe so the op doesn't dial a real host.
+    let ssh = f.stub("fake-ssh", "printf /home/test");
 
     let out = f.run_with_env(
         &["new", "api", "feat/foo"],
-        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
+        &[
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
+            ("WS_SSH", ssh.to_str().unwrap()),
+        ],
     );
     assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
 
