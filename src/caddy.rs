@@ -12,10 +12,12 @@
 //! other worktrees' routes); adding is a scoped append and deleting is by `@id`,
 //! so parallel `ws` processes touching distinct ids don't race.
 //!
-//! **Slice 6.2 caveat:** Caddy binds a *non-privileged* HTTPS port here. Rootless
-//! bind to `:443` needs a sysctl that's slice 6.3's (consented, one-time)
-//! privileged step; until then, reach a route with
-//! `curl --resolve <host>:<HTTPS_PORT>:127.0.0.1 https://<host>:<HTTPS_PORT>`.
+//! **HTTPS port:** Caddy binds a *non-privileged* port by default (`8443`), so
+//! TLS works with zero setup — reach a route with
+//! `curl --resolve <host>:8443:127.0.0.1 https://<host>:8443`. `:443` (clean,
+//! suffix-free browser URLs) is an opt-in: it needs the one-time
+//! `net.ipv4.ip_unprivileged_port_start` sysctl, and `ws setup --port 443`
+//! persists the choice + re-seeds Caddy. See `https_port` / `ensure_running`.
 //!
 //! **Admin API is a unix socket, never TCP.** Caddy sits on `ws-net` (to dial
 //! the worktree containers), and the admin API grants total control of the proxy
@@ -40,9 +42,13 @@ pub const CADDY_CONTAINER: &str = "ws-caddy";
 const CADDY_IMAGE: &str = "docker.io/library/caddy:2";
 /// The HTTP server block name inside Caddy's config (routes hang off it).
 const SERVER: &str = "ws";
-/// HTTPS listen port. Non-privileged for now; slice 6.3 moves it to 443 once the
-/// `net.ipv4.ip_unprivileged_port_start` sysctl is consented.
-pub const HTTPS_PORT: u16 = 8443;
+/// Default HTTPS listen port — **non-privileged**, so Caddy binds it with no
+/// setup. TLS works here today (`curl --resolve <host>:8443:127.0.0.1 …`); the
+/// only thing `:443` buys is dropping the `:8443` suffix from browser URLs, and
+/// that needs the one privileged `net.ipv4.ip_unprivileged_port_start` sysctl.
+/// So `:443` is an **opt-in** (`ws setup --port 443`, persisted below); this
+/// default keeps the rootless path zero-privilege.
+pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 /// Mount point inside the Caddy container holding the pinned config and the
 /// admin unix socket — bind-mounted from `config_dir()` so the host reaches the
 /// socket while `ws-net` cannot.
@@ -80,9 +86,40 @@ fn admin_args(path: &str) -> Vec<String> {
 /// `WS_CADDY_ADMIN`. In that mode `ws` still adds/removes routes against the
 /// given admin API but does not create the network or run the container (you
 /// bring your own). Tests set it to a dead endpoint so a sweep never spins up
-/// real infra.
-fn externally_managed() -> bool {
+/// real infra. Public so ops can ask "is there real infra to reason about?"
+/// without naming the seam env var themselves.
+pub fn externally_managed() -> bool {
     std::env::var_os("WS_CADDY_ADMIN").is_some()
+}
+
+/// The HTTPS port Caddy publishes and serves on. `WS_HTTPS_PORT` (test seam)
+/// wins, else the persisted opt-in in `~/.config/ws/https_port` (written by
+/// `ws setup --port`), else the non-privileged default. A change here only takes
+/// effect once `ensure_running` re-seeds — `--resume` otherwise pins the old
+/// port from the autosave.
+pub fn https_port() -> u16 {
+    // A `0` (or unparseable) value would publish/listen on port 0 — never usable.
+    // Ignore it and fall through to the default, so a truncated file / bad env
+    // can't seed a broken Caddy.
+    if let Some(p) = std::env::var("WS_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+        if p != 0 {
+            return p;
+        }
+    }
+    std::fs::read_to_string(config_dir().join("https_port"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&p| p != 0)
+        .unwrap_or(DEFAULT_HTTPS_PORT)
+}
+
+/// Persist the opt-in HTTPS port so every later `ws` run agrees on it. Caddy
+/// keeps serving the old port until the next `ensure_running` re-seeds it.
+pub fn set_https_port(port: u16) -> Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(dir.join("https_port"), format!("{port}\n"))
+        .with_context(|| "persist https_port".to_string())
 }
 
 /// A route's stable admin `@id` for a worktree service. Includes the repo so
@@ -134,8 +171,35 @@ pub fn ensure_net(runtime: &str) -> Result<()> {
 /// TOCTOU between the not-running check and the `rm` is accepted — the common
 /// paths, already-running and fresh-box, are safe.)
 pub fn ensure_running(runtime: &str) -> Result<()> {
-    if externally_managed() || container_running(runtime, CADDY_CONTAINER) {
+    if externally_managed() {
         return Ok(());
+    }
+    if container_running(runtime, CADDY_CONTAINER) {
+        // A running Caddy is normally left strictly alone (its live routes are the
+        // whole point). The one exception is a deliberate **port move**: `--resume`
+        // pins the port from the persisted autosave, so `ws setup --port 443` only
+        // takes effect if we re-seed. We reseed **only** when the port Caddy is
+        // actually serving differs from the desired one — comparing the live port,
+        // not a recorded marker, so a routine `ws up` (or a `ws` upgrade that
+        // didn't change the port) never needlessly tears a peer's routes down.
+        match served_port() {
+            // Already on the right port, or we can't tell (admin momentarily
+            // unreachable) → never destroy a working Caddy.
+            Some(p) if p == https_port() => return Ok(()),
+            None => return Ok(()),
+            // Port differs. Only reseed if the new port can actually bind — else
+            // we'd tear down a working Caddy for one that fails to start (e.g.
+            // `:443` before the sysctl), leaving nothing running. Keep the old one
+            // and let `ws setup` report the gap.
+            Some(_) if !port_bindable(https_port()) => return Ok(()),
+            Some(_) => {
+                crate::ui::note(&format!(
+                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `ws up`",
+                    https_port()
+                ));
+                reseed(runtime);
+            }
+        }
     }
     ensure_net(runtime)?;
     let dir = write_boot_config()?;
@@ -159,6 +223,52 @@ pub fn ensure_running(runtime: &str) -> Result<()> {
     bail!("could not start the {CADDY_CONTAINER} container — is the `{runtime}` runtime healthy? (`{runtime} logs {CADDY_CONTAINER}`)")
 }
 
+/// The HTTPS port the running Caddy is actually listening on, read from its admin
+/// config (`.../servers/ws/listen` = `[":8443"]`). `None` when the admin can't be
+/// reached or the shape is unexpected — callers treat that as "don't touch it".
+fn served_port() -> Option<u16> {
+    let out = curl(&admin_args(&format!("/config/apps/http/servers/{SERVER}/listen"))).ok()?;
+    if !out.ok || !(200..300).contains(&out.code) {
+        return None;
+    }
+    parse_listen_port(&out.body)
+}
+
+/// Pull the port out of Caddy's `listen` array JSON (`[":8443"]` /
+/// `["127.0.0.1:8443"]`) — the segment after the last colon of the first entry.
+fn parse_listen_port(body: &str) -> Option<u16> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get(0)?.as_str()?.rsplit(':').next()?.parse().ok()
+}
+
+/// Tear down a Caddy serving the wrong port so a fresh boot config can seed the
+/// new one. Removes the container *and* the config volume — the autosave
+/// `--resume` would otherwise reload lives in that volume, and it's what pins the
+/// old port. Routes live there too, so they're reinstalled on the next `ws up`
+/// (acceptable for a deliberate, one-time port move). Keeps `ws-caddy-data` (the
+/// CA + certs) so the root stays stable and trusted.
+fn reseed(runtime: &str) {
+    let _ = Command::new(runtime).args(["rm", "-f", CADDY_CONTAINER]).output();
+    let _ = Command::new(runtime).args(["volume", "rm", CONFIG_VOLUME]).output();
+}
+
+/// Whether a rootless process may bind `port` on this host. Privileged ports
+/// (`< 1024`) need `net.ipv4.ip_unprivileged_port_start` lowered on Linux; on a
+/// host where we can't verify that (non-Linux, or the knob is unreadable) a
+/// privileged port reads as **not** bindable — better to report a gap than to
+/// tear down a working Caddy (or claim "ready") for a port that may not bind.
+/// The single owner of this check, shared by `ensure_running` and the setup probe.
+pub fn port_bindable(port: u16) -> bool {
+    if port >= 1024 {
+        return true;
+    }
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .map(|start| start <= port)
+        .unwrap_or(false)
+}
+
 /// Bring up the shared routing infra for a workspace whose `domain` is set:
 /// create `ws-net`, start Caddy, then probe DNS. Returns a user-facing hint when
 /// `*.<domain>` doesn't resolve yet (routes are live, but a browser won't find
@@ -176,9 +286,10 @@ pub fn ensure_routing(runtime: &str, domain: &str) -> Result<Option<String>> {
 /// The recipe for reaching a route before `*.<domain>` resolves — the single
 /// owner of this user-facing string (also referenced in the module doc).
 fn resolve_hint(domain: &str) -> String {
+    let port = https_port();
     format!(
         "`*.{domain}` doesn't resolve yet — reach a route with \
-         `curl --resolve <host>:{HTTPS_PORT}:127.0.0.1 https://<host>:{HTTPS_PORT}`"
+         `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
     )
 }
 
@@ -205,9 +316,10 @@ fn resolve_hint(domain: &str) -> String {
 /// refinement (health-check the upstream, or reconcile routes against live
 /// containers on boot) could close the gap.
 fn run_caddy(runtime: &str, dir: &Path) -> bool {
+    let port = https_port();
     Command::new(runtime)
         .args(["run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always"])
-        .arg("-p").arg(format!("127.0.0.1:{HTTPS_PORT}:{HTTPS_PORT}"))
+        .arg("-p").arg(format!("127.0.0.1:{port}:{port}"))
         .arg("-v").arg(format!("{}:{SOCK_MOUNT}:Z", dir.display()))
         .arg("-v").arg(format!("{DATA_VOLUME}:/data"))
         .arg("-v").arg(format!("{CONFIG_VOLUME}:/config"))
@@ -235,8 +347,9 @@ fn wait_admin_ready() -> Result<()> {
     bail!("{CADDY_CONTAINER} started but its admin API never answered within 5s — it may be crash-looping (check the {CADDY_CONTAINER} container logs)")
 }
 
-/// Whether the wildcard `*.<domain>` resolves to loopback on this host. Used only
-/// to warn: routing works via `curl --resolve` regardless, and wiring
+/// Whether the wildcard `*.<domain>` resolves to loopback on this host. The
+/// setup readiness signal for the DNS bit, and used to warn on `ws up`: routing
+/// works via `curl --resolve` regardless, and wiring
 /// `*.<domain>` → `127.0.0.1` into the resolver is a privileged one-time step
 /// that `ws setup` (slice 6.3) owns. A `false` here means "routes are live but a
 /// browser won't find them yet".
@@ -251,10 +364,10 @@ fn wait_admin_ready() -> Result<()> {
 /// so it's run on a scratch thread with a short deadline: a slow or unreachable
 /// resolver must not stall every `ws up` for seconds just to print a hint. A
 /// timeout counts as "doesn't resolve" — the safe default (show the hint).
-fn domain_resolves(domain: &str) -> bool {
+pub fn domain_resolves(domain: &str) -> bool {
     // A label a real service is unlikely to shadow, so a hit means the wildcard
     // (not a coincidental host) resolves. The port is irrelevant to resolution.
-    let probe = format!("ws-dns-probe.{domain}:{HTTPS_PORT}");
+    let probe = format!("ws-dns-probe.{domain}:{}", https_port());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
@@ -262,6 +375,48 @@ fn domain_resolves(domain: &str) -> bool {
         let _ = tx.send(ok); // receiver may have already timed out; ignore
     });
     rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or(false)
+}
+
+/// Whether the singleton Caddy is currently running (for the setup readiness
+/// probe). Externally-managed mode reports `true` — a BYO/test admin is "up" as
+/// far as `ws` is concerned.
+pub fn is_running(runtime: &str) -> bool {
+    externally_managed() || container_running(runtime, CADDY_CONTAINER)
+}
+
+/// Fetch Caddy's internal root CA certificate (PEM) from the admin API, for the
+/// setup step that trusts it in the system store. Caddy exposes it at
+/// `/pki/ca/local` as `{ "root_certificate": "<PEM>", … }`.
+pub fn root_ca_pem() -> Result<String> {
+    let out = curl(&admin_args("/pki/ca/local"))?;
+    if !out.ok || !(200..300).contains(&out.code) {
+        bail!("fetch Caddy root CA: HTTP {} {}", out.code, out.body.trim());
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&out.body).context("parse /pki/ca/local response")?;
+    v["root_certificate"]
+        .as_str()
+        .map(str::to_string)
+        .context("no root_certificate in /pki/ca/local response")
+}
+
+/// Fetch Caddy's root CA and write it to a stable path **inside `ws`'s own config
+/// dir** (`~/.config/ws/ws-caddy-root.crt`, user-owned 0600) — not a world- or
+/// env-influenced temp dir — then return the path for the trust command. Keeping
+/// it off `$TMPDIR`/`/tmp` closes the predictable-path clobber/symlink window
+/// before a later `sudo` reads it.
+pub fn write_root_ca() -> Result<PathBuf> {
+    let pem = root_ca_pem()?;
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("ws-caddy-root.crt");
+    std::fs::write(&path, pem).with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
 }
 
 /// Whether a container by this name is running.
@@ -326,13 +481,14 @@ fn write_boot_config() -> Result<PathBuf> {
 /// here won't reach a box that already has a `ws-caddy` autosave (bring it down
 /// / clear the config volume to re-seed).
 fn boot_config() -> serde_json::Value {
+    let port = https_port();
     serde_json::json!({
         "admin": { "listen": format!("unix/{SOCK_MOUNT}/admin.sock") },
         "apps": {
             "http": {
-                "https_port": HTTPS_PORT,
+                "https_port": port,
                 "servers": {
-                    SERVER: { "listen": [format!(":{HTTPS_PORT}")], "routes": [ stopped_stack_route() ] }
+                    SERVER: { "listen": [format!(":{port}")], "routes": [ stopped_stack_route() ] }
                 }
             },
             "tls": { "automation": {
@@ -470,7 +626,7 @@ mod tests {
         // On-demand issuance so an unregistered hostname (a down stack) still gets
         // a cert for the stopped-stack page instead of a TLS error.
         assert_eq!(policy["on_demand"], true);
-        assert_eq!(c["apps"]["http"]["servers"][SERVER]["listen"][0], format!(":{HTTPS_PORT}"));
+        assert_eq!(c["apps"]["http"]["servers"][SERVER]["listen"][0], format!(":{}", https_port()));
 
         // The one boot route is the catch-all; worktree routes prepend ahead of it.
         let routes = c["apps"]["http"]["servers"][SERVER]["routes"].as_array().unwrap();
@@ -486,6 +642,57 @@ mod tests {
         assert_eq!(r["handle"][0]["handler"], "static_response");
         assert_eq!(r["handle"][0]["status_code"], 503);
         assert!(r["handle"][0]["body"].as_str().unwrap().contains("ws up"));
+    }
+
+    #[test]
+    fn https_port_env_overrides_the_default() {
+        // The seam wins over the persisted file / default. (Serialized guard so a
+        // parallel test reading the port isn't perturbed.)
+        let _g = env_guard();
+        std::env::set_var("WS_HTTPS_PORT", "443");
+        assert_eq!(https_port(), 443);
+        std::env::remove_var("WS_HTTPS_PORT");
+        assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
+    }
+
+    #[test]
+    fn https_port_ignores_a_zero_value() {
+        // A `0` env value (truncated file / bad input) must not publish port 0;
+        // fall through to the default instead.
+        let _g = env_guard();
+        std::env::set_var("WS_HTTPS_PORT", "0");
+        assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
+        std::env::remove_var("WS_HTTPS_PORT");
+    }
+
+    #[test]
+    fn parse_listen_port_reads_the_served_port() {
+        assert_eq!(parse_listen_port(r#"[":8443"]"#), Some(8443));
+        assert_eq!(parse_listen_port(r#"["127.0.0.1:443"]"#), Some(443));
+        assert_eq!(parse_listen_port("[]"), None);
+        assert_eq!(parse_listen_port("not json"), None);
+    }
+
+    #[test]
+    fn port_bindable_gates_privileged_ports() {
+        // Non-privileged ports are always bindable.
+        assert!(port_bindable(8443));
+        assert!(port_bindable(1024));
+        // A privileged port depends on the sysctl; on the test host (which we
+        // can't assume has it lowered) the result must at least be a clean bool,
+        // and 443 is bindable iff ip_unprivileged_port_start <= 443.
+        let start = std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok());
+        if let Some(start) = start {
+            assert_eq!(port_bindable(443), start <= 443);
+        }
+    }
+
+    /// Serialize the env-mutating port tests (they share the process env).
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

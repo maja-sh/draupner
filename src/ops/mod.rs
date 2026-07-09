@@ -10,6 +10,7 @@ pub mod list;
 pub mod here;
 pub mod clean;
 pub mod exec;
+pub mod setup;
 
 #[derive(Debug)]
 pub struct ExitError {

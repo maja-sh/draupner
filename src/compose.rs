@@ -271,9 +271,21 @@ fn yaml_dquote(v: &str) -> String {
 /// `worktree`. Errors if the runtime is missing, there's no compose file, or the
 /// output doesn't parse — callers fall back to the declared `services`.
 pub fn derive(runtime: &str, worktree: &Path) -> Result<BTreeMap<String, ServiceConfig>> {
-    let out = Command::new(runtime)
-        .args(["compose", "config", "--format", "json"])
-        .current_dir(worktree)
+    parse(&compose_config_json(runtime, worktree, false)?)
+}
+
+/// Run `<runtime> compose config --format json` in `worktree` and return its
+/// stdout. `clean_env` strips `ws`'s injected `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`
+/// so the output reflects the *committed* project (the linter needs that; the
+/// derive path wants the ambient env). The single owner of the invocation both
+/// callers share.
+fn compose_config_json(runtime: &str, worktree: &Path, clean_env: bool) -> Result<String> {
+    let mut cmd = Command::new(runtime);
+    cmd.args(["compose", "config", "--format", "json"]).current_dir(worktree);
+    if clean_env {
+        cmd.env_remove("COMPOSE_PROJECT_NAME").env_remove("COMPOSE_FILE");
+    }
+    let out = cmd
         .output()
         .with_context(|| format!("spawn `{runtime} compose config`"))?;
     if !out.status.success() {
@@ -282,7 +294,7 @@ pub fn derive(runtime: &str, worktree: &Path) -> Result<BTreeMap<String, Service
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    parse(&String::from_utf8_lossy(&out.stdout))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[derive(Deserialize)]
@@ -343,6 +355,107 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
     for p in tcp {
         let key = if single { name.to_string() } else { format!("{name}_{p}") };
         out.insert(key, ServiceConfig { http: None, port: p, shared: false });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Isolation linter
+// ---------------------------------------------------------------------------
+//
+// Per-worktree state isolation is free by default — compose prefixes
+// volumes/networks with the project name, so parallel worktrees get isolated
+// DBs automatically. The linter is a preflight that catches the constructs which
+// *silently opt out* and cross-corrupt worktrees. It's advisory: warn loudly,
+// never block (the constructs may be intentional). Best-effort — a missing
+// runtime / unparseable output yields no findings.
+//
+// It flags only the two constructs `compose config` reports **unambiguously**:
+// a committed `container_name:` and an `external: true` volume. Compose always
+// emits a project-resolved `name` for the project *and* every named volume (a
+// plain `data: {}` becomes `<project>_data`), so those names can't be told apart
+// from a committed pin via `compose config` JSON — checking them would
+// false-positive on every clean project, so we don't. (A committed top-level
+// `name:` is also neutralized anyway: `ws` sets `COMPOSE_PROJECT_NAME`, which
+// wins.)
+
+/// Fields of `compose config --format json` the linter inspects. Map values are
+/// `Option` so a stray `null` entry can't fail the whole parse (the lint is
+/// best-effort and must not go silent on one odd value).
+#[derive(Deserialize)]
+struct LintDoc {
+    #[serde(default)]
+    services: BTreeMap<String, Option<LintService>>,
+    #[serde(default)]
+    volumes: BTreeMap<String, Option<LintVolume>>,
+}
+
+#[derive(Deserialize)]
+struct LintService {
+    #[serde(default)]
+    container_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LintVolume {
+    /// `external` normalizes to a bool in compose config output, but tolerate the
+    /// older `{name: …}` object form too.
+    #[serde(default)]
+    external: Option<serde_json::Value>,
+}
+
+/// Lint a worktree's compose project for isolation opt-outs. Runs
+/// `<runtime> compose config` in `worktree` and returns human-readable warnings.
+/// Empty when the project is clean, has no compose file, or the runtime is
+/// unavailable.
+pub fn lint(runtime: &str, worktree: &Path) -> Vec<String> {
+    if !has_compose_file(worktree) {
+        return Vec::new();
+    }
+    // Best-effort (see `compose_config_json`): a missing runtime or an
+    // unparseable project yields no findings — the lint never blocks a caller.
+    let Ok(json) = compose_config_json(runtime, worktree, true) else { return Vec::new() };
+    match serde_json::from_str::<LintDoc>(&json) {
+        Ok(doc) => lint_findings(&doc),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The pure classifier: turn a parsed compose doc into isolation warnings.
+fn lint_findings(doc: &LintDoc) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // `container_name:` pins a fixed name → parallel `up`s collide on it. Compose
+    // emits it only when committed, so this is unambiguous.
+    for (svc, s) in &doc.services {
+        if let Some(cn) = s.as_ref().and_then(|s| s.container_name.as_deref()) {
+            out.push(format!(
+                "service `{svc}` sets `container_name: {cn}` — breaks per-worktree \
+                 namespacing; parallel worktrees collide on the name (remove it)"
+            ));
+        }
+    }
+
+    // An `external` volume is shared across worktrees → one branch's migration
+    // corrupts another's data. Compose emits `external` only when committed.
+    for (vol, v) in &doc.volumes {
+        if v.as_ref().is_some_and(|v| is_truthy(v.external.as_ref())) {
+            out.push(format!(
+                "volume `{vol}` is `external` — shared across worktrees, so one \
+                 branch's writes/migrations corrupt another's (can't auto-fix)"
+            ));
+        }
+    }
+
+    out
+}
+
+/// Whether a compose `external:` value is set (bool `true`, or the legacy
+/// `{name: …}` object form).
+fn is_truthy(v: Option<&serde_json::Value>) -> bool {
+    match v {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Object(o)) => !o.is_empty(),
+        _ => false,
     }
 }
 
@@ -558,6 +671,50 @@ mod tests {
         let files = base_files(dir.path());
         assert_eq!(files.len(), 1, "only the primary, no cross-family override: {files:?}");
         assert!(files[0].ends_with("compose.yaml"));
+    }
+
+    fn lint_json(json: &str) -> Vec<String> {
+        let doc: LintDoc = serde_json::from_str(json).unwrap();
+        lint_findings(&doc)
+    }
+
+    #[test]
+    fn lint_flags_container_name_and_external_volume() {
+        let json = r#"{
+            "name": "myapp",
+            "services": { "db": { "container_name": "myapp_db" }, "web": {} },
+            "volumes": { "data": { "external": true }, "cache": { "name": "shared_cache" } }
+        }"#;
+        let findings = lint_json(json);
+        // Exactly the two unambiguous opt-outs: container_name + external volume.
+        // The pinned project `name` and the resolved volume `name` are NOT flagged
+        // (compose emits those for every clean project — see the module note).
+        assert_eq!(findings.len(), 2, "only the two reliable opt-outs: {findings:?}");
+        assert!(findings.iter().any(|f| f.contains("container_name: myapp_db")), "{findings:?}");
+        assert!(findings.iter().any(|f| f.contains("volume `data` is `external`")), "{findings:?}");
+    }
+
+    #[test]
+    fn lint_is_quiet_on_a_clean_project_with_resolved_names() {
+        // This is the real `compose config` shape: a project `name` and a
+        // project-prefixed volume `name` are ALWAYS emitted, even for a plain
+        // `data: {}`. Neither is a committed pin, so the lint must stay silent.
+        let json = r#"{
+            "name": "api",
+            "services": { "web": { "ports": [ {"target": 80} ] }, "db": {} },
+            "volumes": { "data": { "name": "api_data" } }
+        }"#;
+        assert!(lint_json(json).is_empty(), "resolved names must not warn: {:?}", lint_json(json));
+    }
+
+    #[test]
+    fn lint_survives_a_null_map_value() {
+        // A stray `null` service/volume value must not fail the whole parse (and
+        // silently drop real findings); it's just skipped.
+        let json = r#"{"services":{"db":null,"x":{"container_name":"fixed"}},"volumes":{"v":null}}"#;
+        let findings = lint_json(json);
+        assert_eq!(findings.len(), 1, "null values skipped, real finding kept: {findings:?}");
+        assert!(findings[0].contains("container_name: fixed"));
     }
 
     #[test]

@@ -98,10 +98,29 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // DNS-not-ready hint; we only surface what it returns.
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
-            match crate::caddy::ensure_routing(cfg.runtime(), domain) {
-                Ok(Some(hint)) => crate::ui::note(&hint),
-                Ok(None) => {}
-                Err(e) => crate::ui::note(&format!("routing infra not ready: {e:#}")),
+            // `ensure_routing` already probes DNS; its result *is* the answer
+            // (`Some(hint)` ⇒ wildcard doesn't resolve). Reuse it so the auto-offer
+            // below doesn't resolve DNS a second time.
+            let dns_ok = match crate::caddy::ensure_routing(cfg.runtime(), domain) {
+                Ok(hint) => {
+                    if let Some(h) = &hint {
+                        crate::ui::note(h);
+                    }
+                    hint.is_none()
+                }
+                Err(e) => {
+                    crate::ui::note(&format!("routing infra not ready: {e:#}"));
+                    false
+                }
+            };
+            // Auto-offer setup when a privileged bit (DNS / CA trust / :443) is
+            // missing — a non-mutating nudge to run `ws setup`. Skipped under an
+            // externally-managed Caddy (BYO / the test seam): there's no real
+            // infra to probe and nothing for the user to set up.
+            if !crate::caddy::externally_managed()
+                && crate::setup::probe(cfg.runtime(), domain, Some(dns_ok)).privileged_gaps()
+            {
+                crate::ui::nudge("`ws setup` — some routing setup (DNS / CA trust) is incomplete");
             }
         }
     }

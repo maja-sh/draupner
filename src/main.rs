@@ -11,6 +11,7 @@ mod obs;
 mod ops;
 mod ports;
 mod remote;
+mod setup;
 mod signal;
 mod skills;
 mod supervise;

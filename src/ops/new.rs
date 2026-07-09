@@ -98,6 +98,16 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         git::add_worktree_excludes(&wt_path, &excludes)
             .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
+        // Advisory isolation lint — run once, here, when the worktree's compose
+        // file first lands (not on every `ws up`): its constructs are static
+        // properties of the committed file. Warn on the ones that silently defeat
+        // per-worktree isolation (`container_name`, external volumes). Never
+        // blocks `new`; empty for non-compose repos.
+        let lint = crate::compose::lint(cfg.runtime(), &wt_path);
+        if !lint.is_empty() {
+            crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
+        }
+
         // Render templates + compute the injection env before post-create so
         // one-time setup (composer install, migrate) sees the per-worktree
         // config and `WS_HOST_*`/`WS_PORT_*` values.

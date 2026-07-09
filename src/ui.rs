@@ -362,6 +362,57 @@ pub fn nudge(text: &str) {
     }
 }
 
+/// A readiness line for `ws setup`: `✓ label — detail` (green) when satisfied,
+/// `✗ label — detail` (yellow) when a gap remains. Not a hard failure — a gap is
+/// something the user is about to be walked through fixing.
+pub fn status_line(ok: bool, label: &str, detail: &str) {
+    if tty() {
+        let (mark, lab) = if ok {
+            (style("✓").green().to_string(), style(label).bold().to_string())
+        } else {
+            (style("✗").yellow().bold().to_string(), style(label).bold().to_string())
+        };
+        eprintln!("  {mark} {lab} {}", style(format!("— {detail}")).dim());
+    } else {
+        eprintln!("  {} {label} — {detail}", if ok { "ok" } else { "MISSING" });
+    }
+}
+
+/// Show an exact command block (for `ws setup`'s show-me / print-and-bail): each
+/// line indented and, on a tty, rendered like inline code so it's copy-pasteable.
+pub fn command_block(commands: &[String]) {
+    for c in commands {
+        if tty() {
+            eprintln!("      {}", style(c).cyan());
+        } else {
+            eprintln!("      {c}");
+        }
+    }
+}
+
+/// Ask an interactive question and read a line from stdin. Returns `None` when
+/// stdin isn't a terminal or hits EOF — the caller then falls back to a
+/// non-interactive path (print-and-bail) rather than blocking. The prompt has no
+/// trailing newline so the answer echoes on the same line.
+pub fn ask(prompt: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    if tty() {
+        eprint!("  {} {} ", style("?").cyan().bold(), style(prompt).bold());
+    } else {
+        eprint!("  {prompt} ");
+    }
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => None, // EOF
+        Ok(_) => Some(line.trim().to_string()),
+        Err(_) => None,
+    }
+}
+
 fn pad_tag(tag: &str) -> String {
     format!("{tag:<width$}", width = TAG_WIDTH)
 }

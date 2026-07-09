@@ -46,6 +46,15 @@ enum Cmd {
     Here,
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
+    /// Ready the host for routing (rootless bits directly; privileged bits consented)
+    Setup {
+        /// Persist a non-default HTTPS port (e.g. 443 for clean, suffix-free URLs)
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+        /// Run the privileged steps without prompting (for automation)
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a command where the repo's stack lives (remote via ssh, else local)
     Exec {
         /// Repo to run in; inferred from the current worktree if omitted
@@ -75,6 +84,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Here                    => crate::ops::here::run(),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
+        Cmd::Setup{port,yes}         => crate::ops::setup::run(yes, port),
         Cmd::Exec{repo,local,no_flush,command} =>
             crate::ops::exec::run(repo.as_deref(), local, no_flush, &command),
     }
