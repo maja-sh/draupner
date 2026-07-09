@@ -55,6 +55,11 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Remote-offload verification (read-only; never mutates the server)
+    Remote {
+        #[command(subcommand)]
+        cmd: RemoteCmd,
+    },
     /// Run a command where the repo's stack lives (remote via ssh, else local)
     Exec {
         /// Repo to run in; inferred from the current worktree if omitted
@@ -68,6 +73,19 @@ enum Cmd {
         /// The command to run, after `--`
         #[arg(last = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteCmd {
+    /// Read-only health check of the offload server (or local routing readiness)
+    Check {
+        /// Server to check; overrides the workspace's configured remote
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// Show the underlying commands each probe runs
+        #[arg(long, short)]
+        verbose: bool,
     },
 }
 
@@ -85,6 +103,9 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Here                    => crate::ops::here::run(),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,yes}         => crate::ops::setup::run(yes, port),
+        Cmd::Remote{cmd}             => match cmd {
+            RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
+        },
         Cmd::Exec{repo,local,no_flush,command} =>
             crate::ops::exec::run(repo.as_deref(), local, no_flush, &command),
     }

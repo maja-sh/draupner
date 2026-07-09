@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
-use crate::{compose, mutagen, remote as remotelib};
+use crate::compose;
 
 const HOOK_EVENTS: &[&str] = &["post-create", "up", "down", "post-remove", "status", "test"];
 
@@ -31,13 +31,15 @@ pub fn run(
 /// where the server isn't provisioned yet. This is the *client* half — full
 /// server validation (podman/Caddy/DNS/TLS) is `ws remote check`.
 fn verify_remote(r: &RemoteConfig) -> Result<()> {
-    if !mutagen::installed() {
+    // Reuse the same read-only probes `ws remote check` runs, so there's one
+    // source of truth for "is the remote reachable / can we sync".
+    if !crate::probe::mutagen_local().ok {
         return Err(super::preflight(
             "mutagen isn't installed — a remote workspace needs it locally to sync. \
              Install mutagen, or `ws init --remote … --no-verify` to configure anyway.",
         ));
     }
-    if !remotelib::reachable(&r.connection) {
+    if !crate::probe::ssh_reachable(&r.connection).ok {
         return Err(super::preflight(format!(
             "can't reach `{}` over SSH — fix the connection (host/key/Tailscale), \
              or `--no-verify` to configure anyway.",

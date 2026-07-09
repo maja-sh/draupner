@@ -53,13 +53,19 @@ impl RemoteConfig {
     /// the configured `workspace_path`, or the workspace's own directory name
     /// as a home-relative default.
     pub fn worktree_base(&self, ws_root: &Path) -> String {
-        self.workspace_path.clone().unwrap_or_else(|| {
-            ws_root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "workspace".to_string())
-        })
+        self.workspace_path.clone().unwrap_or_else(|| default_worktree_base(ws_root))
     }
+}
+
+/// The default server-side worktree base when none is configured: the
+/// workspace's own directory name (so two projects on one server don't collide),
+/// or `"workspace"` when the root has no name. Shared by `RemoteConfig::worktree_base`
+/// and `ws remote check`'s `--host` path (which has no `RemoteConfig` to ask).
+pub fn default_worktree_base(ws_root: &Path) -> String {
+    ws_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workspace".to_string())
 }
 
 /// A repo entry is either a bare name (convention-only) or an object with overrides.
@@ -274,7 +280,22 @@ impl RepoEntry {
 
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
-    read_json(&root.join(".ws.json"))
+    let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
+    // Reject a dangerous SSH destination at the single choke point every op
+    // shares. `.ws.json` is only convention-per-machine — it isn't gitignored, so
+    // a cloned repo could carry a hostile `remote.connection` like
+    // `-oProxyCommand=…` that `ssh` would run as a local command. See
+    // `remote::connection_looks_safe`.
+    if let Some(r) = &cfg.remote {
+        if !crate::remote::connection_looks_safe(&r.connection) {
+            anyhow::bail!(
+                "refusing an unsafe remote.connection `{}` in .ws.json — an SSH host \
+                 must not start with `-` (it would be parsed as an ssh option)",
+                r.connection
+            );
+        }
+    }
+    Ok(cfg)
 }
 
 /// Write `value` as pretty JSON with a trailing newline. The single home for
@@ -321,6 +342,23 @@ mod tests {
         let remote = cfg.remote.expect("remote block");
         assert_eq!(remote.connection, "srv");
         assert_eq!(remote.workspace_path.as_deref(), Some("workspace"));
+    }
+
+    #[test]
+    fn load_rejects_an_option_shaped_remote_connection() {
+        // A hostile `.ws.json` (not gitignored → can arrive via a clone) with a
+        // connection ssh would parse as an option must be refused at load.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".ws.json"),
+            r#"{"remote":{"connection":"-oProxyCommand=touch /tmp/pwned"},"repos":[]}"#,
+        )
+        .unwrap();
+        let err = load(dir.path()).err().expect("load should reject the connection");
+        assert!(
+            err.to_string().contains("unsafe remote.connection"),
+            "expected the load to reject an option-shaped connection: {err}"
+        );
     }
 
     #[test]

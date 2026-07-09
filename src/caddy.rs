@@ -620,13 +620,17 @@ mod tests {
 
     #[test]
     fn boot_config_has_on_demand_internal_tls_and_the_catch_all() {
+        // Hold the port-env lock + snapshot the port so a concurrent
+        // `WS_HTTPS_PORT`-mutating test can't change it between the two reads.
+        let _g = env_guard();
+        let port = https_port();
         let c = boot_config();
         let policy = &c["apps"]["tls"]["automation"]["policies"][0];
         assert_eq!(policy["issuers"][0]["module"], "internal");
         // On-demand issuance so an unregistered hostname (a down stack) still gets
         // a cert for the stopped-stack page instead of a TLS error.
         assert_eq!(policy["on_demand"], true);
-        assert_eq!(c["apps"]["http"]["servers"][SERVER]["listen"][0], format!(":{}", https_port()));
+        assert_eq!(c["apps"]["http"]["servers"][SERVER]["listen"][0], format!(":{port}"));
 
         // The one boot route is the catch-all; worktree routes prepend ahead of it.
         let routes = c["apps"]["http"]["servers"][SERVER]["routes"].as_array().unwrap();

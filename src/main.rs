@@ -10,6 +10,7 @@ mod mutagen;
 mod obs;
 mod ops;
 mod ports;
+mod probe;
 mod remote;
 mod setup;
 mod signal;

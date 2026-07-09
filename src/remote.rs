@@ -12,6 +12,23 @@ fn ssh_bin() -> String {
     std::env::var("WS_SSH").unwrap_or_else(|_| "ssh".to_string())
 }
 
+/// Non-interactive connect options shared by the fail-fast probes: never prompt
+/// for a password (fail instead), and cap the connect wait so a dead host can't
+/// stall the caller.
+const SSH_FAST_OPTS: &[&str] = &["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"];
+
+/// Whether an SSH destination is safe to pass as an `ssh` argv element. `ssh`
+/// parses any argument beginning with `-` as an **option**, so a `connection`
+/// like `-oProxyCommand=…` (from a hostile `.ws.json` carried in a cloned repo)
+/// would make `ssh` run a local command before connecting — argument injection
+/// (CWE-88, the scp/git CVE-2017-1000117 class). Reject a leading dash (and the
+/// empty string). `--` is *not* a reliable guard for `ssh`, so we validate the
+/// value instead. The single owner of "is this a safe ssh destination", called
+/// where a connection enters from config / the CLI.
+pub fn connection_looks_safe(connection: &str) -> bool {
+    !connection.is_empty() && !connection.starts_with('-')
+}
+
 /// Light reachability probe: can we open a non-interactive SSH session to
 /// `connection`? `BatchMode=yes` fails fast instead of hanging on a password
 /// prompt; a short `ConnectTimeout` avoids stalling on a dead host. Used by
@@ -19,14 +36,39 @@ fn ssh_bin() -> String {
 /// first `ws new`. (A passphrase-protected key with no agent will read as
 /// unreachable — that's what `--no-verify` is for.)
 pub fn reachable(connection: &str) -> bool {
+    if !connection_looks_safe(connection) {
+        return false; // defense-in-depth: never hand ssh an option-shaped host
+    }
     Command::new(ssh_bin())
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", connection, "true"])
+        .args(SSH_FAST_OPTS)
+        .args([connection, "true"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Run a **read-only** `script` on `connection` over SSH and capture stdout.
+/// `BatchMode`/`ConnectTimeout` fail fast instead of hanging; `None` when SSH
+/// itself can't connect (unreachable / auth), so a caller can tell "server said
+/// no" from "couldn't reach the server". Used by the `ws remote check` probes —
+/// the contract is that `script` never installs, mutates, or `sudo`s.
+pub fn ssh_capture(connection: &str, script: &str) -> Option<String> {
+    if !connection_looks_safe(connection) {
+        return None; // defense-in-depth: never hand ssh an option-shaped host
+    }
+    let out = Command::new(ssh_bin())
+        .args(SSH_FAST_OPTS)
+        .args([connection, script])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Server-side path of a synced worktree: `<workspace_path>/<task>/<repo>`.

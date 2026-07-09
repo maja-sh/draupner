@@ -72,6 +72,20 @@ impl Report {
     }
 }
 
+/// Render a probe report as readiness status lines — shared by `ws setup` and
+/// `ws remote check`'s local mode so the two never drift.
+pub fn render_report(report: &Report, domain: &str) {
+    crate::ui::status_line(report.dns_ok, "wildcard DNS", &format!("*.{domain} → 127.0.0.1"));
+    crate::ui::status_line(report.ca_ok, "CA trust", "Caddy root CA in the system store");
+    if report.port < 1024 {
+        crate::ui::status_line(
+            report.port_ok,
+            "privileged port",
+            &format!("rootless bind to :{}", report.port),
+        );
+    }
+}
+
 /// Probe the routing prerequisites without changing anything. Safe to call on
 /// any `ws up`. `known_dns` lets a caller that already resolved the wildcard
 /// (the `ws up` auto-offer learns it from `ensure_routing`) pass the answer in,
@@ -204,16 +218,7 @@ pub fn run(domain: Option<&str>, runtime: &str, yes: bool, port: Option<u16>) ->
     let report = probe(runtime, domain, None);
     let plat = platform();
 
-    // Report each privileged facet's status.
-    crate::ui::status_line(report.dns_ok, "wildcard DNS", &format!("*.{domain} → 127.0.0.1"));
-    crate::ui::status_line(report.ca_ok, "CA trust", "Caddy root CA in the system store");
-    if report.port < 1024 {
-        crate::ui::status_line(
-            report.port_ok,
-            "privileged port",
-            &format!("rootless bind to :{}", report.port),
-        );
-    }
+    render_report(&report, domain);
 
     if !report.privileged_gaps() {
         crate::ui::summary_ok(&[format!(
