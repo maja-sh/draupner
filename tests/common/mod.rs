@@ -1,11 +1,94 @@
 #![allow(dead_code)]
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
+
+/// A throwaway HTTP server that answers every request `200 OK` — stands in for
+/// the Caddy admin API so a test `ws up`'s route calls succeed without spinning
+/// up a real Caddy container / `ws-net`. Pointing `WS_CADDY_ADMIN` at it keeps
+/// `ws` in externally-managed mode (no infra created) while letting `route_up`
+/// return success, so the routing path is actually exercised. A test that wants
+/// to drive the *failure* path overrides `WS_CADDY_ADMIN` to a dead endpoint.
+struct AdminStub {
+    url: String,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AdminStub {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind admin stub");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).ok();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sd = shutdown.clone();
+        let handle = std::thread::spawn(move || {
+            while !sd.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => serve_200(stream),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { url: format!("http://127.0.0.1:{port}"), shutdown, handle: Some(handle) }
+    }
+}
+
+impl Drop for AdminStub {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Read one HTTP request off `stream` (headers + any declared body, so the peer
+/// isn't reset mid-write) and reply `200 OK` with an empty JSON body.
+fn serve_200(mut stream: TcpStream) {
+    stream.set_read_timeout(Some(Duration::from_millis(1000))).ok();
+    let mut buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let want = content_length(&buf[..pos]);
+                    if buf.len() - (pos + 4) >= want {
+                        break;
+                    }
+                }
+            }
+            Err(_) => break, // timeout — assume the request is fully sent
+        }
+    }
+    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+    let _ = stream.flush();
+}
+
+/// The `Content-Length` of a request from its raw header bytes (0 if absent).
+fn content_length(headers: &[u8]) -> usize {
+    String::from_utf8_lossy(headers)
+        .to_lowercase()
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+        .unwrap_or(0)
+}
 
 pub struct WorkspaceFixture {
     pub root: TempDir,
+    admin: AdminStub,
 }
 
 impl WorkspaceFixture {
@@ -14,7 +97,7 @@ impl WorkspaceFixture {
             .prefix("wsfix-")
             .tempdir()
             .expect("tempdir");
-        Self { root }
+        Self { root, admin: AdminStub::start() }
     }
 
     /// Create a workspace with the given repos and a `.ws.json` referencing them.
@@ -180,10 +263,11 @@ impl WorkspaceFixture {
             .env_remove("RUST_LOG")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
-            // Treat Caddy as externally managed (dead endpoint) so a test `ws up`
-            // never spins up a real Caddy container / `ws-net`; route calls fail
-            // fast and non-fatally. A routing test can override this.
-            .env("WS_CADDY_ADMIN", "http://127.0.0.1:1")
+            // Treat Caddy as externally managed (the always-200 stub) so a test
+            // `ws up` never spins up a real Caddy container / `ws-net` yet its
+            // route calls still succeed. A test can override this (e.g. to a dead
+            // endpoint) to drive the routing-failure path.
+            .env("WS_CADDY_ADMIN", self.admin.url.as_str())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "test")

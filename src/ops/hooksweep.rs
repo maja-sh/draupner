@@ -38,6 +38,16 @@ impl SweepResult {
         }
     }
 
+    /// Move a repo already filed under `ran` into `failed`. Used when a repo's
+    /// hook succeeded but installing its Caddy route failed — the containers are
+    /// up, but with the host publish `!reset` away the HTTP service is
+    /// unreachable, so the repo hasn't really come up.
+    fn demote(&mut self, repo: &str) {
+        self.ran.retain(|r| r != repo);
+        if !self.failed.iter().any(|r| r == repo) {
+            self.failed.push(repo.to_string());
+        }
+    }
 }
 
 /// Run `event`'s hook across every worktree of `branch`. Prints the op header
@@ -77,23 +87,21 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // teardown-side event that only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
-    // Bring up the shared routing infra once before the loop, fatally: since the
-    // override `!reset`s HTTP host-ports, Caddy is the only path to an HTTP
-    // service, so a stack brought "up" without it would be a lie. `ensure_routing`
-    // owns the Caddy-side sequencing (create `ws-net`, start Caddy) + the
-    // DNS-not-ready hint; we decide fatality and surface the hint it returns.
-    //
-    // KNOWN LIMITATION: `routing_active()` is workspace-wide, so this is fatal
-    // even for a sweep whose repos are all raw-TCP (no HTTP service ⇒ no route,
-    // no `ws-net` join) and thus need no Caddy. Niche — a `domain` is set because
-    // some repo routes — and the alternative (deriving every repo's services here
-    // just to decide) isn't worth it. Documented in HANDOFF.
+    // Bring up the shared routing infra once before the loop, best-effort. It's
+    // NOT fatal here: a sweep whose repos are all raw-TCP (no HTTP service) joins
+    // no `ws-net` and drops no host port, so it needs neither Caddy nor the
+    // network — a broken Caddy shouldn't block it. Fatality lands precisely where
+    // routing is load-bearing instead: an HTTP container whose `ws-net` is missing
+    // fails its own `compose up`, and one whose route won't install is failed
+    // below (its host publish is `!reset` away, so an uninstalled route ⇒
+    // unreachable). `ensure_routing` owns the Caddy-side sequencing + the
+    // DNS-not-ready hint; we only surface what it returns.
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
             match crate::caddy::ensure_routing(cfg.runtime(), domain) {
                 Ok(Some(hint)) => crate::ui::note(&hint),
                 Ok(None) => {}
-                Err(e) => return Err(super::op_failure(format!("{e:#}"))),
+                Err(e) => crate::ui::note(&format!("routing infra not ready: {e:#}")),
             }
         }
     }
@@ -132,13 +140,15 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
-        // Sync Caddy routes: add after a successful `up`, remove on `down`.
-        // Best-effort per repo — Caddy itself is already confirmed up (the fatal
-        // `ensure_routing` above), so a route failure here is a rare transient
-        // admin error, surfaced on its own step line and recoverable by re-running
-        // `ws up`; the containers are healthy either way.
+        // Sync Caddy routes: add after a successful `up`, remove on `down`. A
+        // container's HTTP services are reachable ONLY through Caddy now (the
+        // override `!reset`s their host publish), so an `up` route that won't
+        // install means the running container is unreachable — fail the repo.
         if cfg.routing_active() && (event == "down" || up_ok) {
-            sync_routes(&cfg, &ws.root, &sanitized, repo, event);
+            let routed_ok = sync_routes(&cfg, &ws.root, &sanitized, repo, event);
+            if event == "up" && !routed_ok {
+                result.demote(repo);
+            }
         }
     }
 
@@ -146,26 +156,26 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 }
 
 /// Add (`up`) or remove (`down`) the Caddy routes for a repo's HTTP services.
-/// Best-effort per repo: a route-sync failure is surfaced on its own step line
-/// but doesn't fail the op. Caddy itself is already confirmed up (the fatal
-/// `ensure_routing` above), so a failure here is a rare per-route admin error,
-/// recoverable by re-running `ws up`; the containers are healthy either way.
+/// Returns whether the sync succeeded: always `true` for `down` (removal is
+/// best-effort — teardown is infallible by design) and for a repo with no HTTP
+/// routes; on `up`, `false` if any route failed to install (the container caller
+/// fails the repo, since an HTTP container has no host-port fallback).
 fn sync_routes(
     cfg: &config::WsConfig,
     root: &std::path::Path,
     sanitized: &str,
     repo: &str,
     event: &str,
-) {
+) -> bool {
     let routes = inject::routes(cfg, root, sanitized, repo);
     if routes.is_empty() {
-        return;
+        return true;
     }
     if event == "down" {
         for r in &routes {
             crate::caddy::route_down(&r.id);
         }
-        return;
+        return true;
     }
     let mut hosts = Vec::new();
     let mut err = None;
@@ -177,8 +187,14 @@ fn sync_routes(
     }
     let step = crate::ui::step(repo, "routed");
     match err {
-        None => step.ok_with(&hosts.join(", ")),
-        Some(e) => step.fail(&e),
+        None => {
+            step.ok_with(&hosts.join(", "));
+            true
+        }
+        Some(e) => {
+            step.fail(&e);
+            false
+        }
     }
 }
 
@@ -202,7 +218,10 @@ fn sweep_host(
         let step = crate::ui::step(repo, "stop (systemd)");
         result.record(repo, step, crate::supervise::down(&unit));
         if cfg.routing_active() {
-            sync_routes(cfg, root, sanitized, repo, "down");
+            // Best-effort for a host repo (unlike a container): a host service
+            // binds a real `WS_PORT` on the host, so it stays reachable there even
+            // if its Caddy route (the hostname) fails to sync.
+            let _ = sync_routes(cfg, root, sanitized, repo, "down");
         }
         return;
     }
@@ -233,7 +252,9 @@ fn sweep_host(
             crate::ui::step(repo, label).ok();
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
-                sync_routes(cfg, root, sanitized, repo, "up");
+                // Best-effort (see the `down` arm): a host service keeps its
+                // bound `WS_PORT`, so a route failure doesn't strand it.
+                let _ = sync_routes(cfg, root, sanitized, repo, "up");
             }
         }
         Err(e) => {
