@@ -191,13 +191,27 @@ fn ssh_bin() -> String {
 /// stall the caller.
 const SSH_FAST_OPTS: &[&str] = &["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"];
 
+/// Connection-multiplexing options applied to every `ws` SSH call. A single op
+/// makes many short connections (Caddy bring-up, per-port probes, route CRUD,
+/// the lifecycle script); `ControlMaster=auto` opens a master on the first
+/// connect and the rest ride it, collapsing N TCP+auth handshakes into one.
+/// `ControlPersist` keeps the master briefly so consecutive `ws` commands reuse
+/// it too; `ControlPath` is keyed by `%C` (a hash of user+host+port) so parallel
+/// `ws` to *different* servers never share a master. `ssh` re-creates a stale
+/// socket automatically, so a crashed master self-heals.
+const SSH_MUX_OPTS: &[&str] = &[
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPath=~/.ssh/ws-cm-%C",
+    "-o", "ControlPersist=30",
+];
+
 /// An `ssh` command to `connection` with the non-interactive fail-fast options
-/// applied — the caller appends the remote command/script and sets stdio. The
-/// single owner of the `ssh <fast-opts> <dest>` prefix shared by `Site` and the
-/// probes.
+/// (+ connection multiplexing) applied — the caller appends the remote
+/// command/script and sets stdio. The single owner of the `ssh <fast-opts> <dest>`
+/// prefix shared by `Site` and the probes.
 fn ssh_fast(connection: &str) -> Command {
     let mut c = Command::new(ssh_bin());
-    c.args(SSH_FAST_OPTS).arg(connection);
+    c.args(SSH_FAST_OPTS).args(SSH_MUX_OPTS).arg(connection);
     c
 }
 
@@ -328,6 +342,41 @@ pub fn run_event(
     ssh_command(connection, &script, false).status()
 }
 
+/// Run a repo's read-only `status` command on the server and return its first
+/// non-empty stdout line — the remote analogue of `hooks::capture_action`. Runs
+/// in the synced worktree with the `WS_*` contract + injected env, bounded by a
+/// server-side `timeout` so a wedged probe can't stall `ws list`. `None` on any
+/// failure (unreachable, non-zero, empty). `base` is the absolute server worktree
+/// base (home-resolved by the caller).
+pub fn capture_status(
+    connection: &str,
+    base: &str,
+    task: &str,
+    repo: &str,
+    extra_env: &[(String, String)],
+    command: &str,
+    timeout_secs: u64,
+) -> Option<String> {
+    let dir = worktree_path(base, task, repo);
+    let mut env: Vec<(&str, &str)> = vec![
+        ("WS_REPO", repo),
+        ("WS_BRANCH_SANITIZED", task),
+        ("WS_HOOK_NAME", "status"),
+        ("WS_WORKTREE", &dir),
+        ("WS_WORKSPACE_ROOT", base),
+    ];
+    env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+
+    let mut script = format!("cd {} && ", shell_quote(&dir));
+    for (k, v) in &env {
+        script.push_str(&format!("{k}={} ", shell_quote(v)));
+    }
+    script.push_str(&format!("timeout {timeout_secs} sh -c {}", shell_quote(command)));
+
+    let out = ssh_capture(connection, &script)?;
+    out.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
+}
+
 /// Assemble the `ssh` command for `connection` running `script`. Passes `-t`
 /// (force a remote pty) when `want_tty` — the caller decides based on whether
 /// our stdio is interactive; see `exec`. Interactive work (tinker, prompts,
@@ -338,7 +387,9 @@ pub fn ssh_command(connection: &str, script: &str, want_tty: bool) -> Command {
     if want_tty {
         c.arg("-t");
     }
-    c.arg(connection).arg(script);
+    // Ride the same multiplexed connection the probes/`Site` calls opened, so the
+    // lifecycle script doesn't pay a second full handshake.
+    c.args(SSH_MUX_OPTS).arg(connection).arg(script);
     c
 }
 

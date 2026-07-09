@@ -18,6 +18,10 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn run() -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
+    // Where the stacks live. Resolved once (one SSH for a remote workspace). `None`
+    // ⇒ a remote server we can't reach — status is then simply omitted (we can't
+    // probe the remote stack; the rest of the listing still renders).
+    let site = crate::remote::Site::resolve(&cfg).ok();
 
     crate::ui::header("ws-list", "");
 
@@ -46,14 +50,34 @@ pub fn run() -> Result<()> {
             let (task_key, managed) = classify(&wt_canon, &worktrees_root);
             let dirty = git::is_dirty(&wt_path);
 
-            let status = if managed {
+            let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
+            let status = if !managed {
+                None
+            } else if let Some(r) = cfg.remote.as_ref() {
+                // Remote workspace: run the declared `status` script ON THE SERVER
+                // (a legacy `.ws-hooks` file lives on the host and can't). Skip when
+                // the server is unreachable (`site` didn't resolve to `Remote`) —
+                // status of the remote stack isn't knowable from here.
+                match site.as_ref() {
+                    Some(s @ crate::remote::Site::Remote { .. }) => {
+                        cfg.script_command(repo, "status").and_then(|cmd| {
+                            let extra_env = inject::prepare(
+                                &cfg, s, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
+                            )
+                            .unwrap_or_default();
+                            let base = s.abs_base(&r.worktree_base(&ws.root));
+                            crate::remote::capture_status(
+                                &r.connection, &base, &sanitized, repo, &extra_env, &cmd,
+                                STATUS_TIMEOUT.as_secs(),
+                            )
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                // Local workspace: run the `status` hook/script locally (Inspect —
+                // no allocation/derive; the recorded ports come from `.ws-meta`).
                 hooks::resolve(&cfg, &ws.root, repo, "status").and_then(|action| {
-                    let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
-                    // Read-only status probe (Inspect): the injection site is
-                    // location-agnostic here (no derive/alloc/override), and it
-                    // runs the `status` script locally, so `Local` is right even
-                    // for a remote workspace — the recorded ports come from the
-                    // host `.ws-meta` either way.
                     let extra_env = inject::prepare(
                         &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
                         inject::Phase::Inspect,
@@ -64,8 +88,6 @@ pub fn run() -> Result<()> {
                         &extra_env,
                     )
                 })
-            } else {
-                None
             };
 
             let note = if managed {

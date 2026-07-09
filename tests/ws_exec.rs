@@ -132,10 +132,12 @@ fn remote_workspace_dispatches_over_ssh() {
 
     let recorded = std::fs::read_to_string(&args_file).expect("ssh was invoked");
     let lines: Vec<&str> = recorded.lines().collect();
-    // No TTY in tests (stdin isn't a terminal), so no `-t`: just host + script.
-    assert_eq!(lines[0], "srv", "first ssh arg is the connection");
+    // No TTY in tests (stdin isn't a terminal), so no `-t`. Connection-multiplexing
+    // options (`-o ControlMaster…`) prefix the args, so the connection and the
+    // remote script are the final two.
+    assert_eq!(lines[lines.len() - 2], "srv", "the connection precedes the script");
     assert_eq!(
-        lines[1],
+        lines[lines.len() - 1],
         "cd workspace/feat-foo/api && WS_REPO=api WS_BRANCH_SANITIZED=feat-foo exec php artisan migrate",
         "remote script cds, exports WS_*, and execs the command"
     );

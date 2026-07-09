@@ -25,6 +25,7 @@ case "$last" in
   *'printf %s'*) printf /home/test ;;
   *'ss -Hltn'*) echo free ;;
   *'is-active'*) exit 3 ;;
+  *'timeout '*) echo running ;;
   *) exit 0 ;;
 esac"#,
     )
@@ -117,6 +118,45 @@ fn down_runs_the_script_on_the_server_over_ssh() {
             && l.contains("exec sh -c 'echo stopping'")),
         "down script not dispatched over ssh:\n{rec}"
     );
+}
+
+#[test]
+fn list_runs_status_on_the_server_for_a_remote_workspace() {
+    // `ws list` status for a remote workspace runs the declared `status` script ON
+    // THE SERVER (in the synced worktree, timeout-bounded), not locally.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{
+            "repos":[{"name":"api","services":{"mysql":{"port":3306}},
+                      "scripts":{"up":"echo x","status":"docker compose ps"}}],
+            "remote":{"connection":"srv","workspace_path":"ws"}
+        }"#,
+    );
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    let args = f.path().join("list-ssh.txt");
+    let out = f.run_with_env(
+        &["list"],
+        &[
+            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    assert!(
+        rec.lines().any(|l| l.contains("cd /home/test/ws/feat-foo/api &&")
+            && l.contains("timeout 5 sh -c 'docker compose ps'")),
+        "status not run on the server:\n{rec}"
+    );
+    // The status the server reported shows in the listing.
+    let shown = format!("{}{}", common::stdout(&out), stderr(&out));
+    assert!(shown.contains("running"), "status not surfaced in the listing:\n{shown}");
 }
 
 #[test]
