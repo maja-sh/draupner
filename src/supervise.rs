@@ -12,9 +12,9 @@
 //! can substitute fakes that record their argv.
 
 use anyhow::{bail, Context, Result};
-use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::remote::Site;
 use crate::workspace;
 
 fn systemd_run_bin() -> String {
@@ -23,6 +23,27 @@ fn systemd_run_bin() -> String {
 
 fn systemctl_bin() -> String {
     std::env::var("WS_SYSTEMCTL").unwrap_or_else(|_| "systemctl".to_string())
+}
+
+/// Build the command that runs a `systemd-run`/`systemctl` invocation (`argv`) at
+/// `site`. Local: spawn the binary directly, honoring the `WS_SYSTEMD_RUN` /
+/// `WS_SYSTEMCTL` test seams (argv[0]) — behavior unchanged. Remote: run it on the
+/// server over SSH, first exporting `XDG_RUNTIME_DIR`. A non-login SSH command has
+/// no D-Bus session address, so `systemctl --user` would otherwise fail with
+/// "Failed to connect to bus: No medium found"; linger keeps the user manager
+/// alive (a server-setup step) and this points the client at `/run/user/<uid>`.
+fn systemd_command(site: &Site, argv: &[String]) -> Command {
+    match site {
+        Site::Local => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+        Site::Remote { .. } => {
+            let quoted: Vec<String> = argv.iter().map(|a| crate::remote::shell_quote(a)).collect();
+            site.shell(&format!("export XDG_RUNTIME_DIR=/run/user/$(id -u); {}", quoted.join(" ")))
+        }
+    }
 }
 
 /// Transient unit name for a worktree's host process: `ws-<sanitized-branch>-<repo>`.
@@ -38,24 +59,28 @@ pub fn unit_name(branch: &str, repo: &str) -> String {
 /// `Ok(false)` is returned so the caller can say so rather than imply a fresh
 /// start. `Ok(true)` when it actually launched. A changed `up` command/env only
 /// takes effect after `ws down` — the returned flag lets the UI hint that.
-pub fn up(unit: &str, worktree: &Path, cmd: &str, env: &[(String, String)]) -> Result<bool> {
-    if is_active(unit) {
+pub fn up(site: &Site, unit: &str, worktree: &str, cmd: &str, env: &[(String, String)]) -> Result<bool> {
+    if is_active(site, unit) {
         return Ok(false);
     }
     // Clear any lingering failed state so the unit name is free to reuse.
-    reset_failed(unit);
+    reset_failed(site, unit);
 
-    let mut c = Command::new(systemd_run_bin());
-    c.args(["--user", "--quiet"])
-        .arg(format!("--unit={unit}"))
-        .arg(format!("--working-directory={}", worktree.display()))
-        .args(["--property", "Restart=on-failure"]);
+    let mut argv: Vec<String> = vec![
+        systemd_run_bin(),
+        "--user".into(),
+        "--quiet".into(),
+        format!("--unit={unit}"),
+        format!("--working-directory={worktree}"),
+        "--property".into(),
+        "Restart=on-failure".into(),
+    ];
     for (k, v) in env {
-        c.arg(format!("--setenv={k}={v}"));
+        argv.push(format!("--setenv={k}={v}"));
     }
-    c.arg("--").args(["sh", "-c", cmd]);
+    argv.extend(["--".into(), "sh".into(), "-c".into(), cmd.to_string()]);
 
-    let out = c
+    let out = systemd_command(site, &argv)
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("spawn {}", systemd_run_bin()))?;
@@ -69,24 +94,28 @@ pub fn up(unit: &str, worktree: &Path, cmd: &str, env: &[(String, String)]) -> R
 /// is already gone, is fine — but a stop that leaves the unit *still running* is
 /// an error, so a caller (teardown) doesn't remove the worktree out from under a
 /// live process.
-pub fn down(unit: &str) -> Result<()> {
-    let _ = Command::new(systemctl_bin())
-        .args(["--user", "stop", unit])
+pub fn down(site: &Site, unit: &str) -> Result<()> {
+    let _ = systemd_command(site, &stanza("stop", unit))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    reset_failed(unit);
-    if is_active(unit) {
+    reset_failed(site, unit);
+    // The `is_active` guard confirms the stop landed. Remote caveat: over a *flaky*
+    // SSH link `is_active` can't reach the server and returns `false`, so `down`
+    // reports success without confirming — teardown would then drop the worktree
+    // while the server process may still run. Accepted (teardown is best-effort;
+    // `up`'s idempotency needs the same `false` default, and a truly dead server is
+    // handled by the `None`-site skip); a genuinely-up unit on a live link is caught.
+    if is_active(site, unit) {
         bail!("unit {unit} is still active after stop");
     }
     Ok(())
 }
 
-/// Whether a host unit is currently running (`systemctl --user is-active`).
-pub fn is_active(unit: &str) -> bool {
-    Command::new(systemctl_bin())
-        .args(["--user", "is-active", unit])
+/// Whether a host unit is currently running (`systemctl --user is-active`) at `site`.
+pub fn is_active(site: &Site, unit: &str) -> bool {
+    systemd_command(site, &stanza("is-active", unit))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -95,13 +124,17 @@ pub fn is_active(unit: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn reset_failed(unit: &str) {
-    let _ = Command::new(systemctl_bin())
-        .args(["--user", "reset-failed", unit])
+fn reset_failed(site: &Site, unit: &str) {
+    let _ = systemd_command(site, &stanza("reset-failed", unit))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+/// The argv for a one-verb `systemctl --user <verb> <unit>` invocation.
+fn stanza(verb: &str, unit: &str) -> [String; 4] {
+    [systemctl_bin(), "--user".into(), verb.into(), unit.into()]
 }
 
 fn first_line(s: &str) -> &str {

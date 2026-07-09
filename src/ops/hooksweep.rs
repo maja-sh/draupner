@@ -306,21 +306,15 @@ fn sweep_host(
     phase: inject::Phase,
     result: &mut SweepResult,
 ) {
-    // Host-process supervision is `systemd --user` on the local box. Driving a
-    // *remote* server's systemd over SSH is a later slice, so a `kind: host` repo
-    // in a remote workspace is skipped with a clear note rather than silently
-    // supervised on the wrong machine (the host).
-    if site.is_remote() {
-        crate::ui::skip(repo, "remote host-process supervision isn't supported yet (kind: host)");
-        result.skipped.push(repo.to_string());
-        return;
-    }
-
+    // Host-process supervision is a `systemd --user` transient unit — on the local
+    // box, or on the server over SSH for a remote workspace (the `Site` carries
+    // the location; `supervise` sets `XDG_RUNTIME_DIR` remotely so `systemctl
+    // --user` finds the user bus).
     let unit = crate::supervise::unit_name(branch, repo);
 
     if event == "down" {
         let step = crate::ui::step(repo, "stop (systemd)");
-        result.record(repo, step, crate::supervise::down(&unit));
+        result.record(repo, step, crate::supervise::down(site, &unit));
         if cfg.routing_active() {
             // Best-effort for a host repo (unlike a container): a host service
             // binds a real `WS_PORT` on the host, so it stays reachable there even
@@ -331,11 +325,7 @@ fn sweep_host(
     }
 
     // `up`: the launch command is the repo's declared `up` script.
-    let Some(cmd) = cfg
-        .repo_config(repo)
-        .and_then(|rc| rc.scripts.get("up"))
-        .map(|s| s.commands().join(" && "))
-    else {
+    let Some(cmd) = cfg.script_command(repo, "up") else {
         crate::ui::skip(repo, "no up script");
         result.skipped.push(repo.to_string());
         return;
@@ -350,7 +340,18 @@ fn sweep_host(
         }
     };
 
-    match crate::supervise::up(&unit, wt, &cmd, &extra_env) {
+    // The process's working dir at its execution site: the server-side synced dir
+    // (absolute) for a remote workspace — flush first so the launched process sees
+    // the rendered templates / latest code — else the local worktree.
+    let worktree = match cfg.remote.as_ref() {
+        Some(r) => {
+            let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
+            crate::remote::worktree_path(&site.abs_base(&r.worktree_base(root)), sanitized, repo)
+        }
+        None => wt.to_string_lossy().into_owned(),
+    };
+
+    match crate::supervise::up(site, &unit, &worktree, &cmd, &extra_env) {
         Ok(started) => {
             let label = if started { "start (systemd)" } else { "already running (ws down to apply changes)" };
             crate::ui::step(repo, label).ok();

@@ -11,10 +11,11 @@ use common::{stderr, WorkspaceFixture};
 use std::path::{Path, PathBuf};
 
 /// A `WS_SSH` stub that: records every invocation's argv to `$ARGS_FILE`, answers
-/// the `$HOME` probe (`Site::resolve`) with a fixed home, and reports every
-/// candidate port free (the `ss` probe expects a literal `free` on stdout).
-/// Everything else exits 0. Lets a full remote `up`/`down` proceed without a real
-/// server.
+/// the `$HOME` probe (`Site::resolve`) with a fixed home, reports every candidate
+/// port free (the `ss` probe expects a literal `free` on stdout), and reports a
+/// host unit as not-active (`is-active` → non-zero) so `supervise::up` proceeds to
+/// `systemd-run`. Everything else exits 0. Lets a full remote `up`/`down` proceed
+/// without a real server.
 fn ssh_stub(f: &WorkspaceFixture) -> PathBuf {
     f.stub(
         "fake-ssh",
@@ -23,6 +24,7 @@ last="${!#}"
 case "$last" in
   *'printf %s'*) printf /home/test ;;
   *'ss -Hltn'*) echo free ;;
+  *'is-active'*) exit 3 ;;
   *) exit 0 ;;
 esac"#,
     )
@@ -118,16 +120,16 @@ fn down_runs_the_script_on_the_server_over_ssh() {
 }
 
 #[test]
-fn host_repo_on_a_remote_workspace_is_skipped() {
-    // Remote host-process supervision (systemd over SSH) is a later slice; a
-    // `kind: host` repo in a remote workspace must be skipped with a note, not
-    // silently supervised on the host.
+fn host_repo_on_a_remote_workspace_runs_systemd_on_the_server() {
+    // A `kind: host` repo on a remote workspace is supervised as a `systemd --user`
+    // unit ON THE SERVER over SSH: XDG_RUNTIME_DIR set (so the user bus is found),
+    // the server worktree as --working-directory, the allocated port via --setenv.
     let f = WorkspaceFixture::empty();
     f.add_repo("svc");
     f.write_ws_json(
         r#"{
             "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
-                      "scripts":{"up":"run"}}],
+                      "scripts":{"up":"run --port $WS_PORT_web"}}],
             "remote":{"connection":"srv","workspace_path":"ws"}
         }"#,
     );
@@ -135,18 +137,28 @@ fn host_repo_on_a_remote_workspace_is_skipped() {
     let mg = mutagen_noop(&f);
     new_remote(&f, "svc", &ssh, &mg);
 
+    let args = f.path().join("up-ssh.txt");
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
             ("WS_SSH", ssh.to_str().unwrap()),
             ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", f.path().join("up-ssh.txt").to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws up should succeed (skip), got:\n{}", stderr(&out));
-    let all = format!("{}{}", common::stdout(&out), stderr(&out));
+    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    let line = rec
+        .lines()
+        .find(|l| l.contains("systemd-run --user"))
+        .unwrap_or_else(|| panic!("systemd-run not dispatched over ssh:\n{rec}"));
+    assert!(line.contains("export XDG_RUNTIME_DIR=/run/user/$(id -u)"), "XDG not set:\n{line}");
+    assert!(line.contains("--unit=ws-feat-foo-svc"), "wrong unit:\n{line}");
     assert!(
-        all.contains("remote host-process supervision"),
-        "expected a skip note for the host repo:\n{all}"
+        line.contains("--working-directory=/home/test/ws/feat-foo/svc"),
+        "working dir must be the server worktree:\n{line}"
     );
+    assert!(line.contains("WS_PORT_web="), "allocated port not injected:\n{line}");
+    assert!(line.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{line}");
 }
