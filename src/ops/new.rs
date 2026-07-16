@@ -115,13 +115,14 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         // A remote workspace establishes the file sync FIRST, so the injection
         // (server-side compose derive + override) and post-create below run
         // against files that exist on the server; a local workspace has them
-        // already. The `excludes` (node_modules/vendor + configured) double as
-        // sync ignores so those per-host artifacts stay off the wire.
+        // already. Ignores (configured + on-disk dep artifacts) keep per-host
+        // trees off the wire — shared with `ws remote set`'s backfill.
         if let Some(r) = &cfg.remote {
             let step = crate::ui::step(repo_name, "Sync created");
             let session = mutagen::session_name(branch, repo_name);
             let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
-            match mutagen::create(&session, &wt_path, &r.connection, &remote_path, &excludes) {
+            let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
+            match mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores) {
                 Ok(()) => step.ok(),
                 Err(e) => {
                     step.fail(&format!("{e}"));

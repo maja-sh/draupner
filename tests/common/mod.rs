@@ -261,6 +261,11 @@ impl WorkspaceFixture {
         cmd.args(args)
             .current_dir(cwd)
             .env_remove("RUST_LOG")
+            // The HOME redirect below is what isolates `~/.config/ws` (the
+            // global config, persisted https_port) into the fixture — an
+            // XDG_CONFIG_HOME inherited from the dev shell would bypass it and
+            // write into the developer's real config dir.
+            .env_remove("XDG_CONFIG_HOME")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
             // Treat Caddy as externally managed (the always-200 stub) so a test

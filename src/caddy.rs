@@ -465,15 +465,9 @@ fn container_running(site: &Site, runtime: &str, name: &str) -> bool {
 }
 
 /// Where the pinned Caddy boot config lives (machine-global — one Caddy serves
-/// every workspace on the box). `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
+/// every workspace on the box): the shared `~/.config/ws/` dir.
 fn config_dir() -> PathBuf {
-    if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
-        if !x.is_empty() {
-            return PathBuf::from(x).join("ws");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("ws")
+    crate::config::global_dir()
 }
 
 /// The absolute config dir at `site`, holding the pinned config and the admin

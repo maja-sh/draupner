@@ -42,6 +42,26 @@ pub fn session_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
+/// Sync ignores for a worktree: the repo's configured `worktree_excludes` plus
+/// the per-host dep artifacts (`vendor/`, `node_modules/`) present on disk.
+/// Disk presence is the ground truth at both call sites — `ws new` creates the
+/// sync after deps land, `ws remote set` backfills an existing worktree — and
+/// deps are arch-specific: they belong installed on each side, not on the wire.
+/// The one home for "what stays off the sync"; a drifted copy would ship a
+/// node_modules-scale tree over SSH.
+///
+/// A dep dir that is git-TRACKED is committed source (Go-style vendoring), not
+/// a per-host artifact — it must reach the server, so it is never ignored.
+pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
+    let mut ignores = configured.to_vec();
+    for dep in ["vendor", "node_modules"] {
+        if worktree.join(dep).exists() && !crate::git::is_tracked(worktree, dep) {
+            ignores.push(format!("/{dep}"));
+        }
+    }
+    ignores
+}
+
 /// The `beta` (remote) endpoint mutagen syncs to: `<connection>:<remote_path>`.
 /// `connection` is the SSH host; `remote_path` is resolved the same way `ws
 /// exec` resolves its `cd` target, so sync and exec always agree on the layout.

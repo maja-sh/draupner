@@ -1,5 +1,7 @@
 pub mod init;
 pub mod claude;
+pub mod config;
+pub mod remote_set;
 pub mod new;
 pub mod hooksweep;
 pub mod teardown;
@@ -38,6 +40,74 @@ pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into(), silent: false }.into()
 }
 
+/// The machine-wide default remote host when no explicit host was given:
+/// `$WS_REMOTE_HOST` (the env override), then the global config's `remote.host`
+/// (`ws config set remote.host <h>`). Callers try their explicit flag/arg
+/// first, completing the documented precedence: flag > env > global config.
+/// A malformed global config is noted (not fatal) — the caller's own
+/// "needs a host" error would otherwise mask the real problem.
+pub(crate) fn default_remote_host() -> Option<String> {
+    if let Some(h) = std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
+        return Some(h);
+    }
+    match crate::config::GlobalConfig::load() {
+        // A hand-edited empty host is treated as unset, same as the env var —
+        // the caller's "needs a host" guidance beats an "unsafe host" refusal.
+        Ok(g) => g.remote_host().filter(|h| !h.is_empty()).map(String::from),
+        Err(e) => {
+            crate::ui::note(&format!("global config: {e}"));
+            None
+        }
+    }
+}
+
+/// Client-side readiness for a remote workspace (mutagen installed locally,
+/// host reachable over SSH), checked when the remote block is configured
+/// (`ws init --remote`, `ws remote set`) so a teammate hears about a bad setup
+/// there instead of at their first `ws new`. Strict — `no_verify` (the callers'
+/// `--no-verify` flag) skips it for the bootstrap case where the server isn't
+/// provisioned yet. Owns the step UI too, so the ceremony can't drift between
+/// callers. This is the *client* half; full server validation is `ws remote
+/// check`.
+pub(crate) fn verify_remote_client(
+    r: &crate::config::RemoteConfig,
+    no_verify: bool,
+) -> anyhow::Result<()> {
+    if no_verify {
+        return Ok(());
+    }
+    let step = crate::ui::step("cfg", "remote reachable");
+    match verify_probes(r) {
+        Ok(()) => {
+            step.ok();
+            Ok(())
+        }
+        Err(e) => {
+            step.fail("check failed");
+            Err(e)
+        }
+    }
+}
+
+fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
+    // Reuse the same read-only probes `ws remote check` runs, so there's one
+    // source of truth for "is the remote reachable / can we sync".
+    if !crate::probe::mutagen_local().ok {
+        return Err(preflight(
+            "mutagen isn't installed — a remote workspace needs it locally to sync. \
+             Install mutagen, or pass `--no-verify` to configure anyway.",
+        ));
+    }
+    if !crate::probe::ssh_reachable(&r.connection).ok {
+        return Err(preflight(format!(
+            "can't reach `{}` over SSH — fix the connection (host/key/Tailscale), \
+             or pass `--no-verify` to configure anyway.",
+            r.connection
+        )));
+    }
+    Ok(())
+}
+
 /// Run a repo's declared lifecycle `cmd` for `event` on the remote server: flush
 /// the worktree's mutagen sync so the server sees the latest files, dispatch the
 /// command over SSH in the synced worktree, and map the outcome to a `Result`.
@@ -66,10 +136,11 @@ pub(crate) fn run_remote_event(
     }
 }
 
-/// Propagate a child process's exit code without printing a failure banner.
-/// `ws exec` is a transparent runner — when the command it ran exits non-zero,
-/// the command has already reported why, so `ws` mirrors the code and stays
-/// silent (`silent: true`; `main` skips the banner).
+/// Exit with `code`, printing no failure banner — everything worth saying has
+/// already been said (`silent: true`; `main` skips the banner). Used where `ws`
+/// mirrors an outcome it merely relays: `ws exec` passing through a child's
+/// exit code (the child reported its own failure), `ws config get` on an unset
+/// key (git-parity exit 1, the stderr note said so).
 pub(crate) fn passthrough_exit(code: i32) -> anyhow::Error {
     ExitError { code, msg: String::new(), silent: true }.into()
 }

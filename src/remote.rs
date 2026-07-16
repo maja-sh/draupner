@@ -224,7 +224,29 @@ fn ssh_fast(connection: &str) -> Command {
 /// value instead. The single owner of "is this a safe ssh destination", called
 /// where a connection enters from config / the CLI.
 pub fn connection_looks_safe(connection: &str) -> bool {
-    !connection.is_empty() && !connection.starts_with('-')
+    // Control chars can't appear in a legitimate host/alias; rejecting them
+    // also keeps a hostile stored connection from smuggling ANSI/OSC sequences
+    // into terminal output when it's echoed (header/note lines).
+    !connection.is_empty()
+        && !connection.starts_with('-')
+        && !connection.chars().any(char::is_control)
+}
+
+/// `connection_looks_safe` as a refusal with the one shared message, for the
+/// places a host enters from user input (`ws remote set`, `ws remote check
+/// --host`, `ws init --remote`, `ws config set remote.host`). `config::load`
+/// keeps its own wording — a stored connection's threat model (a hostile
+/// `.ws.json` in a clone) deserves the extra context.
+pub fn ensure_connection_safe(connection: &str) -> anyhow::Result<()> {
+    if connection.is_empty() {
+        anyhow::bail!("an SSH host must not be empty");
+    }
+    if !connection_looks_safe(connection) {
+        anyhow::bail!(
+            "unsafe SSH host `{connection}` — must not start with `-` (ssh would read it as an option)"
+        );
+    }
+    Ok(())
 }
 
 /// Light reachability probe: can we open a non-interactive SSH session to
@@ -451,6 +473,23 @@ mod tests {
         assert_eq!(shell_quote("php"), "php");
         assert_eq!(shell_quote("artisan"), "artisan");
         assert_eq!(shell_quote("a/b-c.d:e"), "a/b-c.d:e");
+    }
+
+    #[test]
+    fn connection_guard_rejects_empty_options_and_control_chars() {
+        assert!(connection_looks_safe("srv"));
+        assert!(connection_looks_safe("user@10.0.0.5"));
+        assert!(!connection_looks_safe(""));
+        assert!(!connection_looks_safe("-oProxyCommand=evil"));
+        // ANSI/OSC smuggling via an echoed hostile connection.
+        assert!(!connection_looks_safe("\u{1b}]0;owned\u{7}host"));
+        assert!(!connection_looks_safe("host\nname"));
+
+        // The refusal wrapper distinguishes empty from option-shaped.
+        let empty = ensure_connection_safe("").unwrap_err().to_string();
+        assert!(empty.contains("must not be empty"), "{empty}");
+        let dash = ensure_connection_safe("-x").unwrap_err().to_string();
+        assert!(dash.contains("unsafe SSH host"), "{dash}");
     }
 
     #[test]

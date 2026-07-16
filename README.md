@@ -17,7 +17,7 @@ Prereq for tests: `cargo install cargo-nextest --locked` (one-time, per machine)
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `WS_REMOTE_HOST` | — | Default SSH host for a bare `ws init --remote` (when no `<host>` is given). |
+| `WS_REMOTE_HOST` | — | Default SSH host for a bare `ws init --remote` / `ws remote set` (when no `<host>` is given). Precedence: explicit flag/arg > this > `ws config` `remote.host`. |
 | `WS_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH`. |
 | `WS_MUTAGEN` | `mutagen` | Override the `mutagen` binary. |
 | `CLAUDE_SKILLS_DIR` | `~/.claude/skills` | Where `ws claude` installs skill files. |

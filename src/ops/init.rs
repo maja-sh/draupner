@@ -25,35 +25,12 @@ pub fn run(
     init_local(&cwd, remote_cfg, domain, runtime, no_verify)
 }
 
-/// Client-side readiness for a remote workspace, checked at config time so a
-/// teammate hears about a bad setup here instead of at their first `ws new`.
-/// Strict by default (refuse); `--no-verify` skips it for the bootstrap case
-/// where the server isn't provisioned yet. This is the *client* half — full
-/// server validation (podman/Caddy/DNS/TLS) is `ws remote check`.
-fn verify_remote(r: &RemoteConfig) -> Result<()> {
-    // Reuse the same read-only probes `ws remote check` runs, so there's one
-    // source of truth for "is the remote reachable / can we sync".
-    if !crate::probe::mutagen_local().ok {
-        return Err(super::preflight(
-            "mutagen isn't installed — a remote workspace needs it locally to sync. \
-             Install mutagen, or `ws init --remote … --no-verify` to configure anyway.",
-        ));
-    }
-    if !crate::probe::ssh_reachable(&r.connection).ok {
-        return Err(super::preflight(format!(
-            "can't reach `{}` over SSH — fix the connection (host/key/Tailscale), \
-             or `--no-verify` to configure anyway.",
-            r.connection
-        )));
-    }
-    Ok(())
-}
-
 /// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, or
 /// `None` when `--remote` wasn't given. A bare `--remote` falls back to
-/// `$WS_REMOTE_HOST`. `workspace_path` is written explicitly (defaulting to the
-/// workspace dir name) so it's visible in `.ws.json`. `--domain` is handled
-/// separately — it's top-level now (routing is location-transparent).
+/// `$WS_REMOTE_HOST`, then the global default (`ws config set remote.host`).
+/// `workspace_path` is written explicitly (defaulting to the workspace dir
+/// name) so it's visible in `.ws.json`. `--domain` is handled separately —
+/// it's top-level now (routing is location-transparent).
 fn build_remote(
     root: &Path,
     remote: Option<Option<String>>,
@@ -61,19 +38,22 @@ fn build_remote(
 ) -> Result<Option<RemoteConfig>> {
     let Some(conn) = remote else { return Ok(None) };
     let connection = conn
-        .or_else(|| std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()))
+        .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`ws init --remote` needs a host: pass `--remote <host>` or set $WS_REMOTE_HOST",
+                "`ws init --remote` needs a host: pass `--remote <host>`, set $WS_REMOTE_HOST, \
+                 or `ws config set remote.host <host>`",
             )
         })?;
-    let workspace_path = remote_path.or_else(|| dir_name(root));
-    Ok(Some(RemoteConfig::new(connection, workspace_path)))
-}
-
-/// The basename of `root` as an owned String (the workspace's own dir name).
-fn dir_name(root: &Path) -> Option<String> {
-    root.file_name().map(|n| n.to_string_lossy().into_owned())
+    // The flag path is fresh user input — refuse an option-shaped host here,
+    // not just when a stored config is later loaded.
+    crate::remote::ensure_connection_safe(&connection).map_err(|e| super::preflight(e.to_string()))?;
+    // An empty --remote-path (a script's unset variable) is treated as absent —
+    // storing "" would anchor the server layout at the filesystem root.
+    let workspace_path = remote_path
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| crate::config::default_worktree_base(root));
+    Ok(Some(RemoteConfig::new(connection, Some(workspace_path))))
 }
 
 fn init_local(
@@ -114,16 +94,7 @@ fn init_local(
     // Verify client readiness before writing anything, so a strict-mode refusal
     // leaves no half-written config behind.
     if let Some(r) = &remote {
-        if !no_verify {
-            let step = crate::ui::step("cfg", "remote reachable");
-            match verify_remote(r) {
-                Ok(()) => step.ok(),
-                Err(e) => {
-                    step.fail("check failed");
-                    return Err(e);
-                }
-            }
-        }
+        super::verify_remote_client(r, no_verify)?;
     }
 
     let repos = detect_repos(root)?;

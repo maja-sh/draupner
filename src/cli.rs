@@ -14,7 +14,7 @@ enum Cmd {
         /// Rewrite .ws.schema.json from the current schema, leave .ws.json alone
         #[arg(long)]
         refresh_schema: bool,
-        /// Offload to a server: SSH host to reach it (falls back to $WS_REMOTE_HOST)
+        /// Offload to a server: SSH host (falls back to $WS_REMOTE_HOST, then `ws config` remote.host)
         #[arg(long, value_name = "CONNECTION", num_args = 0..=1)]
         remote: Option<Option<String>>,
         /// Server dir the worktrees live under (default: this workspace's dir name)
@@ -55,10 +55,15 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Remote-offload verification (read-only; never mutates the server)
+    /// Configure or verify this workspace's remote offload
     Remote {
         #[command(subcommand)]
         cmd: RemoteCmd,
+    },
+    /// Get/set machine-global defaults (~/.config/ws/config.toml)
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
     },
     /// Run a command where the repo's stack lives (remote via ssh, else local)
     Exec {
@@ -87,6 +92,32 @@ enum RemoteCmd {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// Offload this workspace to a server (writes the remote block + backfills sync)
+    Set {
+        /// SSH host (falls back to $WS_REMOTE_HOST, then `ws config` remote.host)
+        connection: Option<String>,
+        /// Server dir the worktrees live under (default: kept, or this workspace's dir name)
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+        /// Private TLD for per-worktree hostnames (routing; local or remote)
+        #[arg(long, value_name = "DOMAIN")]
+        domain: Option<String>,
+        /// Skip the SSH reachability check (set refuses an unreachable host by default)
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Make this workspace local again (removes the remote block + sync sessions)
+    Unset,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print a value (bare, on stdout; exit 1 when unset)
+    Get { key: String },
+    /// Set a value (e.g. `ws config set remote.host srv`)
+    Set { key: String, value: String },
+    /// Remove a value (a no-op when already unset)
+    Unset { key: String },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -105,6 +136,14 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Setup{port,yes}         => crate::ops::setup::run(yes, port),
         Cmd::Remote{cmd}             => match cmd {
             RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
+            RemoteCmd::Set{connection,path,domain,no_verify} =>
+                crate::ops::remote_set::set(connection.as_deref(), path, domain, no_verify),
+            RemoteCmd::Unset             => crate::ops::remote_set::unset(),
+        },
+        Cmd::Config{cmd}             => match cmd {
+            ConfigCmd::Get{key}          => crate::ops::config::get(&key),
+            ConfigCmd::Set{key,value}    => crate::ops::config::set(&key, &value),
+            ConfigCmd::Unset{key}        => crate::ops::config::unset(&key),
         },
         Cmd::Exec{repo,local,no_flush,command} =>
             crate::ops::exec::run(repo.as_deref(), local, no_flush, &command),

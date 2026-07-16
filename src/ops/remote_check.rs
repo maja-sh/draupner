@@ -30,11 +30,8 @@ pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
 
     match connection {
         Some(conn) => {
-            if !crate::remote::connection_looks_safe(&conn) {
-                return Err(super::preflight(format!(
-                    "unsafe SSH host `{conn}` — must not start with `-` (ssh would read it as an option)"
-                )));
-            }
+            crate::remote::ensure_connection_safe(&conn)
+                .map_err(|e| super::preflight(e.to_string()))?;
             check_remote(&conn, &workspace_path, verbose)
         }
         None => check_local(&cfg, verbose),

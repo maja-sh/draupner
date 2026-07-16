@@ -343,6 +343,13 @@ pub fn clean_empty() {
     }
 }
 
+/// A machine-readable value on stdout — the one channel scripts consume
+/// (`ws config get`); everything human-facing goes to stderr via the helpers
+/// above. No styling ever, tty or not.
+pub fn value(text: &str) {
+    println!("{text}");
+}
+
 /// A single dim, subordinate line to stderr. Used by `ws exec` to note where a
 /// command is being dispatched (e.g. the remote host) without polluting the
 /// command's own stdout.
