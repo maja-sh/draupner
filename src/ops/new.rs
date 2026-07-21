@@ -122,15 +122,23 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
             let session = mutagen::session_name(branch, repo_name);
             let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
             let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
-            match mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores) {
+            let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
+                // Settle the initial push before we derive/render against the server.
+                .and_then(|()| {
+                    let _ = mutagen::flush(&session);
+                    // Confirm the files actually landed. A session whose transfer
+                    // fails still reports `Watching for changes` — the problem shows
+                    // only in `mutagen sync list --long` — so without this the step
+                    // reports success and the *next* step fails somewhere confusing.
+                    mutagen::verify_beta(&r.connection, &remote_path)
+                });
+            match synced {
                 Ok(()) => step.ok(),
                 Err(e) => {
                     step.fail(&format!("{e}"));
                     return Err(super::op_failure(format!("mutagen sync for {repo_name}: {e}")));
                 }
             }
-            // Settle the initial push before we derive/render against the server.
-            let _ = mutagen::flush(&session);
         }
 
         // Render templates + compute the injection env before post-create so

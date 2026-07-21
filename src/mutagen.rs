@@ -74,6 +74,55 @@ fn beta_endpoint(connection: &str, remote_path: &str) -> String {
 /// (node_modules, vendor) off the wire; `--ignore-vcs` drops the worktree's
 /// `.git` pointer (meaningless on the server). Idempotent: an existing session
 /// of the same name is treated as success.
+/// Create the beta root's **parent** on the server.
+///
+/// Mutagen creates the synchronization root itself but not the directories above
+/// it, and the beta path is `<workspace_path>/<task>/<repo>` — so the per-task
+/// directory never exists on a first `ws new`. Worse, the session still reports
+/// `Watching for changes`: the failure surfaces only as a transition problem in
+/// `mutagen sync list --long`, so sync looks healthy while nothing ever transfers.
+fn ensure_beta_parent(connection: &str, remote_path: &str) -> Result<()> {
+    let Some((parent, _)) = remote_path.rsplit_once('/') else { return Ok(()) };
+    if parent.is_empty() {
+        return Ok(());
+    }
+    let script = format!("mkdir -p {}", crate::remote::shell_quote(parent));
+    let out = crate::remote::ssh_command(connection, &script, false)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("spawn ssh to {connection}"))?;
+    if !out.status.success() {
+        bail!(
+            "could not create {parent} on {connection}: {}",
+            first_line(&String::from_utf8_lossy(&out.stderr))
+        );
+    }
+    Ok(())
+}
+
+/// Confirm the synchronization root now exists on the server.
+///
+/// Checks the outcome rather than mutagen's own status, which is not a reliable
+/// signal: a session whose transfer never completes still reports `Watching for
+/// changes`, and the failure appears only as a `Transition problems` line in the
+/// human-readable `sync list --long`. Asserting the directory is there turns a
+/// silently-dead sync into a failure at the step that owns it.
+pub fn verify_beta(connection: &str, remote_path: &str) -> Result<()> {
+    let script = format!("test -d {}", crate::remote::shell_quote(remote_path));
+    let ok = crate::remote::ssh_command(connection, &script, false)
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!(
+            "sync reported success but {remote_path} is missing on {connection} — \
+             check `mutagen sync list --long`"
+        );
+    }
+    Ok(())
+}
+
 pub fn create(
     session: &str,
     local: &Path,
@@ -81,6 +130,7 @@ pub fn create(
     remote_path: &str,
     ignores: &[String],
 ) -> Result<()> {
+    ensure_beta_parent(connection, remote_path)?;
     let beta = beta_endpoint(connection, remote_path);
     let mut cmd = Command::new(mutagen_bin());
     cmd.args(["sync", "create", "--name", session, "--ignore-vcs"]);
