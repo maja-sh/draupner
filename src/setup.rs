@@ -186,7 +186,13 @@ fn sh_quote(s: &str) -> String {
 /// gap per the host's delivery model. `port` (from `--port`) opts into a
 /// non-default HTTPS port (443 for clean URLs) and is persisted before Caddy is
 /// (re-)seeded so the change takes effect.
-pub fn run(domain: Option<&str>, runtime: &str, yes: bool, port: Option<u16>) -> Result<()> {
+pub fn run(
+    domain: Option<&str>,
+    runtime: &str,
+    yes: bool,
+    port: Option<u16>,
+    publish_addr: &str,
+) -> Result<()> {
     crate::ui::header("ws-setup", domain.unwrap_or("(no domain)"));
 
     if let Some(p) = port {
@@ -197,7 +203,7 @@ pub fn run(domain: Option<&str>, runtime: &str, yes: bool, port: Option<u16>) ->
     // Rootless bits — no privilege, no prompt. ensure_running also re-seeds Caddy
     // if the port just changed.
     let step = crate::ui::step("caddy", "rootless network + Caddy container");
-    match crate::caddy::ensure_running(&crate::remote::Site::Local, runtime) {
+    match crate::caddy::ensure_running(&crate::remote::Site::Local, runtime, publish_addr) {
         Ok(()) => step.ok(),
         Err(e) => {
             step.fail(&format!("{e}"));

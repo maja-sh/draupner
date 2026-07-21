@@ -19,5 +19,7 @@ pub fn run(yes: bool, port: Option<u16>) -> Result<()> {
         );
         return Ok(());
     }
-    crate::setup::run(cfg.domain.as_deref(), cfg.runtime(), yes, port)
+    // `ws setup` only ever runs against the local host (remote returns above).
+    let publish = crate::caddy::publish_address(&crate::remote::Site::Local, None);
+    crate::setup::run(cfg.domain.as_deref(), cfg.runtime(), yes, port, &publish)
 }

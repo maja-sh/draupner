@@ -115,6 +115,49 @@ pub fn https_port() -> u16 {
         .unwrap_or(DEFAULT_HTTPS_PORT)
 }
 
+/// The address Caddy publishes its HTTPS port on. Local is always loopback;
+/// remote honours `remote.publish_address` and otherwise takes all interfaces.
+/// The value is validated at `config::load`, so this can't fail.
+/// See [`crate::config::RemoteConfig::publish_address`] for the user-facing rules.
+pub fn publish_address(site: &Site, configured: Option<&str>) -> String {
+    match site {
+        Site::Local => "127.0.0.1".to_string(),
+        Site::Remote { .. } => configured
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .unwrap_or("0.0.0.0")
+            .to_string(),
+    }
+}
+
+/// The `-p` argument publishing `port` on `addr`. IPv6 hosts must be bracketed or
+/// the runtime can't tell the address from the port — an unbracketed `::1` is
+/// rejected outright, which would strand exactly the user narrowing their exposure.
+fn publish_spec(addr: &str, port: u16) -> String {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(a)) => format!("[{a}]:{port}:{port}"),
+        _ => format!("{addr}:{port}:{port}"),
+    }
+}
+
+/// The host address the running Caddy actually publishes on, via
+/// `<runtime> port <container> <port>` (`0.0.0.0:8443` → `0.0.0.0`). `None` when
+/// the container isn't running or the output isn't the expected shape — callers
+/// treat that as "can't tell", never as a mismatch.
+fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
+    let out = site
+        .command(&[runtime, "port", CADDY_CONTAINER, &port.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    // `0.0.0.0:8443` / `[::1]:8443` — split at the last colon to keep IPv6 intact.
+    let host = line.rsplit_once(':')?.0.to_string();
+    (!host.is_empty()).then(|| host.trim_matches(['[', ']']).to_string())
+}
+
 /// Persist the opt-in HTTPS port so every later `ws` run agrees on it. Caddy
 /// keeps serving the old port until the next `ensure_running` re-seeds it.
 pub fn set_https_port(port: u16) -> Result<()> {
@@ -172,7 +215,7 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
 /// only a stale *stopped* container is removed and retried. (A brief residual
 /// TOCTOU between the not-running check and the `rm` is accepted — the common
 /// paths, already-running and fresh-box, are safe.)
-pub fn ensure_running(site: &Site, runtime: &str) -> Result<()> {
+pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
     }
@@ -185,9 +228,28 @@ pub fn ensure_running(site: &Site, runtime: &str) -> Result<()> {
         // not a recorded marker, so a routine `ws up` (or a `ws` upgrade that
         // didn't change the port) never needlessly tears a peer's routes down.
         match served_port(site) {
-            // Already on the right port, or we can't tell (admin momentarily
-            // unreachable) → never destroy a working Caddy.
-            Some(p) if p == https_port() => return Ok(()),
+            // Right port — but the publish *address* can still have changed, and
+            // it's invisible to Caddy (a `-p` binding is the runtime's business,
+            // not the proxy's), so `served_port` can never reveal it. Without this
+            // check, pinning `remote.publish_address` to close an exposure would
+            // silently keep the old binding, and `--restart always` would carry it
+            // across reboots while the user believed it was fixed.
+            Some(p) if p == https_port() => {
+                match published_host(site, runtime, p) {
+                    Some(h) if h != publish_addr => {
+                        crate::ui::note(&format!(
+                            "re-creating {CADDY_CONTAINER} to publish on {publish_addr} \
+                             (currently {h}) — routes are preserved"
+                        ));
+                        // Cheaper than `reseed`: only the container is replaced, so
+                        // `--resume` reloads every peer's route from the retained
+                        // config volume. A port move needs the wipe; this doesn't.
+                        let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
+                    }
+                    // Matching, or we can't tell → never destroy a working Caddy.
+                    _ => return Ok(()),
+                }
+            }
             None => return Ok(()),
             // Port differs. Only reseed if the new port can actually bind — else
             // we'd tear down a working Caddy for one that fails to start (e.g.
@@ -209,7 +271,7 @@ pub fn ensure_running(site: &Site, runtime: &str) -> Result<()> {
     // the only one starting (container isn't running), so clearing it is safe.
     site.remove_file(&format!("{dir}/admin.sock"));
 
-    if run_caddy(site, runtime, &dir) {
+    if run_caddy(site, runtime, &dir, publish_addr) {
         return wait_admin_ready(site);
     }
     // The run failed — either a peer already started it (name taken, now
@@ -219,7 +281,7 @@ pub fn ensure_running(site: &Site, runtime: &str) -> Result<()> {
         return wait_admin_ready(site);
     }
     let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
-    if run_caddy(site, runtime, &dir) || container_running(site, runtime, CADDY_CONTAINER) {
+    if run_caddy(site, runtime, &dir, publish_addr) || container_running(site, runtime, CADDY_CONTAINER) {
         return wait_admin_ready(site);
     }
     bail!("could not start the {CADDY_CONTAINER} container — is the `{runtime}` runtime healthy? (`{runtime} logs {CADDY_CONTAINER}`)")
@@ -289,16 +351,22 @@ pub fn port_bindable(site: &Site, port: u16) -> bool {
 /// HTTP host-ports (`!reset`), Caddy is the only path to an HTTP service, so a
 /// stack brought "up" without it would be a lie. The one owner of the routing
 /// bring-up sequence — callers decide only whether to surface the returned hint.
-pub fn ensure_routing(site: &Site, runtime: &str, domain: &str) -> Result<Option<String>> {
+pub fn ensure_routing(
+    site: &Site,
+    runtime: &str,
+    domain: &str,
+    publish_addr: &str,
+) -> Result<Option<String>> {
     ensure_net(site, runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
-    ensure_running(site, runtime).context("caddy must be running to route HTTP services")?;
+    ensure_running(site, runtime, publish_addr)
+        .context("caddy must be running to route HTTP services")?;
     Ok((!domain_resolves(site, domain)).then(|| resolve_hint(site, domain)))
 }
 
 /// The recipe for reaching a route before `*.<domain>` resolves — the single
 /// owner of this user-facing string (also referenced in the module doc). For a
-/// remote stack the wildcard must point at the server's tailnet IP (Tailscale
-/// split-DNS), not loopback, so the hint differs.
+/// remote stack the wildcard must point at an address the server is reachable at,
+/// not loopback, so the hint differs.
 fn resolve_hint(site: &Site, domain: &str) -> String {
     let port = https_port();
     match site {
@@ -307,8 +375,9 @@ fn resolve_hint(site: &Site, domain: &str) -> String {
              `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
         ),
         Site::Remote { .. } => format!(
-            "`*.{domain}` doesn't resolve yet — point it at the server's tailnet IP \
-             (Tailscale split-DNS), then reach a route on `https://<host>:{port}`"
+            "`*.{domain}` doesn't resolve yet — point it at an address this server \
+             is reachable at (see `server-setup/<distro>.sh --address`), then reach a \
+             route on `https://<host>:{port}`"
         ),
     }
 }
@@ -335,13 +404,9 @@ fn resolve_hint(site: &Site, domain: &str) -> String {
 /// `ws up` re-homes the route to the live container and heals it. A future
 /// refinement (health-check the upstream, or reconcile routes against live
 /// containers on boot) could close the gap.
-fn run_caddy(site: &Site, runtime: &str, dir: &str) -> bool {
+fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> bool {
     let port = https_port();
-    // Local publishes on loopback; so does a remote stack for now — the
-    // self-SSH-to-localhost path reaches it there, and a genuinely remote server
-    // needs its tailnet IP published (paired with the Tailscale split-DNS wiring)
-    // — a DNS-slice concern, tracked with `resolve_hint`.
-    let publish = format!("127.0.0.1:{port}:{port}");
+    let publish = publish_spec(publish_addr, port);
     let sock_mount = format!("{dir}:{SOCK_MOUNT}:Z");
     let data_vol = format!("{DATA_VOLUME}:/data");
     let config_vol = format!("{CONFIG_VOLUME}:/config");
@@ -385,7 +450,8 @@ fn wait_admin_ready(site: &Site) -> Result<()> {
 ///
 /// Resolution is checked against `site`: a **local** stack wants the wildcard to
 /// point at loopback (`127.0.0.1`); a **remote** stack wants it to point at the
-/// server (a non-loopback tailnet IP). Requiring the right *kind* of address, not
+/// server (any non-loopback address it's reachable at). Requiring the right *kind*
+/// of address, not
 /// just any answer, means a resolver that synthesizes a public IP for every
 /// unknown name (ISP NXDOMAIN hijacking, a captive portal) can't read as
 /// "resolved" and wrongly suppress the hint locally.
@@ -652,6 +718,46 @@ fn check(out: &CurlOut, what: impl FnOnce() -> String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote_site() -> Site {
+        Site::Remote { connection: "server".into(), home: "/home/ws".into() }
+    }
+
+    #[test]
+    fn publish_defaults_keep_local_private_and_make_remote_reachable() {
+        // Loopback locally: a dev machine shouldn't serve its stacks to the LAN.
+        assert_eq!(publish_address(&Site::Local, None), "127.0.0.1");
+        // All interfaces remotely: loopback would make offload pointless, since
+        // only the server itself could reach what it's serving.
+        assert_eq!(publish_address(&remote_site(), None), "0.0.0.0");
+    }
+
+    #[test]
+    fn a_configured_address_narrows_only_the_remote_site() {
+        let cfg = Some("100.64.1.3");
+        assert_eq!(publish_address(&remote_site(), cfg), "100.64.1.3");
+        // Local ignores it: `ws setup`'s CA probe, `resolve_hint` and
+        // `domain_resolves` all assume a local Caddy is on loopback, so honouring
+        // it here would half-wire a workspace rather than configure it.
+        assert_eq!(publish_address(&Site::Local, cfg), "127.0.0.1");
+    }
+
+    #[test]
+    fn blank_publish_address_falls_back_to_the_default() {
+        // A script exporting an unset var must not pin Caddy to an empty address.
+        assert_eq!(publish_address(&remote_site(), Some("")), "0.0.0.0");
+        assert_eq!(publish_address(&remote_site(), Some("   ")), "0.0.0.0");
+    }
+
+    #[test]
+    fn publish_spec_brackets_ipv6_only() {
+        assert_eq!(publish_spec("127.0.0.1", 8443), "127.0.0.1:8443:8443");
+        assert_eq!(publish_spec("0.0.0.0", 8443), "0.0.0.0:8443:8443");
+        // Unbracketed, the runtime can't tell the address from the port and
+        // refuses the whole `-p` — stranding the narrowest, safest choice.
+        assert_eq!(publish_spec("::1", 8443), "[::1]:8443:8443");
+        assert_eq!(publish_spec("fd7a:115c::1", 443), "[fd7a:115c::1]:443:443");
+    }
 
     #[test]
     fn route_id_is_stable_and_namespaced() {

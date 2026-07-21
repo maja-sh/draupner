@@ -41,12 +41,30 @@ pub struct RemoteConfig {
     /// on one server don't collide). See `worktree_base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    /// Address the server's Caddy publishes its HTTPS port on. Omitted → all
+    /// interfaces, because the whole point of offload is that *another* machine
+    /// reaches it; loopback would serve only the server itself.
+    ///
+    /// Set it to pin the server to one address — its tailnet or LAN IP — so a box
+    /// with a public interface doesn't serve your worktrees to the internet. Any
+    /// address the client can route to works; nothing here assumes Tailscale.
+    ///
+    /// **Only read when Caddy is created.** Changing it recreates the container on
+    /// the next `ws up` (routes survive — they reload from the config volume).
+    ///
+    /// Local workspaces always publish on loopback and have no equivalent knob:
+    /// there is no second machine to reach them, so exposing them would be all
+    /// risk and no benefit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_address: Option<String>,
 }
 
 impl RemoteConfig {
     /// Construct a remote block.
     pub fn new(connection: String, workspace_path: Option<String>) -> Self {
-        Self { connection, workspace_path }
+        // `publish_address` stays unset: publishing on all interfaces is the
+        // working default, and pinning one is a deliberate narrowing.
+        Self { connection, workspace_path, publish_address: None }
     }
 
     /// The server-side parent dir for this workspace's synced worktrees:
@@ -310,6 +328,23 @@ pub fn load(root: &Path) -> Result<WsConfig> {
                 r.connection
             );
         }
+        // Checked here rather than at the point of use so a typo surfaces on any
+        // command, not only the ones that bring routing up. A hostname is refused
+        // as well as junk: it could resolve elsewhere later and silently move
+        // where the server publishes.
+        if let Some(a) = r.publish_address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            match a.parse::<std::net::IpAddr>() {
+                Ok(ip) if ip.is_multicast() => anyhow::bail!(
+                    "remote.publish_address `{a}` in .ws.json is a multicast address — \
+                     give an address of the server itself"
+                ),
+                Err(_) => anyhow::bail!(
+                    "remote.publish_address `{a}` in .ws.json is not an IP address — \
+                     give the server's tailnet/LAN address, or omit it to publish on all"
+                ),
+                Ok(_) => {}
+            }
+        }
     }
     Ok(cfg)
 }
@@ -443,6 +478,45 @@ fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_cfg(dir: &Path, json: &str) {
+        std::fs::write(dir.join(".ws.json"), json).unwrap();
+    }
+
+    #[test]
+    fn load_refuses_a_publish_address_that_isnt_an_address() {
+        // Checked at load, not at first use, so a typo doesn't lie dormant until
+        // the one command that brings routing up.
+        for bad in ["localhost", "1.2.3.4:8443", "0.0.0.0/0", "not-an-ip", "224.0.0.1"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(
+                dir.path(),
+                &format!(
+                    r#"{{"repos":[],"remote":{{"connection":"h","publish_address":"{bad}"}}}}"#
+                ),
+            );
+            let err = match load(dir.path()) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected {bad:?} to be refused"),
+            };
+            assert!(
+                err.contains("publish_address"),
+                "expected {bad:?} refused, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_accepts_ipv4_ipv6_and_an_absent_publish_address() {
+        for good in [r#","publish_address":"100.64.1.3""#, r#","publish_address":"fd7a::1""#, ""] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(
+                dir.path(),
+                &format!(r#"{{"repos":[],"remote":{{"connection":"h"{good}}}}}"#),
+            );
+            assert!(load(dir.path()).is_ok(), "expected {good:?} accepted");
+        }
+    }
 
     #[test]
     fn read_json_strips_utf8_bom() {
@@ -603,7 +677,7 @@ mod tests {
 
     #[test]
     fn worktree_base_defaults_to_workspace_dir_name() {
-        let r = RemoteConfig { connection: "h".into(), workspace_path: None };
+        let r = RemoteConfig { connection: "h".into(), workspace_path: None, publish_address: None };
         assert_eq!(r.worktree_base(Path::new("/home/me/myapp")), "myapp");
         let r2 = RemoteConfig { workspace_path: Some("ws/x".into()), ..r };
         assert_eq!(r2.worktree_base(Path::new("/home/me/myapp")), "ws/x");
