@@ -235,6 +235,32 @@ check_compose() {
 # ---------------------------------------------------------------------------
 # 1. Trust Caddy's internal root CA
 # ---------------------------------------------------------------------------
+# Every certificate in the blob we install gets trusted machine-wide, so take
+# only a single CA and show it before trusting it. Guards the mundane case (a
+# truncated read putting a broken entry in the trust store) as well as a Caddy
+# container that returns the expected root plus an extra CA of its own.
+check_ca() {
+  local pem="$1" count
+  if ! command -v openssl >/dev/null 2>&1; then
+    note "skip: openssl not available to verify the certificate before trusting it."
+    return 1
+  fi
+  count="$(printf '%s\n' "$pem" | grep -c '^-----BEGIN CERTIFICATE-----' || true)"
+  if [ "$count" != "1" ]; then
+    note "skip: expected exactly one certificate from $CADDY_CONTAINER, got $count."
+    return 1
+  fi
+  if ! printf '%s\n' "$pem" | openssl x509 -noout -ext basicConstraints 2>/dev/null |
+       grep -q 'CA:TRUE'; then
+    note "skip: that certificate is not a CA — refusing to add it to the trust store."
+    return 1
+  fi
+  note "certificate: $(printf '%s\n' "$pem" | openssl x509 -noout -subject 2>/dev/null)"
+  note "sha256:      $(printf '%s\n' "$pem" |
+    openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"
+  return 0
+}
+
 trust_ca() {
   say "Trust Caddy's root CA"
   if ! "$runtime" container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
@@ -247,6 +273,9 @@ trust_ca() {
     cat /data/caddy/pki/authorities/local/root.crt 2>/dev/null || true)"
   if [ -z "$root" ]; then
     note "skip: couldn't read Caddy's root CA from $CADDY_CONTAINER."
+    return 0
+  fi
+  if ! check_ca "$root"; then
     return 0
   fi
   # Compare with the same trailing newline the file is written with (below), so
