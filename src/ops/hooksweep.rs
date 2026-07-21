@@ -106,7 +106,19 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             // `ensure_routing` already probes DNS; its result *is* the answer
             // (`Some(hint)` ⇒ wildcard doesn't resolve). Reuse it so the auto-offer
             // below doesn't resolve DNS a second time.
-            let dns_ok = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain) {
+            let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
+            let publish = crate::caddy::publish_address(&site, configured);
+            // Say it out loud. The default is right (offload is pointless if the
+            // client can't reach it), but on a box with a public interface it also
+            // serves every worktree to the internet, and nothing else here would
+            // tell you that.
+            if site.is_remote() && configured.is_none() {
+                crate::ui::note(
+                    "publishing on all interfaces — set `remote.publish_address` in .ws.json \
+                     to pin it to the server's tailnet/LAN address",
+                );
+            }
+            let dns_ok = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
                 Ok(hint) => {
                     if let Some(h) = &hint {
                         crate::ui::note(h);
