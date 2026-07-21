@@ -13,6 +13,7 @@
 #   2. Wildcard DNS  *.<domain> → <address>  → per-worktree hostnames resolve.
 #   3. (opt-in) Rootless :443  → drop the `:8443` suffix from URLs.
 #   4. Linger  → `systemd --user` host-process units survive logout.
+#   5. Podman API socket  → what `podman compose` talks to.
 #
 # Every step is idempotent — safe to re-run. Nothing here depends on Tailscale;
 # any address this box is reachable at will do (see the DNS step).
@@ -305,11 +306,20 @@ wildcard_dns() {
     sudo apt-get update -qq
     sudo apt-get install -y dnsmasq
   fi
-  local line="address=/${domain}/${address}"
-  if [ -f "$conf" ] && grep -qxF "$line" "$conf"; then
+  # `bind-interfaces` matters more than it looks: left to itself dnsmasq claims
+  # :53 on *every* interface, including the gateway of podman's container
+  # network. aardvark-dns then can't bind, so the ws network — and the Caddy
+  # container on it — fails to start outright. Listen only where clients ask.
+  local desired="address=/${domain}/${address}
+listen-address=127.0.0.1"
+  [ "$address" = "127.0.0.1" ] || desired="${desired}
+listen-address=${address}"
+  desired="${desired}
+bind-interfaces"
+  if [ -f "$conf" ] && [ "$(cat "$conf")" = "$desired" ]; then
     note "already configured ($conf)."
   else
-    printf '%s\n' "$line" | sudo tee "$conf" >/dev/null
+    printf '%s\n' "$desired" | sudo tee "$conf" >/dev/null
     # Report a failed restart: dnsmasq bails out on a config it dislikes, and a
     # silent failure here leaves the box with no resolver at all.
     if sudo systemctl restart dnsmasq 2>/dev/null ||
@@ -370,10 +380,52 @@ enable_linger() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# 5. The podman API socket — what `podman compose` actually talks to
+# ---------------------------------------------------------------------------
+# `podman compose` hands the work to Docker's Compose binary, which speaks the
+# Docker API over podman's socket. Without it every `ws up` dies on "Cannot
+# connect to the Docker daemon". Runs after linger because the rootless socket
+# is a `systemd --user` unit, and `ws` connects over a non-login SSH session
+# where the user manager only exists if lingering is on.
+podman_socket() {
+  [ "$runtime" = "podman" ] || return 0
+  say "Podman API socket"
+  local path
+  path="$("$runtime" info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+  # Test the path itself. podman's own `RemoteSocket.Exists` reports true for a
+  # socket that isn't there, so trusting it skips the work and `ws up` then
+  # fails with a bare "Cannot connect to the Docker daemon".
+  if [ -n "$path" ] && [ -S "$path" ]; then
+    note "already listening ($path)."
+    return 0
+  fi
+  # Ask podman which socket it wants rather than guessing: rootful podman uses
+  # the system unit, rootless the per-user one.
+  case "$path" in
+    /run/user/*)
+      if systemctl --user enable --now podman.socket >/dev/null 2>&1; then
+        note "enabled the user podman.socket ($path)."
+      else
+        note "✗ couldn't enable it — run this as the user that owns the stacks:"
+        note "    systemctl --user enable --now podman.socket"
+      fi
+      ;;
+    *)
+      if sudo systemctl enable --now podman.socket >/dev/null 2>&1; then
+        note "enabled the system podman.socket (${path:-/run/podman/podman.sock})."
+      else
+        note "✗ couldn't enable it — try: sudo systemctl enable --now podman.socket"
+      fi
+      ;;
+  esac
+}
+
 prerequisites
 trust_ca
 wildcard_dns
 unprivileged_443
 enable_linger
+podman_socket
 
 say "Done. Re-check readiness any time with \`ws setup\`."

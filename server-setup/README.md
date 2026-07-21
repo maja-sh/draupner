@@ -32,6 +32,17 @@ what's missing.
 (`kind: host` repos) also need a `systemd --user` session — that's the linger
 step at the bottom of the script.
 
+Two pieces of configuration matter as much as the packages, and the script
+handles both:
+
+- **The podman API socket.** `podman compose` hands the work to Docker's Compose
+  binary, which speaks the Docker API over podman's socket. If it isn't enabled,
+  every `ws up` fails with "Cannot connect to the Docker daemon".
+- **Constraining dnsmasq.** Left alone, dnsmasq answers on *every* interface,
+  including the gateway of podman's container network. `aardvark-dns` then can't
+  bind port 53, so the `ws` network — and the Caddy container on it — won't start
+  at all. The script pins dnsmasq to the addresses clients actually use.
+
 ### Debian 13 or newer
 
 `ws` generates a compose override using the `!override` tag, so it needs
