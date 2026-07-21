@@ -1,9 +1,10 @@
-# server-setup — the privileged, one-time host bits
+# server-setup — the one-time host bits
 
 `ws` does the **rootless** routing setup itself (creates the `ws-net` network,
-runs the Caddy container) — no prompts, no privilege. Three bits genuinely need
-root, so `ws` never runs them silently. How they're delivered depends on the
-host:
+runs the Caddy container) — no prompts, no privilege. What's left is the stuff
+`ws` needs but shouldn't do to your machine behind your back: the packages it
+expects to find, and three bits that genuinely need root. How they're delivered
+depends on the host:
 
 - **macOS host** (workspace owner's machine): `ws setup` walks each gap
   interactively — shows the exact command, `[R]un / [S]kip / show-me`. `[R]un`
@@ -12,6 +13,34 @@ host:
 - **Linux host / remote offload box**: the bits live in a versioned, readable
   script here that you run yourself. The script *is* the transparency — read it,
   then run it. `ws setup` on Linux reports what's missing and points you here.
+
+## Prerequisites
+
+The binaries `ws` invokes over SSH. The script checks each one and installs
+what's missing.
+
+| Binary | Package | Needed for |
+|---|---|---|
+| `podman` | `podman` | running your container stacks |
+| `docker-compose` | `docker-compose` | the Compose provider `podman compose` delegates to |
+| `ss` | `iproute2` | allocating free host ports for raw-TCP services |
+| `mutagen` | (release tarball) | receiving the worktree file sync |
+| `curl` | `curl` | fetching mutagen |
+| `sshd` | `openssh-server` | the transport for all of the above |
+
+`timeout` and the rest of coreutils ship with Debian. Host processes
+(`kind: host` repos) also need a `systemd --user` session — that's the linger
+step at the bottom of the script.
+
+### Debian 13 or newer
+
+`ws` generates a compose override using the `!override` tag, so it needs
+**podman ≥ 4.7** (earlier releases have no `compose` subcommand at all) and a
+**Compose provider ≥ 2.24.4**. Debian 12 ships podman 4.3.1 and docker-compose
+1.29.2 and satisfies neither, so container repos cannot work there — use Debian
+13 (podman 5.4.2 + docker-compose 2.26.1) or install both from upstream. The
+script checks this and says so rather than letting `ws up` fail later with a
+YAML parse error.
 
 ## The three privileged bits
 
@@ -30,18 +59,28 @@ bits are enough for a working, warning-free setup. `:443` is a cosmetic opt-in
 Caddy must be up first (`ws setup`, or `ws up <branch>`) so its root CA exists.
 
 ```sh
-server-setup/debian.sh myapp.test            # CA trust + wildcard DNS + linger
-server-setup/debian.sh myapp.test --port 443 # …plus allow rootless :443
+server-setup/debian.sh myapp.test                      # workspaces live on this box
+server-setup/debian.sh myapp.test --address 10.0.0.5   # offload box: what clients reach it at
+server-setup/debian.sh myapp.test --port 443           # …plus allow rootless :443
 ```
 
 Run it as your normal user; it `sudo`s per privileged command. Every step is
-idempotent — safe to re-run after upgrades.
+idempotent — safe to re-run after upgrades. It's also meant to be *read* — if
+you'd rather not run a script on a machine, the steps are plain enough to paste
+one at a time.
+
+`--address` is what `*.<domain>` answers with. It defaults to `127.0.0.1`, which
+is correct when `ws` runs on this same machine. An **offload** box needs the
+address its clients actually reach it at, or clients will resolve the hostnames
+to their own loopback. Any routable address works — LAN IP, tailnet IP, VPN
+address. **Tailscale is one option, not a requirement**; all `ws` needs is SSH
+access plus an address that routes.
 
 ## Adding a distro
 
-Each `server-setup/<distro>.sh` is standalone and covers the same four sections
-(CA trust, wildcard DNS, opt-in `:443`, linger). Copy `debian.sh` and swap the
-distro-specific pieces:
+Each `server-setup/<distro>.sh` is standalone and covers the same five sections
+(prerequisites, CA trust, wildcard DNS, opt-in `:443`, linger). Copy `debian.sh`
+and swap the distro-specific pieces:
 
 - package install (`apt-get` → `dnf`/`pacman`/…),
 - the CA trust-store path + refresh command (`update-ca-certificates` →
