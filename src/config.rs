@@ -163,6 +163,13 @@ pub struct ServiceConfig {
     /// false (isolated). Right for redis/ES; wrong for the SQL DB.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
+    /// Also route *every* subdomain of this service's host to it, so a
+    /// multi-tenant app addressed as `<tenant>.<branch>.<subdomain>.<domain>`
+    /// resolves for any `<tenant>`. HTTP services only (raw-TCP has no host).
+    /// `WS_HOST_<svc>` stays the base host, so the app builds tenant URLs as
+    /// `<tenant>.$WS_HOST_<svc>`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wildcard: bool,
 }
 
 impl RepoConfig {

@@ -368,7 +368,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
         let dial = if http.contains(&80) { 80 } else { 443 };
         out.insert(
             name.to_string(),
-            ServiceConfig { http: Some(HttpDecl::Subdomain(name.to_string())), port: dial, shared: false },
+            ServiceConfig { http: Some(HttpDecl::Subdomain(name.to_string())), port: dial, shared: false, wildcard: false },
         );
     }
     // The bare service name is used only when the service yields exactly one
@@ -377,7 +377,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
     let single = http.is_empty() && tcp.len() == 1;
     for p in tcp {
         let key = if single { name.to_string() } else { format!("{name}_{p}") };
-        out.insert(key, ServiceConfig { http: None, port: p, shared: false });
+        out.insert(key, ServiceConfig { http: None, port: p, shared: false, wildcard: false });
     }
 }
 
@@ -572,7 +572,7 @@ mod tests {
     }
 
     fn svc(http: Option<HttpDecl>, port: u16) -> ServiceConfig {
-        ServiceConfig { http, port, shared: false }
+        ServiceConfig { http, port, shared: false, wildcard: false }
     }
 
     fn map(entries: &[(&str, ServiceConfig)]) -> BTreeMap<String, ServiceConfig> {
