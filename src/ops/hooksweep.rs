@@ -285,8 +285,9 @@ fn sync_routes(
     let mut hosts = Vec::new();
     let mut err = None;
     for r in &routes {
-        match crate::caddy::route_up(site, &r.id, &r.hostname, &r.upstream) {
-            Ok(()) => hosts.push(r.hostname.clone()),
+        match crate::caddy::route_up(site, r) {
+            // Surface the wildcard in the printed host list (`*.<host>`).
+            Ok(()) => hosts.push(if r.wildcard { format!("*.{}", r.hostname) } else { r.hostname.clone() }),
             Err(e) => err = Some(format!("{e}")),
         }
     }
