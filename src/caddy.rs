@@ -181,6 +181,8 @@ pub struct RouteSpec {
     pub id: String,
     pub hostname: String,
     pub upstream: String,
+    /// Also match `*.<hostname>` (every tenant subdomain), not just `<hostname>`.
+    pub wildcard: bool,
 }
 
 /// Ensure the shared `ws-net` exists (idempotent rootless create) at `site`.
@@ -635,10 +637,18 @@ fn stopped_stack_route() -> serde_json::Value {
 /// The route object Caddy stores: match the worktree hostname, reverse-proxy to
 /// its upstream (`<project>-<service>-1:<port>` for a container, or
 /// `host.containers.internal:<port>` for a host process).
-fn route(id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
+fn route(id: &str, hostname: &str, upstream: &str, wildcard: bool) -> serde_json::Value {
+    // `*.foo` matches exactly one label and does NOT match bare `foo`, so a
+    // wildcard service lists both. On-demand internal TLS mints a cert per tenant
+    // hostname at handshake, so no wildcard cert is needed.
+    let hosts = if wildcard {
+        vec![hostname.to_string(), format!("*.{hostname}")]
+    } else {
+        vec![hostname.to_string()]
+    };
     serde_json::json!({
         "@id": id,
-        "match": [ { "host": [ hostname ] } ],
+        "match": [ { "host": hosts } ],
         "handle": [ {
             "handler": "reverse_proxy",
             "upstreams": [ { "dial": upstream } ]
@@ -652,16 +662,16 @@ fn route(id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
 /// stopped-stack route, which must stay last so a specific host match wins.
 /// Both are scoped operations, never `/load`. Order among worktree routes is
 /// irrelevant (each has a distinct host match), so prepending is safe.
-pub fn route_up(site: &Site, id: &str, hostname: &str, upstream: &str) -> Result<()> {
-    delete_id(site, id); // ignore-absent
-    let body = route(id, hostname, upstream).to_string();
+pub fn route_up(site: &Site, spec: &RouteSpec) -> Result<()> {
+    delete_id(site, &spec.id); // ignore-absent
+    let body = route(&spec.id, &spec.hostname, &spec.upstream, spec.wildcard).to_string();
     let mut args = vec![
         "-X".to_string(), "PUT".to_string(),
         "-H".to_string(), "Content-Type: application/json".to_string(),
         "-d".to_string(), body,
     ];
     args.extend(admin_args(site, &format!("/config/apps/http/servers/{SERVER}/routes/0")));
-    check(&curl(site, &args)?, || format!("add route {id}"))
+    check(&curl(site, &args)?, || format!("add route {}", spec.id))
 }
 
 /// Remove a worktree service's route. A missing route, or an unreachable Caddy,
@@ -768,11 +778,25 @@ mod tests {
 
     #[test]
     fn route_json_matches_host_and_proxies_upstream() {
-        let r = route("ws-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80");
+        let r = route("ws-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80", false);
         assert_eq!(r["@id"], "ws-feat-foo-web");
         assert_eq!(r["match"][0]["host"][0], "feat-foo.web.myapp.test");
+        // A non-wildcard route matches exactly one host.
+        assert_eq!(r["match"][0]["host"].as_array().unwrap().len(), 1);
         assert_eq!(r["handle"][0]["handler"], "reverse_proxy");
         assert_eq!(r["handle"][0]["upstreams"][0]["dial"], "feat-foo-api-web-1:80");
+    }
+
+    #[test]
+    fn wildcard_route_matches_the_base_and_every_tenant_subdomain() {
+        let r = route("ws-feat-foo-app", "feat-foo.app.myapp.test", "host.containers.internal:20001", true);
+        let hosts: Vec<&str> =
+            r["match"][0]["host"].as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
+        // Both the bare host (no tenant) and the single-label tenant wildcard.
+        // `*.foo` alone would NOT match bare `foo`, so both must be present.
+        assert!(hosts.contains(&"feat-foo.app.myapp.test"), "missing base host: {hosts:?}");
+        assert!(hosts.contains(&"*.feat-foo.app.myapp.test"), "missing tenant wildcard: {hosts:?}");
+        assert_eq!(hosts.len(), 2);
     }
 
     #[test]

@@ -324,6 +324,7 @@ fn route_specs(
             id: crate::caddy::route_id(branch_sanitized, repo, name),
             hostname,
             upstream,
+            wildcard: svc.wildcard,
         });
     }
     out
@@ -376,7 +377,16 @@ fn effective_services(
 /// Shared by the `WS_HOST_*` env var and the Caddy route match so the two can't
 /// drift.
 fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
-    format!("{branch_sanitized}.{subdomain}.{domain}")
+    format!("{}.{}.{domain}", dns_label(branch_sanitized), dns_label(subdomain))
+}
+
+/// Collapse a branch/subdomain into a single DNS label. `sanitize_branch` leaves
+/// dots (`v2.1`, `release/1.2` → `release-1.2`), which add extra hostname labels —
+/// harmless for an exact match, but with a wildcard route `*.<branch>.<sub>.<domain>`
+/// a dotted branch's base host (`a.b.<sub>.<domain>`) would be *suffix-captured* by
+/// a sibling branch `b`'s wildcard, cross-routing worktrees. One label, no capture.
+fn dns_label(s: &str) -> String {
+    s.replace('.', "-")
 }
 
 fn ws_vars(
@@ -481,7 +491,7 @@ mod tests {
     use crate::config::{HttpDecl, ServiceConfig};
 
     fn svc(http: Option<HttpDecl>, port: u16) -> ServiceConfig {
-        ServiceConfig { http, port, shared: false }
+        ServiceConfig { http, port, shared: false, wildcard: false }
     }
 
     fn repo_with(services: &[(&str, ServiceConfig)]) -> RepoConfig {
@@ -536,6 +546,43 @@ mod tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "ws-feat-x-svc-web");
         assert_eq!(specs[0].upstream, "host.containers.internal:20001");
+        assert!(!specs[0].wildcard, "web is not a wildcard service");
+    }
+
+    #[test]
+    fn a_wildcard_service_carries_the_flag_into_its_route_spec() {
+        // A multi-tenant host service (e.g. the Vue app): `<tenant>.<host>` routes
+        // to it for any tenant. The base hostname is the usual `<branch>.<sub>.<domain>`;
+        // the wildcard flag is what tells Caddy to also match every tenant label.
+        let mut app = svc(Some(HttpDecl::Subdomain("app".into())), 3000);
+        app.wildcard = true;
+        let services = services(&repo_with(&[("app", app)]));
+        let ports = [("app".to_string(), 20005u16)].into_iter().collect();
+        let specs = route_specs(&services, &ports, true, "", "feat-x", "app", "myapp.test");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].hostname, "feat-x.app.myapp.test");
+        assert!(specs[0].wildcard, "wildcard service must set the route-spec flag");
+    }
+
+    #[test]
+    fn wildcard_on_a_raw_tcp_service_yields_no_route() {
+        // `wildcard` is HTTP-only: a raw-TCP service gets an allocated port, not a
+        // hostname, so the flag is a silent no-op (no route at all) — never a
+        // hostname-less or bogus route.
+        let mut db = svc(None, 5432);
+        db.wildcard = true;
+        let services = services(&repo_with(&[("db", db)]));
+        let ports = [("db".to_string(), 20009u16)].into_iter().collect();
+        assert!(route_specs(&services, &ports, false, "proj", "feat-x", "api", "myapp.test").is_empty());
+    }
+
+    #[test]
+    fn a_dotted_branch_collapses_to_one_hostname_label() {
+        // A dotted branch (`v2.1`) must not add extra hostname labels: with a
+        // wildcard route it would otherwise let a sibling branch's `*.` suffix-
+        // capture this worktree's traffic.
+        assert_eq!(ws_host("v2.1", "web", "myapp.test"), "v2-1.web.myapp.test");
+        assert_eq!(ws_host("release-1.2", "a.b", "d.test"), "release-1-2.a-b.d.test");
     }
 
     #[test]
