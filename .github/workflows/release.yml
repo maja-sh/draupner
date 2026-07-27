@@ -19,10 +19,12 @@ jobs:
         include:
           - os: macos-14        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: macos-13        # Intel
-            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+        # Intel macOS (x86_64-apple-darwin) is deliberately omitted: no Intel Mac
+        # in this setup, and GitHub's Intel runners are scarce and being retired,
+        # so gating every release on one just stalls the targets that matter. Add
+        # a `{ os: macos-13, target: x86_64-apple-darwin }` entry if that changes.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
