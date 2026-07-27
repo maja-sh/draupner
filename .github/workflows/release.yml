@@ -1,0 +1,68 @@
+name: release
+
+# Cut a release by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Each target builds natively (no cross-compilation) and the binaries are
+# attached to a GitHub Release. Install on a machine with:
+#   gh release download vX.Y.Z --repo hbackman/workspaces -p '*<target>*' -O ws
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      # Don't cancel the other targets when one fails — a platform-specific
+      # break should still leave the others' binaries to inspect.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            target: aarch64-apple-darwin
+          - os: macos-13        # Intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Gate the binary on its own platform's tests — a macOS-only regression
+      # wouldn't show up in the ubuntu CI job. Debug profile (see ci.yml).
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      # Name the asset by target so all three can live on one release.
+      - name: Rename
+        run: cp target/${{ matrix.target }}/release/ws ws-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ws-${{ matrix.target }}
+          path: ws-${{ matrix.target }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release + upload assets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true   # flatten all artifacts into dist/
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*
