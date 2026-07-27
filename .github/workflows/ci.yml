@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-flight run when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Warnings-as-errors matches the local release-build discipline.
+      - name: Build
+        run: cargo build --release
+        env:
+          RUSTFLAGS: "-D warnings"
+      # Debug profile on purpose: the release profile sets `panic = "abort"`,
+      # which the test harness can't use. Container-dependent integration tests
+      # skip themselves when no runtime is present, so this is green without one.
+      - name: Test
+        run: cargo test
