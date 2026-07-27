@@ -6,6 +6,10 @@ use common::{stderr, WorkspaceFixture};
 // versioned setup script rather than driving `sudo` itself. The fixture runs
 // with an externally-managed Caddy (`WS_CADDY_ADMIN`), so the rootless step is a
 // no-op and no real infra is touched; DNS/CA still probe as missing.
+//
+// Linux-only: on macOS the same command walks the interactive `[R]un/[S]kip`
+// prompt and never prints the script path, so the assertions below don't apply.
+#[cfg(target_os = "linux")]
 #[test]
 fn setup_on_linux_reports_gaps_and_points_at_the_script() {
     let f = WorkspaceFixture::empty();
