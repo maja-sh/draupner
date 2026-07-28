@@ -285,7 +285,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     }
     ensure_net(site, runtime)?;
     let dir = write_boot_config(site)?;
-    if run_caddy(site, runtime, &dir, publish_addr) {
+    if run_caddy(site, runtime, &dir, publish_addr).is_none() {
         return wait_admin_ready(site);
     }
     // The run failed — either a peer already started it (name taken, now
@@ -295,10 +295,16 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         return wait_admin_ready(site);
     }
     let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
-    if run_caddy(site, runtime, &dir, publish_addr) || container_running(site, runtime, CADDY_CONTAINER) {
+    let reason = run_caddy(site, runtime, &dir, publish_addr);
+    if reason.is_none() || container_running(site, runtime, CADDY_CONTAINER) {
         return wait_admin_ready(site);
     }
-    bail!("could not start the {CADDY_CONTAINER} container — is the `{runtime}` runtime healthy? (`{runtime} logs {CADDY_CONTAINER}`)")
+    // Terminal failure: surface the real reason (e.g. `:2019`/`:8443` in use) —
+    // the container never started, so `podman logs ws-caddy` would be empty.
+    bail!(
+        "could not start the {CADDY_CONTAINER} container: {}",
+        reason.unwrap_or_else(|| "unknown error".to_string())
+    )
 }
 
 /// The HTTPS port the running Caddy is actually listening on, read from its admin
@@ -417,7 +423,7 @@ fn resolve_hint(site: &Site, domain: &str) -> String {
 /// `ws up` re-homes the route to the live container and heals it. A future
 /// refinement (health-check the upstream, or reconcile routes against live
 /// containers on boot) could close the gap.
-fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> bool {
+fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Option<String> {
     let port = https_port();
     let publish = publish_spec(publish_addr, port);
     // Admin published to the host loopback only — reachable by `ws`, not the LAN.
@@ -437,18 +443,16 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> bool 
         "caddy", "run", "--config", &config_json, "--resume",
     ])
     .output();
+    // `None` on success; `Some(reason)` on failure. The reason is returned rather
+    // than printed so the caller surfaces it only on the *terminal* failure — a
+    // first attempt that hits a stale-name and recovers on retry stays quiet.
     match out {
-        Ok(o) if o.status.success() => true,
+        Ok(o) if o.status.success() => None,
         Ok(o) => {
-            // Surface the real reason (e.g. `:2019`/`:8443` already in use) — the
-            // container never started, so `podman logs ws-caddy` would be empty.
             let err = String::from_utf8_lossy(&o.stderr);
-            if let Some(line) = err.lines().map(str::trim).find(|l| !l.is_empty()) {
-                crate::ui::note(&format!("{CADDY_CONTAINER} didn't start: {line}"));
-            }
-            false
+            Some(err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed").to_string())
         }
-        Err(_) => false,
+        Err(e) => Some(e.to_string()),
     }
 }
 
