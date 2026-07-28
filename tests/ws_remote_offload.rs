@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 /// A `WS_SSH` stub that: records every invocation's argv to `$ARGS_FILE`, answers
 /// the `$HOME` probe (`Site::resolve`) with a fixed home, reports every candidate
 /// port free (the `ss` probe expects a literal `free` on stdout), and reports a
-/// host unit as not-active (`is-active` → non-zero) so `supervise::up` proceeds to
-/// `systemd-run`. Everything else exits 0. Lets a full remote `up`/`down` proceed
-/// without a real server.
+/// host process as not-running (the pid-file probe's `kill -0` → non-zero) so
+/// `supervise::up` proceeds to launch it. Everything else exits 0. Lets a full
+/// remote `up`/`down` proceed without a real server.
 fn ssh_stub(f: &WorkspaceFixture) -> PathBuf {
     f.stub(
         "fake-ssh",
@@ -24,7 +24,7 @@ last="${!#}"
 case "$last" in
   *'printf %s'*) printf /home/test ;;
   *'ss -Hltn'*) echo free ;;
-  *'is-active'*) exit 3 ;;
+  *'kill -0'*) exit 3 ;;
   *'timeout '*) echo running ;;
   *) exit 0 ;;
 esac"#,
@@ -160,10 +160,10 @@ fn list_runs_status_on_the_server_for_a_remote_workspace() {
 }
 
 #[test]
-fn host_repo_on_a_remote_workspace_runs_systemd_on_the_server() {
-    // A `kind: host` repo on a remote workspace is supervised as a `systemd --user`
-    // unit ON THE SERVER over SSH: XDG_RUNTIME_DIR set (so the user bus is found),
-    // the server worktree as --working-directory, the allocated port via --setenv.
+fn host_repo_on_a_remote_workspace_runs_on_the_server() {
+    // A `kind: host` repo on a remote workspace is supervised ON THE SERVER over
+    // SSH: a detached `nohup … &` launched from the server worktree, with the
+    // allocated port in its env and its pid recorded under `~/.ws-run`.
     let f = WorkspaceFixture::empty();
     f.add_repo("svc");
     f.write_ws_json(
@@ -189,16 +189,12 @@ fn host_repo_on_a_remote_workspace_runs_systemd_on_the_server() {
     assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
-    let line = rec
-        .lines()
-        .find(|l| l.contains("systemd-run --user"))
-        .unwrap_or_else(|| panic!("systemd-run not dispatched over ssh:\n{rec}"));
-    assert!(line.contains("export XDG_RUNTIME_DIR=/run/user/$(id -u)"), "XDG not set:\n{line}");
-    assert!(line.contains("--unit=ws-feat-foo-svc"), "wrong unit:\n{line}");
+    assert!(rec.contains("nohup "), "host process not launched (no nohup) over ssh:\n{rec}");
     assert!(
-        line.contains("--working-directory=/home/test/ws/feat-foo/svc"),
-        "working dir must be the server worktree:\n{line}"
+        rec.contains("cd /home/test/ws/feat-foo/svc"),
+        "launched from the server worktree:\n{rec}"
     );
-    assert!(line.contains("WS_PORT_web="), "allocated port not injected:\n{line}");
-    assert!(line.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{line}");
+    assert!(rec.contains("ws-feat-foo-svc.pid"), "pid not recorded under ~/.ws-run:\n{rec}");
+    assert!(rec.contains("WS_PORT_web="), "allocated port not injected:\n{rec}");
+    assert!(rec.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{rec}");
 }
