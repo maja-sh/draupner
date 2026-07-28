@@ -19,12 +19,19 @@
 //! `net.ipv4.ip_unprivileged_port_start` sysctl, and `ws setup --port 443`
 //! persists the choice + re-seeds Caddy. See `https_port` / `ensure_running`.
 //!
-//! **Admin API is a unix socket, never TCP.** Caddy sits on `ws-net` (to dial
-//! the worktree containers), and the admin API grants total control of the proxy
-//! with no auth — so binding it to a TCP port would expose it to every tenant
-//! container on `ws-net` (a route-hijack / SSRF pivot). Instead the admin listens
-//! on a unix socket in a host-mounted dir: reachable by the host user (`ws`)
-//! over `curl --unix-socket`, unreachable from any network.
+//! **Admin API on a host-loopback-published TCP port.** `ws` reaches the admin at
+//! `127.0.0.1:2019`, published from the container to the host loopback only
+//! (`-p 127.0.0.1:2019:2019`). A unix socket would be tighter, but it can't cross
+//! the podman-machine VM boundary on macOS (the socket lives in the VM, not on the
+//! Mac), so `curl --unix-socket` is Linux-only — this TCP path is the one form that
+//! works identically on macOS and Linux. The publish is loopback-scoped, so the
+//! admin is unreachable from the host's LAN — that scoping is the only boundary
+//! (an `origins` allow-list can't be used: Caddy's origin check reads the `Origin`
+//! header, which `curl` doesn't send, so it would reject `ws`'s own requests).
+//! Residual: because a published port must bind the container's
+//! routable interface, a tenant on `ws-net` could in principle reach `caddy:2019` —
+//! acceptable for a local dev tool (tenants are your own stacks); a dedicated
+//! admin network is the hardening follow-up. See `boot_config`/`admin_args`.
 //!
 //! Seams: `WS_CADDY_ADMIN` (when set, `ws` talks to that admin URL and treats
 //! Caddy + `ws-net` as externally managed — BYO / test stub) and the runtime
@@ -50,10 +57,12 @@ const SERVER: &str = "ws";
 /// So `:443` is an **opt-in** (`ws setup --port 443`, persisted below); this
 /// default keeps the rootless path zero-privilege.
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
-/// Mount point inside the Caddy container holding the pinned config and the
-/// admin unix socket — bind-mounted from `config_dir()` so the host reaches the
-/// socket while `ws-net` cannot.
+/// Mount point inside the Caddy container holding the pinned boot config
+/// (`caddy.json`), bind-mounted from `config_dir()`.
 const SOCK_MOUNT: &str = "/sock";
+/// The admin API port, published to the host loopback (`127.0.0.1:ADMIN_PORT`).
+/// Caddy's conventional admin port; a singleton per host (one `ws-caddy`).
+const ADMIN_PORT: u16 = 2019;
 /// Named volume for Caddy's data dir (`/data`): the internal CA root + issued
 /// leaf certs. Persisting it keeps the root stable across container recreation
 /// (so a client trusts it once) and avoids reissuing every leaf on restart.
@@ -68,19 +77,15 @@ const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// CRUD for worktree services never touches it.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
 
-/// The curl args to reach the admin API for `path`: over the unix socket at
-/// `site` (default — no TCP interface, so `ws-net` tenants can't reach it), or
-/// the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam). For a remote site the
-/// socket path is the server's; `curl` itself runs there (see [`curl`]).
-fn admin_args(site: &Site, path: &str) -> Vec<String> {
+/// The curl args to reach the admin API for `path`: the host-loopback-published
+/// TCP admin (default), or the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam).
+/// For a remote site the admin is published on the *server's* loopback and `curl`
+/// itself runs there (see [`curl`]), so `127.0.0.1` resolves server-side.
+fn admin_args(_site: &Site, path: &str) -> Vec<String> {
     if let Ok(url) = std::env::var("WS_CADDY_ADMIN") {
         vec![format!("{}{}", url.trim_end_matches('/'), path)]
     } else {
-        vec![
-            "--unix-socket".to_string(),
-            socket_path(site),
-            format!("http://localhost{path}"),
-        ]
+        vec![format!("http://127.0.0.1:{ADMIN_PORT}{path}")]
     }
 }
 
@@ -248,11 +253,22 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
                         // config volume. A port move needs the wipe; this doesn't.
                         let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
                     }
-                    // Matching, or we can't tell → never destroy a working Caddy.
+                    // Matching → never destroy a working Caddy.
                     _ => return Ok(()),
                 }
             }
-            None => return Ok(()),
+            // Admin unreachable on a *running* container: it predates the switch to
+            // a TCP admin (its unix-socket admin isn't on :2019) or is wedged. Its
+            // autosaved config would also restore the old admin under `--resume`, so
+            // reseed (drops the config volume) and start fresh — rather than
+            // silently believing an unadministrable Caddy is healthy.
+            None => {
+                crate::ui::note(&format!(
+                    "{CADDY_CONTAINER} is running but its admin is unreachable — \
+                     re-seeding it (routes reinstall on `ws up`)"
+                ));
+                reseed(site, runtime);
+            }
             // Port differs. Only reseed if the new port can actually bind — else
             // we'd tear down a working Caddy for one that fails to start (e.g.
             // `:443` before the sysctl), leaving nothing running. Keep the old one
@@ -269,10 +285,6 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     }
     ensure_net(site, runtime)?;
     let dir = write_boot_config(site)?;
-    // A stale admin socket from a prior run would make Caddy's bind fail; we're
-    // the only one starting (container isn't running), so clearing it is safe.
-    site.remove_file(&format!("{dir}/admin.sock"));
-
     if run_caddy(site, runtime, &dir, publish_addr) {
         return wait_admin_ready(site);
     }
@@ -385,11 +397,10 @@ fn resolve_hint(site: &Site, domain: &str) -> String {
 }
 
 /// `<runtime> run -d` the Caddy container. `dir` (the host config dir) is mounted
-/// so Caddy reads its config and writes the admin socket where the host can reach
-/// it; two named volumes persist Caddy's data (`/data`: internal CA + certs) and
-/// config (`/config`: the `--resume` autosave) across recreation. Only the HTTPS
-/// data-plane port is published — the admin API stays on the unix socket, off
-/// every network.
+/// so Caddy reads its boot config; two named volumes persist Caddy's data
+/// (`/data`: internal CA + certs) and config (`/config`: the `--resume` autosave)
+/// across recreation. Both the HTTPS data-plane port and the admin port are
+/// published; the admin publish is scoped to the host loopback.
 ///
 /// `--resume` reloads the autosaved config when `/config` already holds one (so a
 /// recreated container restores every worktree route); on a fresh box there's no
@@ -409,22 +420,36 @@ fn resolve_hint(site: &Site, domain: &str) -> String {
 fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> bool {
     let port = https_port();
     let publish = publish_spec(publish_addr, port);
+    // Admin published to the host loopback only — reachable by `ws`, not the LAN.
+    let admin_publish = format!("127.0.0.1:{ADMIN_PORT}:{ADMIN_PORT}");
     let sock_mount = format!("{dir}:{SOCK_MOUNT}:Z");
     let data_vol = format!("{DATA_VOLUME}:/data");
     let config_vol = format!("{CONFIG_VOLUME}:/config");
     let config_json = format!("{SOCK_MOUNT}/caddy.json");
-    site.command(&[
+    let out = site.command(&[
         runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always",
         "-p", &publish,
+        "-p", &admin_publish,
         "-v", &sock_mount,
         "-v", &data_vol,
         "-v", &config_vol,
         CADDY_IMAGE,
         "caddy", "run", "--config", &config_json, "--resume",
     ])
-    .output()
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+    .output();
+    match out {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            // Surface the real reason (e.g. `:2019`/`:8443` already in use) — the
+            // container never started, so `podman logs ws-caddy` would be empty.
+            let err = String::from_utf8_lossy(&o.stderr);
+            if let Some(line) = err.lines().map(str::trim).find(|l| !l.is_empty()) {
+                crate::ui::note(&format!("{CADDY_CONTAINER} didn't start: {line}"));
+            }
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// Poll the admin API until it answers — Caddy's listener isn't up the instant
@@ -538,8 +563,8 @@ fn config_dir() -> PathBuf {
     crate::config::global_dir()
 }
 
-/// The absolute config dir at `site`, holding the pinned config and the admin
-/// unix socket (bind-mounted into the Caddy container). Local: the host
+/// The absolute config dir at `site`, holding the pinned boot config
+/// (`caddy.json`, bind-mounted into the Caddy container). Local: the host
 /// `config_dir()`, created + canonicalized so the bind-mount source is absolute
 /// (a relative `./.config/ws` from an unset HOME is rejected by the runtime).
 /// Remote: `$HOME/.config/ws` on the server (already absolute — HOME was resolved
@@ -557,11 +582,6 @@ fn config_dir_at(site: &Site) -> PathBuf {
     }
 }
 
-/// The path of the admin unix socket at `site` (Caddy writes it into the mounted
-/// config dir).
-fn socket_path(site: &Site) -> String {
-    config_dir_at(site).join("admin.sock").to_string_lossy().into_owned()
-}
 
 /// Write the pinned boot config (empty routes; everything else flows in over the
 /// admin API) at `site` and return the absolute config dir (mounted into the
@@ -573,8 +593,8 @@ fn write_boot_config(site: &Site) -> Result<String> {
     Ok(dir)
 }
 
-/// The Caddy boot config: admin API on a **unix socket** (off every network —
-/// see the module doc), one HTTPS server whose only route is the catch-all
+/// The Caddy boot config: admin API on a host-loopback-published TCP port (see
+/// the module doc), one HTTPS server whose only route is the catch-all
 /// stopped-stack page (worktree routes prepend ahead of it), and `tls internal`
 /// (Caddy is the local CA).
 ///
@@ -596,7 +616,14 @@ fn write_boot_config(site: &Site) -> Result<String> {
 fn boot_config() -> serde_json::Value {
     let port = https_port();
     serde_json::json!({
-        "admin": { "listen": format!("unix/{SOCK_MOUNT}/admin.sock") },
+        // Bind the container's routable interface — a published port DNATs there,
+        // not to the container's loopback. Protection is the host publish being
+        // scoped to `127.0.0.1` (see `run_caddy`), which keeps the LAN out. We do
+        // NOT set `enforce_origin`/`origins`: Caddy's origin check reads the
+        // `Origin` header, which `curl` doesn't send, so it would reject `ws`'s own
+        // requests. The residual (a `ws-net` tenant reaching `caddy:2019`) is the
+        // documented local-dev tradeoff; a dedicated admin network is the fix.
+        "admin": { "listen": format!("0.0.0.0:{ADMIN_PORT}") },
         "apps": {
             "http": {
                 "https_port": port,
@@ -690,7 +717,7 @@ fn delete_id(site: &Site, id: &str) {
 /// Run `curl` against the admin API at `site`, capturing the response and HTTP
 /// status. Under an externally-managed Caddy (`WS_CADDY_ADMIN`, a BYO/test admin
 /// URL) the request always runs **locally** regardless of `site` — that URL is a
-/// host endpoint, not the server's unix socket.
+/// host endpoint, not the server's admin port.
 fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
     let local = Site::Local;
     let effective = if externally_managed() { &local } else { site };
@@ -881,11 +908,15 @@ mod tests {
     }
 
     #[test]
-    fn admin_is_a_unix_socket_not_tcp() {
-        // Security: the admin API must never be on a TCP interface (it would be
-        // reachable from `ws-net` tenants). It listens on a unix socket only.
-        let listen = boot_config()["admin"]["listen"].as_str().unwrap().to_string();
-        assert!(listen.starts_with("unix/"), "admin must be a unix socket, got {listen}");
-        assert!(!listen.contains("0.0.0.0") && !listen.contains(':'), "no TCP admin: {listen}");
+    fn admin_listens_on_the_admin_port_over_tcp() {
+        // TCP on the admin port (a unix socket can't cross the macOS podman VM),
+        // bound to the routable interface so the loopback-scoped publish reaches it.
+        assert_eq!(boot_config()["admin"]["listen"], format!("0.0.0.0:{ADMIN_PORT}"));
+    }
+
+    #[test]
+    fn admin_args_hit_the_loopback_admin_port() {
+        let args = admin_args(&Site::Local, "/config/");
+        assert_eq!(args, vec![format!("http://127.0.0.1:{ADMIN_PORT}/config/")]);
     }
 }
