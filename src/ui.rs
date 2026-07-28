@@ -235,6 +235,9 @@ pub struct ListRow {
 pub struct ListGroup {
     /// Display label — the branch name (`feat/foo`) or the sanitized task dir.
     pub task: String,
+    /// The task dir holding this branch's worktrees (`<root>/.worktrees/<task>`),
+    /// so a reader can find the files; empty for the unmanaged group.
+    pub path: String,
     pub rows: Vec<ListRow>,
 }
 
@@ -268,9 +271,14 @@ pub fn list_table(groups: &[ListGroup]) {
     eprintln!();
     for group in groups {
         if tty() {
-            eprintln!("  {}", style(&group.task).bold());
+            let mut header = style(&group.task).bold().to_string();
+            if !group.path.is_empty() {
+                header.push_str(&format!("  {}", style(&group.path).dim()));
+            }
+            eprintln!("  {header}");
         } else {
-            eprintln!("  {}", group.task);
+            let sep = if group.path.is_empty() { "" } else { "  " };
+            eprintln!("  {}{sep}{}", group.task, group.path);
         }
         for row in &group.rows {
             let repo = format!("{:<width$}", row.repo, width = repo_w);
