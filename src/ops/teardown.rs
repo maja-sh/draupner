@@ -42,16 +42,16 @@ pub fn remove_task(
         super::bail_if_interrupted()?;
 
         // Run the resource-teardown lifecycle where the stack lives. A host
-        // process's lifecycle IS its `systemd --user` unit, so teardown stops the
-        // unit (at its site — local, or the server over SSH) instead of running
+        // process's lifecycle IS a detached ws-owned process, so teardown stops it
+        // (at its site — local, or the server over SSH) instead of running
         // hooks (the same exclusive split as `ws down`). A remote container runs
         // its down/post-remove scripts on the server; a local container runs them
         // as hooks here.
         if cfg.is_host_repo(repo) {
             match site.as_ref() {
                 Some(s) => {
-                    let step = crate::ui::step(repo, "stop (systemd)");
-                    match crate::supervise::down(s, &crate::supervise::unit_name(branch, repo)) {
+                    let step = crate::ui::step(repo, "stop");
+                    match crate::supervise::down(s, &crate::supervise::proc_name(branch, repo)) {
                         Ok(()) => step.ok(),
                         Err(e) => {
                             step.fail(&format!("{e}"));
@@ -61,7 +61,7 @@ pub fn remove_task(
                 }
                 // Remote server unreachable — can't stop the unit now; still drop
                 // the local worktree below so `ws rm` isn't blocked.
-                None => crate::ui::skip(repo, "server unreachable — skipping systemd stop"),
+                None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
             }
         } else if cfg.remote.is_some() {
             teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);

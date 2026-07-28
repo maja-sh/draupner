@@ -147,8 +147,8 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
-        // Host processes are supervised as `systemd --user` units, not run as a
-        // blocking hook — `up` launches (detached, crash-restarting), `down`
+        // Host processes are supervised as a detached `ws`-owned process, not run as a
+        // blocking hook — `up` launches it (detached, survives `ws` exiting), `down`
         // stops. Their `up` script binds the injected `WS_PORT_*`.
         if cfg.is_host_repo(repo) {
             sweep_host(&cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
@@ -346,7 +346,7 @@ fn sync_forwards(
 }
 
 /// Handle one host repo in a sweep. `up` starts its declared `up` script as a
-/// transient `systemd --user` unit with the injected env; `down` stops the unit.
+/// detached process with the injected env; `down` stops it.
 #[allow(clippy::too_many_arguments)]
 fn sweep_host(
     cfg: &config::WsConfig,
@@ -360,15 +360,14 @@ fn sweep_host(
     phase: inject::Phase,
     result: &mut SweepResult,
 ) {
-    // Host-process supervision is a `systemd --user` transient unit — on the local
-    // box, or on the server over SSH for a remote workspace (the `Site` carries
-    // the location; `supervise` sets `XDG_RUNTIME_DIR` remotely so `systemctl
-    // --user` finds the user bus).
-    let unit = crate::supervise::unit_name(branch, repo);
+    // Host-process supervision is a detached `ws`-owned process (PID-file tracked)
+    // — on the local box, or on the server over SSH for a remote workspace (the
+    // `Site` carries the location, so it's the same code path either way).
+    let name = crate::supervise::proc_name(branch, repo);
 
     if event == "down" {
-        let step = crate::ui::step(repo, "stop (systemd)");
-        result.record(repo, step, crate::supervise::down(site, &unit));
+        let step = crate::ui::step(repo, "stop");
+        result.record(repo, step, crate::supervise::down(site, &name));
         if cfg.routing_active() {
             // Best-effort for a host repo (unlike a container): a host service
             // binds a real `WS_PORT` on the host, so it stays reachable there even
@@ -406,9 +405,9 @@ fn sweep_host(
         None => wt.to_string_lossy().into_owned(),
     };
 
-    match crate::supervise::up(site, &unit, &worktree, &cmd, &extra_env) {
+    match crate::supervise::up(site, &name, &worktree, &cmd, &extra_env) {
         Ok(started) => {
-            let label = if started { "start (systemd)" } else { "already running (ws down to apply changes)" };
+            let label = if started { "start" } else { "already running (ws down to apply changes)" };
             crate::ui::step(repo, label).ok();
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
@@ -420,7 +419,7 @@ fn sweep_host(
             sync_forwards(cfg, root, branch, sanitized, repo, "up");
         }
         Err(e) => {
-            crate::ui::step(repo, "start (systemd)").fail(&format!("{e}"));
+            crate::ui::step(repo, "start").fail(&format!("{e}"));
             result.failed.push(repo.to_string());
         }
     }

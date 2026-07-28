@@ -1,159 +1,113 @@
-//! `kind: host` repos are supervised as `systemd --user` transient units.
-//! Uses fake `systemd-run`/`systemctl` (via WS_SYSTEMD_RUN / WS_SYSTEMCTL) that
-//! record their argv, so the wiring is asserted deterministically without a
-//! real systemd — the same seam the ssh/mutagen tests use.
+//! `kind: host` repos are supervised as a detached, `ws`-owned process tracked by
+//! a PID file (no systemd/launchd — works on macOS too). These run the *real*
+//! mechanism: `ws up` launches a `sleep`, and we assert liveness via the pid file,
+//! then `ws down` stops it. `$HOME` is redirected into the fixture, so `~/.ws-run`
+//! is isolated.
 
 mod common;
 
 use common::{stderr, WorkspaceFixture};
+use std::path::Path;
 
+/// A host repo whose `up` records the injected env, then runs a long sleep as the
+/// supervised (tracked) process.
 fn host_fixture() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api","kind":"host",
             "services":{"web":{"http":"web","port":8080}},
-            "scripts":{"up":"cargo watch -x run"}}]}"#,
+            "scripts":{"up":"printf %s \"$WS_HOST_web\" > env-marker; exec sleep 40"}}]}"#,
     );
     f
 }
 
-/// A fake `systemctl` that records its argv to `$ARGS_FILE` and reports the unit
-/// as **stopped** (`is-active` → exit 1), so `supervise::down` (which re-checks
-/// is-active after `stop`) sees a clean stop.
-fn recording_systemctl(f: &WorkspaceFixture) -> std::path::PathBuf {
-    f.stub(
-        "fake-systemctl",
-        "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\ncase \"$2\" in is-active) exit 1 ;; *) exit 0 ;; esac",
-    )
+/// Whether the host process for `feat/foo`'s api is alive, read the same way `ws`
+/// does: the pid file under the fixture HOME, then `kill -0`.
+fn proc_alive(f: &WorkspaceFixture) -> bool {
+    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
+    let Ok(contents) = std::fs::read_to_string(&pid_file) else { return false };
+    // The pid file is two lines — pid, then the start-time identity. We only need
+    // the pid to probe liveness the way the shell does.
+    let pid = contents.lines().next().unwrap_or("").trim();
+    !pid.is_empty()
+        && std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+}
+
+fn stop(f: &WorkspaceFixture) {
+    // Always tear the worktree down so no detached `sleep` leaks past the test.
+    let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
 
 #[test]
-fn host_up_launches_a_systemd_unit_with_the_injected_env() {
+fn host_up_launches_a_detached_process_with_injected_env() {
     let f = host_fixture();
-    let sdr_args = f.path().join("systemd-run.args");
-    let recorder = f.arg_recorder("fake-systemd-run");
-    // is-active must report "not active" (exit 1) so `up` actually launches
-    // rather than treating the unit as already running.
-    let systemctl = f.stub("fake-systemctl", "exit 1");
-
     f.run_ok(&["new", "api", "feat/foo"]);
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SYSTEMD_RUN", recorder.to_str().unwrap()),
-            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
-            ("ARGS_FILE", sdr_args.to_str().unwrap()),
-        ],
-    );
+
+    let out = f.run_ok(&["up", "feat/foo"]);
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
 
-    let args = std::fs::read_to_string(&sdr_args).expect("systemd-run should have been invoked");
-    assert!(args.contains("--unit=ws-feat-foo-api"), "unit name missing:\n{args}");
-    assert!(
-        args.contains(".worktrees/feat-foo/api"),
-        "working-directory should be the worktree:\n{args}"
-    );
-    assert!(args.contains("Restart=on-failure"), "crash-restart missing:\n{args}");
-    // The injected routing env is forwarded as --setenv.
-    assert!(
-        args.contains("--setenv=WS_HOST_web=feat-foo.web.myapp.test"),
-        "WS_HOST not forwarded:\n{args}"
-    );
-    assert!(args.lines().any(|l| l.starts_with("--setenv=WS_PORT_web=")),
-        "a host HTTP service should also get a WS_PORT to bind:\n{args}");
-    // The declared up command is what runs.
-    assert!(args.contains("cargo watch -x run"), "up command missing:\n{args}");
+    // The process is alive (pid file + kill -0)…
+    assert!(proc_alive(&f), "host process should be running after up");
+    // …the injected routing env reached the command…
+    let marker = f.path().join(".worktrees/feat-foo/api/env-marker");
+    let got = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(got, "feat-foo.web.myapp.test", "WS_HOST_web not injected");
+
+    stop(&f);
+    assert!(!proc_alive(&f), "host process should be gone after rm");
 }
 
 #[test]
-fn host_down_stops_the_unit() {
+fn host_down_stops_the_process() {
     let f = host_fixture();
-    let sc_args = f.path().join("systemctl.args");
-    let systemctl = recording_systemctl(&f);
-
     f.run_ok(&["new", "api", "feat/foo"]);
-    let out = f.run_with_env(
-        &["down", "feat/foo"],
-        &[
-            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
-            ("ARGS_FILE", sc_args.to_str().unwrap()),
-        ],
-    );
+    f.run_ok(&["up", "feat/foo"]);
+    assert!(proc_alive(&f), "should be up before down");
+
+    let out = f.run_ok(&["down", "feat/foo"]);
     assert!(out.status.success(), "down failed:\n{}", stderr(&out));
-
-    let args = std::fs::read_to_string(&sc_args).expect("systemctl should have been invoked");
-    assert!(args.contains("stop"), "down should stop the unit:\n{args}");
-    assert!(args.contains("ws-feat-foo-api"), "unit name missing:\n{args}");
+    assert!(!proc_alive(&f), "host process should be stopped after down");
+    stop(&f);
 }
 
 #[test]
-fn host_rm_stops_the_unit() {
+fn host_up_is_idempotent_when_already_running() {
     let f = host_fixture();
-    let sc_args = f.path().join("systemctl.args");
-    let systemctl = recording_systemctl(&f);
-
     f.run_ok(&["new", "api", "feat/foo"]);
-    // `ws rm --force` tears down the worktree; a host repo's teardown must stop
-    // its unit (not run down/post-remove hooks).
-    let out = f.run_with_env(
-        &["rm", "feat/foo", "--force"],
-        &[
-            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
-            ("ARGS_FILE", sc_args.to_str().unwrap()),
-        ],
+    f.run_ok(&["up", "feat/foo"]);
+    let pid1 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+
+    // A second up must NOT relaunch — same pid, and it says "already running".
+    let out = f.run_ok(&["up", "feat/foo"]);
+    let pid2 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+    assert_eq!(pid1, pid2, "up must not relaunch a running host process");
+    assert!(
+        stderr(&out).contains("already running"),
+        "expected an already-running note:\n{}",
+        stderr(&out)
     );
-    assert!(out.status.success(), "rm failed:\n{}", stderr(&out));
-    let args = std::fs::read_to_string(&sc_args).expect("systemctl should have been invoked");
-    assert!(args.contains("stop") && args.contains("ws-feat-foo-api"), "rm should stop the unit:\n{args}");
+    stop(&f);
 }
 
 #[test]
 fn host_up_with_no_up_script_is_skipped() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // kind: host but no `up` script → nothing to launch.
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"http":"web","port":8080}}}]}"#,
     );
-    let sdr_args = f.path().join("systemd-run.args");
-    let recorder = f.arg_recorder("fake-systemd-run");
-    let systemctl = f.stub("fake-systemctl", "exit 1");
-
     f.run_ok(&["new", "api", "feat/foo"]);
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SYSTEMD_RUN", recorder.to_str().unwrap()),
-            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
-            ("ARGS_FILE", sdr_args.to_str().unwrap()),
-        ],
-    );
+
+    let out = f.run_ok(&["up", "feat/foo"]);
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
-    assert!(!sdr_args.exists(), "nothing to launch → systemd-run must not run");
     assert!(stderr(&out).contains("no up script"), "expected a skip note:\n{}", stderr(&out));
-}
-
-#[test]
-fn host_up_skips_when_the_unit_is_already_active() {
-    let f = host_fixture();
-    let sdr_args = f.path().join("systemd-run.args");
-    let recorder = f.arg_recorder("fake-systemd-run");
-    // is-active reports active (exit 0) → `up` must not re-launch.
-    let systemctl = f.stub("fake-systemctl", "exit 0");
-
-    f.run_ok(&["new", "api", "feat/foo"]);
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SYSTEMD_RUN", recorder.to_str().unwrap()),
-            ("WS_SYSTEMCTL", systemctl.to_str().unwrap()),
-            ("ARGS_FILE", sdr_args.to_str().unwrap()),
-        ],
-    );
-    assert!(out.status.success(), "up failed:\n{}", stderr(&out));
     assert!(
-        !sdr_args.exists(),
-        "systemd-run must not run when the unit is already active"
+        !Path::new(&f.path().join(".ws-run/ws-feat-foo-api.pid")).exists(),
+        "nothing to launch → no pid file"
     );
 }
