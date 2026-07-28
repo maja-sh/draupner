@@ -113,7 +113,15 @@ pub fn run() -> Result<()> {
         .into_iter()
         .map(|(key, rows)| {
             let label = group_label(&key, &rows);
-            ListGroup { task: label, rows: rows.into_iter().map(|(r, _)| r).collect() }
+            // The task dir holding this branch's worktrees, so a reader (or a
+            // Claude session) can find the files. The unmanaged group has no
+            // single dir, so it gets none.
+            let path = if key == "(unmanaged)" {
+                String::new()
+            } else {
+                ws.root.join(".worktrees").join(&key).display().to_string()
+            };
+            ListGroup { task: label, path, rows: rows.into_iter().map(|(r, _)| r).collect() }
         })
         .collect();
 
