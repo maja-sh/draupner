@@ -257,6 +257,11 @@ fn sweep_container_remote(
             result.demote(repo);
         }
     }
+    // Forward this repo's raw-TCP ports (db, redis, …) to localhost, so a DB GUI
+    // or CLI on this machine reaches the server's containers unchanged.
+    if event == "down" || up_ok {
+        sync_forwards(cfg, root, branch, sanitized, repo, event);
+    }
 }
 
 /// Add (`up`) or remove (`down`) the Caddy routes for a repo's HTTP services.
@@ -304,6 +309,42 @@ fn sync_routes(
     }
 }
 
+/// Forward a remote repo's allocated service ports back to this machine (`up`) or
+/// tear the forwards down (`down`), so each server-bound port is reachable at the
+/// same `localhost:<port>` it uses on the server. No-op for a local workspace (the
+/// ports are already local). A pure-HTTP container service has no allocated port so
+/// it's skipped — it's reached by hostname through Caddy instead.
+///
+/// Best-effort: a forward failure is noted, never fatal — the service is up on the
+/// server regardless, and re-running `up` retries. Generic on purpose: it forwards
+/// whatever ports a repo allocated, with no knowledge of what binds them.
+///
+/// Reaping depends on the `.ws-meta` port record still existing (it's re-derived
+/// via `ports::load`); teardown terminates before `ports::forget` wipes it. A
+/// record deleted out of band would strand its forwards — acceptable, and the same
+/// window `ports::forget` itself has.
+fn sync_forwards(
+    cfg: &config::WsConfig,
+    root: &std::path::Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    event: &str,
+) {
+    let Some(r) = cfg.remote.as_ref() else { return };
+    for (svc, port) in crate::ports::load(root, sanitized, repo) {
+        let session = crate::mutagen::forward_session_name(branch, repo, port);
+        if event == "down" {
+            let _ = crate::mutagen::forward_terminate(&session);
+        } else {
+            match crate::mutagen::forward_create(&session, &r.connection, port) {
+                Ok(()) => crate::ui::note(&format!("{svc}: reachable at localhost:{port}")),
+                Err(e) => crate::ui::note(&format!("{svc}: forward localhost:{port} failed: {e}")),
+            }
+        }
+    }
+}
+
 /// Handle one host repo in a sweep. `up` starts its declared `up` script as a
 /// transient `systemd --user` unit with the injected env; `down` stops the unit.
 #[allow(clippy::too_many_arguments)]
@@ -334,6 +375,7 @@ fn sweep_host(
             // if its Caddy route (the hostname) fails to sync.
             let _ = sync_routes(cfg, site, root, sanitized, repo, "down");
         }
+        sync_forwards(cfg, root, branch, sanitized, repo, "down");
         return;
     }
 
@@ -374,6 +416,8 @@ fn sweep_host(
                 // bound `WS_PORT`, so a route failure doesn't strand it.
                 let _ = sync_routes(cfg, site, root, sanitized, repo, "up");
             }
+            // Make the server-bound ports reachable at localhost on this machine.
+            sync_forwards(cfg, root, branch, sanitized, repo, "up");
         }
         Err(e) => {
             crate::ui::step(repo, "start (systemd)").fail(&format!("{e}"));

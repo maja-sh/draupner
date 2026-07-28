@@ -160,6 +160,14 @@ pub fn unset() -> Result<()> {
             Ok(()) => step.ok(),
             Err(e) => step.fail(&format!("{e}")),
         }
+        // Drop the port forwards too, before the config flip makes every future
+        // path skip them (they're all guarded on `cfg.remote.is_some()`). Keyed
+        // off the still-present port record. (`set` needs no mirror: it starts no
+        // stacks, so there are no forwards yet — the next `ws up` creates them.)
+        let sanitized = workspace::sanitize_branch(&task);
+        for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
+            let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
+        }
     }
 
     let step = crate::ui::step("cfg", ".ws.json");

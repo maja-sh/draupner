@@ -42,6 +42,67 @@ pub fn session_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
+/// The forwarding-session name for one remote service port. Keyed by port (a repo
+/// can expose several) and distinct from the sync name (`ws-<branch>-<repo>`), so
+/// listing or terminating one kind never touches the other.
+pub fn forward_session_name(branch: &str, repo: &str, port: u16) -> String {
+    format!("ws-fwd-{}-{repo}-{port}", workspace::sanitize_branch(branch))
+}
+
+/// Create a network forward so a port bound on the server is reachable at the same
+/// `localhost:<port>` on this machine — the "remote feels local" contract for
+/// anything that assumes loopback (dev servers with their own TLS, DB GUIs, tools
+/// that hardcode 127.0.0.1). Idempotent: an existing session is left in place.
+pub fn forward_create(session: &str, connection: &str, port: u16) -> Result<()> {
+    let (local, remote) = forward_endpoints(connection, port);
+    let out = Command::new(mutagen_bin())
+        .args(["forward", "create", "--name", session, &local, &remote])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("spawn {}", mutagen_bin()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // Only a **session-name** collision is idempotent success (a re-`up`
+        // re-creating an existing forward). A local-bind "address in use" must
+        // NOT be swallowed the way sync's `create` swallows "in use": for a
+        // forward it means another process already holds `localhost:<port>`, so
+        // reporting success would point the user's client at the wrong process.
+        if err.contains("already exists") {
+            return Ok(());
+        }
+        bail!("mutagen forward create: {}", first_line(&err));
+    }
+    Ok(())
+}
+
+/// The (local, remote) endpoint pair for a forward: the same `localhost:<port>`
+/// on both ends, so the address means the identical thing wherever the stack runs.
+fn forward_endpoints(connection: &str, port: u16) -> (String, String) {
+    (format!("tcp:localhost:{port}"), format!("{connection}:tcp:localhost:{port}"))
+}
+
+/// Terminate a forwarding session. Best-effort: an absent session is success.
+pub fn forward_terminate(session: &str) -> Result<()> {
+    let out = Command::new(mutagen_bin())
+        .args(["forward", "terminate", session])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("spawn {}", mutagen_bin()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("did not match")
+            || err.contains("unable to locate")
+            || err.contains("no sessions")
+        {
+            return Ok(());
+        }
+        bail!("mutagen forward terminate: {}", first_line(&err));
+    }
+    Ok(())
+}
+
 /// Sync ignores for a worktree: the repo's configured `worktree_excludes` plus
 /// the per-host dep artifacts (`vendor/`, `node_modules/`) present on disk.
 /// Disk presence is the ground truth at both call sites — `ws new` creates the
@@ -211,6 +272,24 @@ mod tests {
         assert_eq!(session_name("feat/foo", "api"), "ws-feat-foo-api");
         assert_eq!(session_name("bug/nested/x", "web"), "ws-bug-nested-x-web");
         assert_eq!(session_name("plain", "api"), "ws-plain-api");
+    }
+
+    #[test]
+    fn forward_session_name_is_per_port_and_distinct_from_sync() {
+        assert_eq!(forward_session_name("feat/foo", "app", 20000), "ws-fwd-feat-foo-app-20000");
+        // A repo's two ports get two sessions; neither collides with the sync name.
+        assert_ne!(
+            forward_session_name("feat", "api", 20000),
+            forward_session_name("feat", "api", 20001)
+        );
+        assert_ne!(forward_session_name("feat", "api", 20000), session_name("feat", "api"));
+    }
+
+    #[test]
+    fn forward_endpoints_are_same_port_both_ends() {
+        let (local, remote) = forward_endpoints("srv", 20000);
+        assert_eq!(local, "tcp:localhost:20000");
+        assert_eq!(remote, "srv:tcp:localhost:20000");
     }
 
     #[test]

@@ -104,6 +104,14 @@ pub fn remove_task(
             s.remove_file(&inject::override_path_at(cfg, s, root, &sanitized, repo));
         }
 
+        // Drop any localhost→server port forwards before `ports::forget` wipes
+        // the record of which ports were allocated. Best-effort, remote-only.
+        if cfg.remote.is_some() {
+            for (_, port) in ports::load(root, &sanitized, repo) {
+                let _ = mutagen::forward_terminate(&mutagen::forward_session_name(branch, repo, port));
+            }
+        }
+
         // Free the host ports this worktree held, now that its teardown hooks
         // have run. Done before the worktree removal so a failed `git worktree
         // remove` (which aborts the op) can't leak the `.ws-meta` reservation.
