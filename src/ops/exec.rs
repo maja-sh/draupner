@@ -1,7 +1,11 @@
-//! `ws exec [repo] [--local] [--no-flush] -- <command…>` — run a command where
-//! the repo's stack lives. Remote workspace → `ssh -t` into the synced worktree
-//! on the server; local (or `--local`) → run in the local worktree. Same
-//! command either way; the child's stdio and exit code pass straight through.
+//! `ws exec [--branch <b>] [repo] [--local] [--no-flush] -- <command…>` — run a
+//! command where the repo's stack lives. Remote workspace → `ssh -t` into the
+//! synced worktree on the server; local (or `--local`) → run in the local
+//! worktree. Same command either way; the child's stdio and exit code pass
+//! straight through.
+//!
+//! The worktree is taken from `--branch` when given (so you can target any
+//! worktree from anywhere, e.g. the workspace root), else inferred from the cwd.
 
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
@@ -14,32 +18,49 @@ use crate::mutagen;
 use crate::remote;
 use crate::workspace;
 
-pub fn run(repo: Option<&str>, local: bool, no_flush: bool, command: &[String]) -> Result<()> {
+pub fn run(
+    repo: Option<&str>,
+    branch: Option<&str>,
+    local: bool,
+    no_flush: bool,
+    command: &[String],
+) -> Result<()> {
     // clap declares the command `required` after `--`, so it's always non-empty.
     let (program, args) = command.split_first().expect("clap enforces a non-empty command");
 
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // The task (which worktree set) always comes from CWD — you run `ws exec`
-    // from inside a task's tree. The repo defaults to the one you're in, but an
-    // explicit arg lets you target a sibling.
+    // Which worktree: an explicit `--branch` targets any worktree from anywhere
+    // (e.g. the workspace root); otherwise it — and the default repo — come from
+    // the cwd, i.e. you're standing inside the worktree.
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let root_canon = ws.root.canonicalize().unwrap_or_else(|_| ws.root.clone());
     let worktrees_root = root_canon.join(".worktrees");
 
-    let (task, repo_from_cwd) = workspace::task_repo_under(&cwd, &worktrees_root)
-        .ok_or_else(|| super::preflight("not inside a task worktree; run `ws exec` from within one"))?;
+    let (task, repo_from_cwd) = match branch {
+        Some(b) => (workspace::sanitize_branch(b), None),
+        None => workspace::task_repo_under(&cwd, &worktrees_root).ok_or_else(|| {
+            super::preflight("not inside a worktree; pass `--branch <branch> <repo>`")
+        })?,
+    };
 
     let repo = match repo {
         Some(r) => r.to_string(),
         None => repo_from_cwd.ok_or_else(|| {
-            super::preflight("can't infer the repo from here; pass it: `ws exec <repo> -- …`")
+            super::preflight("can't infer the repo; pass it: `ws exec [--branch <b>] <repo> -- …`")
         })?,
     };
     if !cfg.repos.iter().any(|e| e.name() == repo) {
         return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
+    }
+    // Fail here if the worktree doesn't exist — before any SSH. `ws new` always
+    // creates the local `.worktrees/<task>/<repo>` (even for a remote workspace),
+    // so a valid `--branch` always has a local dir; a bogus one gets a clean error
+    // instead of an SSH round-trip to a `cd` into a nonexistent path.
+    if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
+        return Err(super::preflight(format!("no worktree for `{repo}` in task `{task}`")));
     }
 
     let remote = if local { None } else { cfg.remote.as_ref() };

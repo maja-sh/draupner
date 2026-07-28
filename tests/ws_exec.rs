@@ -29,6 +29,28 @@ fn local_exec_runs_in_the_worktree() {
 }
 
 #[test]
+fn branch_flag_targets_a_worktree_from_the_workspace_root() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    // From the ROOT (not inside the worktree), target it by branch + repo.
+    let out = f.run_ok(&["exec", "--branch", "feat/foo", "api", "--", "touch", "marker"]);
+    assert!(out.status.success(), "exec --branch should succeed:\n{}", stderr(&out));
+    assert!(
+        f.path().join(".worktrees/feat-foo/api/marker").exists(),
+        "command should have run inside the api worktree, targeted by --branch"
+    );
+}
+
+#[test]
+fn branch_flag_without_a_worktree_is_a_clean_error() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    let out = f.run(&["exec", "--branch", "nope", "api", "--", "true"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("no worktree"), "expected a no-worktree error:\n{}", stderr(&out));
+}
+
+#[test]
 fn exposes_ws_env_to_the_command() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
@@ -106,10 +128,12 @@ fn outside_a_worktree_is_a_preflight_error() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // From the workspace root — the task can't be inferred even with a repo arg.
+    // From the workspace root without `--branch` — the worktree can't be inferred
+    // even with a repo arg; the error points at `--branch`.
     let out = f.run(&["exec", "api", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("not inside a task worktree"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("not inside a worktree"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--branch"), "should suggest --branch:\n{}", stderr(&out));
 }
 
 #[test]
