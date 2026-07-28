@@ -144,8 +144,8 @@ pub enum RepoKind {
     /// Compose stack. N copies de-conflicted via a generated compose override;
     /// supervised by the runtime.
     Container,
-    /// Host process (e.g. `cargo run`). Ports de-conflicted via the `bind(2)`
-    /// shim; supervised as a `systemd --user` transient unit.
+    /// Host process (e.g. `cargo run`). Supervised as a detached `ws`-owned
+    /// process (PID-file tracked), local or on the server -- no systemd/launchd.
     Host,
 }
 
@@ -186,7 +186,7 @@ impl RepoConfig {
     }
 
     /// Whether this repo is an **explicit** `kind: host` process — the trigger
-    /// for `systemd --user` supervision and per-service port allocation.
+    /// for host-process supervision and per-service port allocation.
     /// Deliberately requires the explicit kind rather than inferring host from a
     /// missing compose file (contrast `is_container`, which treats `kind: None`
     /// as inferred-from-compose): supervision changes how `up` runs, so it's
@@ -269,8 +269,8 @@ impl WsConfig {
         self.repos.iter().find(|r| r.name() == repo).and_then(|r| r.config())
     }
 
-    /// Whether `repo` is an explicit `kind: host` process (supervised via
-    /// `systemd --user`). A bare-name repo, or one without config, is not.
+    /// Whether `repo` is an explicit `kind: host` process (a detached ws-owned
+    /// process). A bare-name repo, or one without config, is not.
     pub fn is_host_repo(&self, repo: &str) -> bool {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
