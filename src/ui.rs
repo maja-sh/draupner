@@ -6,7 +6,7 @@
 
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Left-pad width for the step-line tag column. Widest tag currently in use is
@@ -16,6 +16,29 @@ const TAG_WIDTH: usize = 6;
 fn tty() -> bool {
     static TTY: OnceLock<bool> = OnceLock::new();
     *TTY.get_or_init(|| Term::stderr().features().colors_supported())
+}
+
+/// The spinner currently animating, if any. A streamed line (`hook_line`) printed
+/// with a plain `eprintln!` collides with the spinner's steady-tick redraw on the
+/// same terminal row; emitting it *through* the spinner (`suspend`) makes indicatif
+/// clear its line first, so the log lands cleanly above the still-spinning step.
+static ACTIVE_SPINNER: Mutex<Option<ProgressBar>> = Mutex::new(None);
+
+fn set_active_spinner(pb: Option<ProgressBar>) {
+    *ACTIVE_SPINNER.lock().unwrap() = pb;
+}
+
+/// Run `f` (which prints one line) with the active spinner suspended, so the line
+/// lands above the spinner instead of fighting its redraw. A no-op wrapper when no
+/// spinner is live (non-tty, or between steps).
+fn emit_around_spinner(f: impl FnOnce()) {
+    // Clone the handle out and drop the lock before suspending, so a reentrant
+    // print (there is none today) couldn't deadlock on the mutex.
+    let pb = ACTIVE_SPINNER.lock().unwrap().clone();
+    match pb {
+        Some(pb) => pb.suspend(f),
+        None => f(),
+    }
 }
 
 /// Op header — `◐ ws-new api,app test/foo` on tty, `ws-new: …` on non-tty.
@@ -45,6 +68,8 @@ pub fn step(tag: &str, label: &str) -> Step {
         );
         pb.set_prefix(format!("{}", style(pad_tag(tag)).green().bold()));
         pb.set_message(label.to_string());
+        // Register it so `hook_line` streamed under this step suspends it.
+        set_active_spinner(Some(pb.clone()));
         Some(pb)
     } else {
         None
@@ -67,6 +92,15 @@ pub struct Step {
 }
 
 impl Step {
+    /// Finish and clear the spinner, and deregister it so streamed output after
+    /// this step no longer suspends a bar that's gone.
+    fn clear_spinner(&mut self) {
+        if let Some(pb) = self.spinner.take() {
+            pb.finish_and_clear();
+        }
+        set_active_spinner(None);
+    }
+
     pub fn ok(mut self) {
         self.finished = true;
         self.finish_ok_inner(None);
@@ -80,9 +114,7 @@ impl Step {
 
     pub fn fail(mut self, reason: &str) {
         self.finished = true;
-        if let Some(pb) = self.spinner.take() {
-            pb.finish_and_clear();
-        }
+        self.clear_spinner();
         if tty() {
             eprintln!(
                 "  {} {} {} — {}",
@@ -98,9 +130,7 @@ impl Step {
 
     fn finish_ok_inner(&mut self, suffix: Option<String>) {
         let elapsed = self.start.elapsed();
-        if let Some(pb) = self.spinner.take() {
-            pb.finish_and_clear();
-        }
+        self.clear_spinner();
         let timing = format_timing(elapsed);
         if tty() {
             let mut line = format!(
@@ -133,9 +163,7 @@ impl Drop for Step {
         if self.finished {
             return;
         }
-        if let Some(pb) = self.spinner.take() {
-            pb.finish_and_clear();
-        }
+        self.clear_spinner();
         // Step dropped without a terminal call — usually a `?` upstream. Emit
         // an aborted line so the user isn't left with a silent gap between
         // the header and the propagated error.
@@ -156,16 +184,18 @@ impl Drop for Step {
 /// see spec-output-formatting §"Hook-streamed line" (no distinct styling in v1).
 pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
     let cleaned = strip_control(line);
-    if tty() {
-        eprintln!(
-            "       {} [{}] {}",
-            style("│").dim(),
-            style(tag).dim().bold(),
-            style(&cleaned).dim(),
-        );
-    } else {
-        eprintln!("    [{tag}] {cleaned}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!(
+                "       {} [{}] {}",
+                style("│").dim(),
+                style(tag).dim().bold(),
+                style(&cleaned).dim(),
+            );
+        } else {
+            eprintln!("    [{tag}] {cleaned}");
+        }
+    });
 }
 
 /// A dim, subordinate note that a repo was skipped for a step (e.g. it has a
