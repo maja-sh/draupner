@@ -67,8 +67,11 @@ enum Cmd {
     },
     /// Run a command where the repo's stack lives (remote via ssh, else local)
     Exec {
-        /// Repo to run in; inferred from the current worktree if omitted
+        /// Repo to run in; inferred from the current worktree, else required (e.g. with --branch)
         repo: Option<String>,
+        /// Worktree to run in, by branch; inferred from the cwd if omitted
+        #[arg(short = 'b', long)]
+        branch: Option<String>,
         /// Force local execution even when the workspace is remote
         #[arg(long)]
         local: bool,
@@ -145,7 +148,7 @@ pub fn run() -> anyhow::Result<()> {
             ConfigCmd::Set{key,value}    => crate::ops::config::set(&key, &value),
             ConfigCmd::Unset{key}        => crate::ops::config::unset(&key),
         },
-        Cmd::Exec{repo,local,no_flush,command} =>
-            crate::ops::exec::run(repo.as_deref(), local, no_flush, &command),
+        Cmd::Exec{repo,branch,local,no_flush,command} =>
+            crate::ops::exec::run(repo.as_deref(), branch.as_deref(), local, no_flush, &command),
     }
 }
