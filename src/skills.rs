@@ -11,6 +11,7 @@ const SKILLS: &[(&str, &str)] = &[
     ("ws-here",     include_str!("../skills/ws-here/SKILL.md")),
     ("ws-clean",    include_str!("../skills/ws-clean/SKILL.md")),
     ("ws-init",     include_str!("../skills/ws-init/SKILL.md")),
+    ("ws-resume",   include_str!("../skills/ws-resume/SKILL.md")),
 ];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
@@ -44,11 +45,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_skill_has_frontmatter_and_invoke_line() {
+    fn every_skill_has_valid_frontmatter() {
         for (name, body) in SKILLS {
             assert!(body.starts_with("---\n"), "{name}: missing frontmatter");
             assert!(body.contains(&format!("name: {name}")), "{name}: frontmatter name mismatch");
             assert!(body.contains("description:"), "{name}: missing description");
+        }
+    }
+
+    #[test]
+    fn command_wrapper_skills_carry_an_invoke_line() {
+        // Most skills just map `/ws-<x>` to `ws <x>`; a few (ws-resume) are
+        // procedures with no single command, so the invoke line is not universal.
+        for (name, body) in SKILLS {
+            if *name == "ws-resume" {
+                continue;
+            }
             assert!(body.contains("Invoke via bash"), "{name}: missing invoke line");
         }
     }
