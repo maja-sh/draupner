@@ -106,7 +106,6 @@ impl Step {
         self.finish_ok_inner(None);
     }
 
-    #[allow(dead_code)]
     pub fn ok_with(mut self, suffix: &str) {
         self.finished = true;
         self.finish_ok_inner(Some(suffix.to_string()));
