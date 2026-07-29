@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::config;
@@ -101,6 +101,21 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         // without this the worktree reads as permanently dirty.
         git::add_worktree_excludes(&wt_path, &excludes)
             .with_context(|| format!("register worktree excludes for {repo_name}"))?;
+
+        // Seed declared untracked files (dev certs/keys/env) from the main checkout
+        // into the fresh worktree. Runs before the remote sync below so they ride
+        // it to the server, and before post-create so build steps see them.
+        let copies = repo_entry.copy();
+        if !copies.is_empty() {
+            let step = crate::ui::step(repo_name, "files copied");
+            match seed_copies(&repo_path, &wt_path, copies) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    remove_worktree(&repo_path, &wt_path);
+                    return Err(e.context(format!("copy for {repo_name}")));
+                }
+            }
+        }
 
         // Advisory isolation lint — run once, here, when the worktree's compose
         // file first lands (not on every `ws up`): its constructs are static
@@ -290,20 +305,51 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
 }
 
 fn copy_vendor(repo: &Path, wt: &Path) -> Result<()> {
-    let src = repo.join("vendor");
-    let dst = wt.join("vendor");
+    cp_r(&repo.join("vendor"), &wt.join("vendor")).context("cp vendor/")
+}
+
+/// Recursively copy `src` to `dst` via the platform `cp` (clonefile on macOS, so
+/// a large `vendor/` is a cheap reflink rather than a byte copy).
+fn cp_r(src: &Path, dst: &Path) -> Result<()> {
     let mut cmd = Command::new("cp");
     cmd.arg("-R");
     if cfg!(target_os = "macos") {
         cmd.arg("-c");
     }
-    cmd.arg(&src).arg(&dst);
-    let out = cmd.output().context("spawn cp for vendor/")?;
+    cmd.arg(src).arg(dst);
+    let out = cmd.output().context("spawn cp")?;
     if !out.status.success() {
-        bail!(
-            "cp vendor/: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        bail!("cp {}: {}", src.display(), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Seed `entries` (repo-relative files, directories, or globs) from the main
+/// checkout `repo` into worktree `wt`. No-clobber: an existing dest is left as-is.
+/// A source with no match is skipped (seed-if-present). `..` is refused so a
+/// config entry can't escape the repo.
+fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<()> {
+    for entry in entries {
+        if Path::new(entry).components().any(|c| c == Component::ParentDir) {
+            bail!("copy entry `{entry}` must not contain `..`");
+        }
+        // Only `entry` is a glob — escape the repo prefix so a workspace path that
+        // happens to contain `*`/`[`/`?` isn't misread as a pattern.
+        let pattern = format!("{}/{entry}", glob::Pattern::escape(&repo.to_string_lossy()));
+        let matches =
+            glob::glob(&pattern).with_context(|| format!("invalid copy pattern `{entry}`"))?;
+        for src in matches.flatten() {
+            let rel = src.strip_prefix(repo).expect("a glob match lies under its root");
+            let dst = wt.join(rel);
+            if dst.exists() {
+                continue; // no-clobber — a worktree's local edit wins
+            }
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            cp_r(&src, &dst)?;
+        }
     }
     Ok(())
 }
@@ -327,4 +373,78 @@ fn remove_worktree(repo: &Path, wt: &Path) {
         .args(["worktree", "remove", "--force"])
         .arg(wt)
         .output();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seed_copies;
+    use std::fs;
+    use std::path::Path;
+
+    fn touch(p: &Path, body: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn copies_file_directory_and_glob_only_matching() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        touch(&repo.join(".env"), "e");
+        touch(&repo.join("build-dev/cert/a.pem"), "c");
+        touch(&repo.join("storage/oauth-private.key"), "k");
+        touch(&repo.join("storage/other.txt"), "o");
+
+        seed_copies(
+            &repo,
+            &wt,
+            &[".env".into(), "build-dev/cert".into(), "storage/oauth-*.key".into()],
+        )
+        .unwrap();
+
+        assert!(wt.join(".env").is_file());
+        assert!(wt.join("build-dev/cert/a.pem").is_file(), "directory copied recursively");
+        assert!(wt.join("storage/oauth-private.key").is_file());
+        assert!(!wt.join("storage/other.txt").exists(), "glob must not pull non-matches");
+    }
+
+    #[test]
+    fn no_clobber_keeps_the_worktrees_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        touch(&repo.join(".env"), "from-main");
+        touch(&wt.join(".env"), "local-edit");
+
+        seed_copies(&repo, &wt, &[".env".into()]).unwrap();
+
+        assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "local-edit");
+    }
+
+    #[test]
+    fn missing_source_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+
+        seed_copies(&repo, &wt, &["nope.env".into(), "missing/*.key".into()]).unwrap();
+
+        assert!(!wt.join("nope.env").exists());
+    }
+
+    #[test]
+    fn parent_escape_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+
+        assert!(seed_copies(&repo, &wt, &["../secret".into()]).is_err());
+        assert!(seed_copies(&repo, &wt, &["a/../../secret".into()]).is_err());
+    }
 }
