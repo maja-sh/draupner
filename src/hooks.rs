@@ -90,11 +90,24 @@ fn is_executable(_p: &Path) -> bool {
 
 /// The `WS_*` context every hook/script receives. Single source of truth for the
 /// env contract, applied by streamed and captured runs alike.
-fn ws_env(cmd: &mut Command, workspace_root: &Path, repo: &str, branch_sanitized: &str, event: &str) {
-    cmd.env("WS_WORKSPACE_ROOT", workspace_root)
-        .env("WS_REPO", repo)
-        .env("WS_BRANCH_SANITIZED", branch_sanitized)
-        .env("WS_HOOK_NAME", event);
+/// The base `WS_*` env contract every hook/script receives, as owned pairs so the
+/// `Command`-based hook runner AND the detached host-process supervisor
+/// (`supervise::up`, which never touches a `Command`) apply the identical set.
+/// `WS_HOST_*`/`WS_PORT_*` + declared `env` layer on top.
+pub fn base_env(
+    workspace_root: &Path,
+    worktree: &str,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+) -> Vec<(String, String)> {
+    vec![
+        ("WS_WORKSPACE_ROOT".to_string(), workspace_root.to_string_lossy().into_owned()),
+        ("WS_WORKTREE".to_string(), worktree.to_string()),
+        ("WS_REPO".to_string(), repo.to_string()),
+        ("WS_BRANCH_SANITIZED".to_string(), branch_sanitized.to_string()),
+        ("WS_HOOK_NAME".to_string(), event.to_string()),
+    ]
 }
 
 /// Apply the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
@@ -120,8 +133,8 @@ fn script_command(
 ) -> Command {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd).current_dir(worktree_path);
-    ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
-    c.env("WS_WORKTREE", worktree_path);
+    let base = base_env(workspace_root, &worktree_path.to_string_lossy(), repo, branch_sanitized, event);
+    apply_extra(&mut c, &base);
     apply_extra(&mut c, extra_env);
     c
 }
@@ -140,7 +153,8 @@ fn file_command(
 ) -> Command {
     let mut c = Command::new(workspace_root.join(hook_rel));
     c.arg(worktree_path).current_dir(workspace_root);
-    ws_env(&mut c, workspace_root, repo, branch_sanitized, event);
+    let base = base_env(workspace_root, &worktree_path.to_string_lossy(), repo, branch_sanitized, event);
+    apply_extra(&mut c, &base);
     apply_extra(&mut c, extra_env);
     c
 }
