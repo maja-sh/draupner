@@ -118,8 +118,12 @@ pub struct RepoConfig {
     pub scripts: BTreeMap<String, Script>,
     /// Explicit env-var injection: your app's var name → a `${WS_*}` template.
     /// `ws` owns `WS_HOST_*`/`WS_PORT_*`; you declare which of your vars get them.
-    /// A `BTreeMap` so injection order (and the generated override's
-    /// `environment:` lines) is deterministic rather than hash-random.
+    /// Reference a *sibling* repo's service with `${WS_HOST_<repo>.<svc>}` /
+    /// `${WS_PORT_<repo>.<svc>}` (e.g. an api's SSO redirect needs the app's
+    /// `${WS_PORT_app.web}`); the peer's value comes from its recorded allocation,
+    /// so an unbuilt peer leaves the token literal. A `BTreeMap` so injection order
+    /// (and the generated override's `environment:` lines) is deterministic rather
+    /// than hash-random.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Format-blind config templates (the escape hatch): a committed `src`
