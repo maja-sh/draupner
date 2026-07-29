@@ -17,7 +17,7 @@ fn host_fixture() -> WorkspaceFixture {
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api","kind":"host",
             "services":{"web":{"http":"web","port":8080}},
-            "scripts":{"up":"printf %s \"$WS_HOST_web\" > env-marker; exec sleep 40"}}]}"#,
+            "scripts":{"up":"printf '%s %s' \"$WS_HOST_web\" \"$WS_BRANCH_SANITIZED\" > env-marker; exec sleep 40"}}]}"#,
     );
     f
 }
@@ -53,10 +53,12 @@ fn host_up_launches_a_detached_process_with_injected_env() {
 
     // The process is alive (pid file + kill -0)…
     assert!(proc_alive(&f), "host process should be running after up");
-    // …the injected routing env reached the command…
+    // …both the injected routing env (WS_HOST_web) AND the base contract
+    // (WS_BRANCH_SANITIZED) reached the command — the latter regressed once,
+    // producing `https://.api.<domain>` from an empty branch segment.
     let marker = f.path().join(".worktrees/feat-foo/api/env-marker");
     let got = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert_eq!(got, "feat-foo.web.myapp.test", "WS_HOST_web not injected");
+    assert_eq!(got, "feat-foo.web.myapp.test feat-foo", "host env missing WS_HOST_web or WS_BRANCH_SANITIZED");
 
     stop(&f);
     assert!(!proc_alive(&f), "host process should be gone after rm");

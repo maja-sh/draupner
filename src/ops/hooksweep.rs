@@ -405,7 +405,13 @@ fn sweep_host(
         None => wt.to_string_lossy().into_owned(),
     };
 
-    match crate::supervise::up(site, &name, &worktree, &cmd, &extra_env) {
+    // The host process runs detached (not via the `Command`-based hook runner), so
+    // apply the base `WS_*` contract here — otherwise the `up` script sees only the
+    // injection env (`WS_PORT_*`/`WS_HOST_*`) and `$WS_BRANCH_SANITIZED` & friends
+    // come out empty (e.g. `https://.api.<domain>`).
+    let mut proc_env = crate::hooks::base_env(root, &worktree, repo, sanitized, event);
+    proc_env.extend(extra_env.iter().cloned());
+    match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
             let label = if started { "start" } else { "already running (ws down to apply changes)" };
             // Surface the ports ws allocated for this host process. Unlike a routed
