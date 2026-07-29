@@ -140,13 +140,26 @@ pub fn prepare(
     }
 
     let vars = ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, host);
+
+    // Substitution map = this repo's own `WS_*` plus every *peer* repo's, re-keyed
+    // under a `<repo>.` prefix (`${WS_PORT_app.web}`, `${WS_HOST_app.web}`), so a
+    // repo's `env`/`templates` can reference a sibling's routed host or allocated
+    // port. Peer entries are for substitution ONLY — their keys carry a `.` (not a
+    // valid env-var name) and are never injected. Peers are read-only: their ports
+    // come from the allocation recorded at `ws new`, so an unbuilt peer just leaves
+    // the token literal (same as any unknown `${WS_*}`).
+    let mut subst = vars.clone();
+    for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
+        subst.extend(peer_vars(cfg, root, branch_sanitized, peer));
+    }
+
     if phase.renders() {
-        render_all(worktree, rc, &vars)?;
+        render_all(worktree, rc, &subst)?;
     }
 
     // Declared `env` mappings with their `${WS_*}` tokens substituted. Fed both
     // into the script env and (for a container) the override's `environment:`.
-    let declared = declared_env(rc, &vars);
+    let declared = declared_env(rc, &subst);
     let mut env: Vec<(String, String)> =
         vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     env.extend(declared.iter().cloned());
@@ -412,6 +425,35 @@ fn ws_vars(
     vars
 }
 
+/// A peer repo's `WS_HOST_*`/`WS_PORT_*`, re-keyed under a `<peer>.` prefix
+/// (`WS_PORT_<peer>.<svc>`) so another repo can reference it via substitution.
+/// Read-only: the peer's ports come from its recorded allocation (written at
+/// `ws new`) — never a fresh allocation here. Empty when the peer isn't configured
+/// or has no allocation yet, which leaves the referencing token literal.
+fn peer_vars(
+    cfg: &WsConfig,
+    root: &Path,
+    branch_sanitized: &str,
+    peer: &str,
+) -> BTreeMap<String, String> {
+    let Some(rc) = cfg.repo_config(peer) else { return BTreeMap::new() };
+    // Prefer the service set recorded at the peer's last `up` (covers auto-derived
+    // container services); fall back to its declared block for a fresh worktree.
+    let recorded = ports::services(root, branch_sanitized, peer);
+    let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
+    let port_map = ports::load(root, branch_sanitized, peer);
+    ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, rc.is_host())
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let rekeyed = k
+                .strip_prefix("WS_HOST_")
+                .map(|svc| format!("WS_HOST_{peer}.{svc}"))
+                .or_else(|| k.strip_prefix("WS_PORT_").map(|svc| format!("WS_PORT_{peer}.{svc}")))?;
+            Some((rekeyed, v))
+        })
+        .collect()
+}
+
 /// The declared `env` entries with their `${WS_*}` tokens substituted, in
 /// deterministic key order (`rc.env` is a `BTreeMap`). `ws` owns the `WS_*`
 /// values in `vars`; these map them onto the app's own var names.
@@ -511,6 +553,59 @@ mod tests {
     /// The repo's declared services as the sorted map `ws_vars` now takes.
     fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
         rc.services.clone()
+    }
+
+    #[test]
+    fn substitute_resolves_a_cross_repo_token() {
+        let mut vars = BTreeMap::new();
+        vars.insert("WS_PORT_app.web".to_string(), "20008".to_string());
+        assert_eq!(
+            substitute("https://myapp.localhost:${WS_PORT_app.web}/x", &vars),
+            "https://myapp.localhost:20008/x"
+        );
+        // An unbuilt/unknown peer leaves the token literal, like any unknown `${WS_*}`.
+        assert_eq!(
+            substitute("${WS_PORT_missing.web}", &BTreeMap::new()),
+            "${WS_PORT_missing.web}"
+        );
+    }
+
+    #[test]
+    fn peer_vars_rekeys_a_recorded_peer_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","kind":"container"},
+                         {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
+        )
+        .unwrap();
+        // Record the app's allocation the way `ws new` would.
+        std::fs::create_dir_all(crate::ports::meta_dir(root)).unwrap();
+        std::fs::write(
+            crate::ports::meta_dir(root).join("feat-app.json"),
+            r#"{"ports":{"web":20008}}"#,
+        )
+        .unwrap();
+
+        let pv = peer_vars(&cfg, root, "feat", "app");
+        assert_eq!(pv.get("WS_PORT_app.web").map(String::as_str), Some("20008"));
+        // The app's web service isn't routed, so it exposes no host var.
+        assert!(!pv.contains_key("WS_HOST_app.web"));
+    }
+
+    #[test]
+    fn peer_vars_empty_for_an_unbuilt_or_unknown_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","kind":"container"},
+                         {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
+        )
+        .unwrap();
+        // Configured but never built (no `.ws-meta`) ⇒ no recorded port.
+        assert!(peer_vars(&cfg, root, "feat", "app").is_empty());
+        // Not a repo at all ⇒ empty.
+        assert!(peer_vars(&cfg, root, "feat", "nope").is_empty());
     }
 
     #[test]
