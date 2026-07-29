@@ -408,7 +408,21 @@ fn sweep_host(
     match crate::supervise::up(site, &name, &worktree, &cmd, &extra_env) {
         Ok(started) => {
             let label = if started { "start" } else { "already running (ws down to apply changes)" };
-            crate::ui::step(repo, label).ok();
+            // Surface the ports ws allocated for this host process. Unlike a routed
+            // container (which prints its hostname), a host service has no hostname
+            // to show — the bound port is the only handle, and it's otherwise
+            // invisible to the user. Sorted so the line is stable across runs.
+            let mut ports: Vec<String> = extra_env
+                .iter()
+                .filter_map(|(k, v)| k.strip_prefix("WS_PORT_").map(|svc| format!("{svc}:{v}")))
+                .collect();
+            ports.sort();
+            let step = crate::ui::step(repo, label);
+            if ports.is_empty() {
+                step.ok();
+            } else {
+                step.ok_with(&ports.join(", "));
+            }
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
                 // Best-effort (see the `down` arm): a host service keeps its
