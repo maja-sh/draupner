@@ -504,6 +504,7 @@ mod tests {
             templates: Vec::new(),
             hooks: Default::default(),
             worktree_excludes: Vec::new(),
+            copy: Vec::new(),
         }
     }
 

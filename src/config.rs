@@ -126,6 +126,15 @@ pub struct RepoConfig {
     /// rendered to a gitignored `dest` with `${WS_*}` tokens substituted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
+    /// Untracked files to seed verbatim from the main checkout into each new
+    /// worktree at `ws new` (before post-create, and before a remote sync so they
+    /// ride it to the server). Each entry is a repo-relative path — a file, a
+    /// directory (copied recursively), or a glob (`storage/oauth-*.key`).
+    /// No-clobber (an existing dest is left as-is), and a source with no match is
+    /// skipped. Unlike `templates`, the bytes are copied as-is — no substitution.
+    /// The lane for dev certs/keys/env that aren't in git.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<String>,
     /// Legacy per-event hook path overrides. Keys are event names. Values are
     /// paths relative to the config dir. Deprecated by `scripts`; kept until the
     /// execution path migrates. `BTreeMap` for the same rewrite determinism as
@@ -315,6 +324,15 @@ impl RepoEntry {
         match self {
             RepoEntry::Name(_) => &[],
             RepoEntry::Extended(c) => &c.worktree_excludes,
+        }
+    }
+
+    /// Untracked paths to seed from the main checkout into a new worktree. Empty
+    /// for a bare-name repo.
+    pub fn copy(&self) -> &[String] {
+        match self {
+            RepoEntry::Name(_) => &[],
+            RepoEntry::Extended(c) => &c.copy,
         }
     }
 }
