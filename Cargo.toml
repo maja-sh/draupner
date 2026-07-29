@@ -1,6 +1,6 @@
 [package]
 name = "workspaces"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 
 [[bin]]
@@ -15,6 +15,7 @@ toml             = "0.8"
 schemars         = "0.8"
 anyhow           = "1"
 console          = "0.15"
+glob             = "0.3"
 indicatif        = "0.17"
 ctrlc            = "3"
 tracing          = "0.1"
