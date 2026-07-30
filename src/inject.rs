@@ -160,7 +160,7 @@ pub fn prepare(
     // the token literal (same as any unknown `${WS_*}`).
     let mut subst = vars.clone();
     for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
-        subst.extend(peer_vars(cfg, root, branch_sanitized, peer));
+        subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
     }
 
     if phase.renders() {
@@ -459,17 +459,39 @@ fn ws_vars(
 /// or has no allocation yet, which leaves the referencing token literal.
 fn peer_vars(
     cfg: &WsConfig,
+    site: &Site,
     root: &Path,
     branch_sanitized: &str,
     peer: &str,
-) -> BTreeMap<String, String> {
-    let Some(rc) = cfg.repo_config(peer) else { return BTreeMap::new() };
+    phase: Phase,
+) -> Result<BTreeMap<String, String>> {
+    let Some(rc) = cfg.repo_config(peer) else { return Ok(BTreeMap::new()) };
     // Prefer the service set recorded at the peer's last `up` (covers auto-derived
     // container services); fall back to its declared block for a fresh worktree.
     let recorded = ports::services(root, branch_sanitized, peer);
     let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
-    let port_map = ports::load(root, branch_sanitized, peer);
-    ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, rc.is_host())
+    let peer_host = rc.is_host();
+
+    // On an allocating phase (`up`/`new`/`exec`) **pre-allocate** the peer's
+    // port-bearing services, so `${WS_PORT_<peer>.<svc>}` resolves even when the
+    // peer worktree isn't built yet — the whole point of letting a repo reference
+    // a sibling it's spun up separately from. The reservation lands in the peer's
+    // own `.ws-meta`; when the peer is later brought up, `resolve` preserves it, so
+    // both agree on the port regardless of order. Teardown of the branch frees a
+    // reservation whose peer was never created. Read/teardown phases stay
+    // read-only (`load`) — they must never allocate. `WS_HOST_*` needs no port and
+    // resolved without this already; this is purely for `WS_PORT_*`.
+    let port_map = if phase.allocates() {
+        let needs: Vec<String> = services
+            .iter()
+            .filter(|(_, s)| peer_host || !s.is_http())
+            .map(|(n, _)| n.clone())
+            .collect();
+        ports::resolve(site, root, branch_sanitized, peer, &needs)?
+    } else {
+        ports::load(root, branch_sanitized, peer)
+    };
+    Ok(ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, peer_host)
         .into_iter()
         .filter_map(|(k, v)| {
             let rekeyed = k
@@ -478,7 +500,7 @@ fn peer_vars(
                 .or_else(|| k.strip_prefix("WS_PORT_").map(|svc| format!("WS_PORT_{peer}.{svc}")))?;
             Some((rekeyed, v))
         })
-        .collect()
+        .collect())
 }
 
 /// The declared `env` entries with their `${WS_*}` tokens substituted, in
@@ -635,14 +657,15 @@ mod tests {
         )
         .unwrap();
 
-        let pv = peer_vars(&cfg, root, "feat", "app");
+        // Read-only phase: use the recorded port, allocate nothing.
+        let pv = peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Inspect).unwrap();
         assert_eq!(pv.get("WS_PORT_app.web").map(String::as_str), Some("20008"));
         // The app's web service isn't routed, so it exposes no host var.
         assert!(!pv.contains_key("WS_HOST_app.web"));
     }
 
     #[test]
-    fn peer_vars_empty_for_an_unbuilt_or_unknown_peer() {
+    fn peer_vars_read_phase_is_empty_for_an_unbuilt_or_unknown_peer() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let cfg: WsConfig = serde_json::from_str(
@@ -650,10 +673,33 @@ mod tests {
                          {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
         )
         .unwrap();
-        // Configured but never built (no `.ws-meta`) ⇒ no recorded port.
-        assert!(peer_vars(&cfg, root, "feat", "app").is_empty());
-        // Not a repo at all ⇒ empty.
-        assert!(peer_vars(&cfg, root, "feat", "nope").is_empty());
+        // Read-only phase, never built (no `.ws-meta`) ⇒ no recorded port, no alloc.
+        assert!(peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Inspect).unwrap().is_empty());
+        // Not a repo at all ⇒ empty on any phase.
+        assert!(peer_vars(&cfg, &Site::Local, root, "feat", "nope", Phase::Activate).unwrap().is_empty());
+    }
+
+    #[test]
+    fn peer_vars_pre_allocates_an_unbuilt_peer_on_an_allocating_phase() {
+        // The point of the feature: `ws up api` (Activate) must resolve
+        // `${WS_PORT_app.web}` even though the app worktree doesn't exist — by
+        // reserving app's port. The reservation persists so app reuses it later.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","kind":"container"},
+                         {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
+        )
+        .unwrap();
+
+        let pv = peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Activate).unwrap();
+        let port = pv.get("WS_PORT_app.web").expect("peer port pre-allocated");
+        assert!(port.parse::<u16>().is_ok(), "a real port, got {port}");
+        // It landed in the peer's own `.ws-meta`, so app reuses it when built.
+        assert_eq!(
+            ports::load(root, "feat", "app").get("web").map(|p| p.to_string()).as_deref(),
+            Some(port.as_str()),
+        );
     }
 
     #[test]
