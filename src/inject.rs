@@ -103,12 +103,15 @@ pub fn prepare(
     // effective set recorded at the last `up` — it covers services that were
     // auto-derived from compose and never declared — falling back to the
     // declared block for a worktree that predates the record.
-    let services: BTreeMap<String, ServiceConfig> = if phase.derives() {
-        effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
-    } else {
-        let recorded = ports::services(root, branch_sanitized, repo);
-        if recorded.is_empty() { rc.services.clone() } else { recorded }
-    };
+    let (services, all_services): (BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>) =
+        if phase.derives() {
+            effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
+        } else {
+            let recorded = ports::services(root, branch_sanitized, repo);
+            let s = if recorded.is_empty() { rc.services.clone() } else { recorded };
+            let names = s.keys().cloned().collect();
+            (s, names)
+        };
 
     // Allocate a host port per raw-TCP service (host repos: every service). The
     // record + lock stay host-side (the host drives every `ws` call); only the
@@ -178,7 +181,8 @@ pub fn prepare(
         let base = base_files_at(worktree, &site_worktree);
         let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
         env.extend(compose_env(
-            site, &base, &override_path, &project, &services, &port_map, &declared, phase, join_ws_net,
+            site, &base, &override_path, &project, &services, &all_services, &port_map, &declared,
+            phase, join_ws_net,
         )?);
     }
     Ok(env)
@@ -257,6 +261,7 @@ fn compose_env(
     override_path: &str,
     project: &str,
     services: &BTreeMap<String, ServiceConfig>,
+    all_services: &std::collections::BTreeSet<String>,
     port_map: &BTreeMap<String, u16>,
     declared: &[(String, String)],
     phase: Phase,
@@ -268,7 +273,7 @@ fn compose_env(
 
     let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
     if phase.writes_override()
-        && compose::write_override(site, override_path, services, port_map, declared, join_ws_net)?
+        && compose::write_override(site, override_path, services, all_services, port_map, declared, join_ws_net)?
     {
         let mut files: Vec<String> = base.to_vec();
         files.push(override_path.to_string());
@@ -360,12 +365,13 @@ fn effective_services(
     local_worktree: &Path,
     repo: &str,
     rc: &RepoConfig,
-) -> Result<BTreeMap<String, ServiceConfig>> {
+) -> Result<(BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>)> {
     if rc.is_container(|| compose::has_compose_file(local_worktree)) {
         match compose::derive(site, cfg.runtime(), site_worktree) {
-            Ok(mut services) => {
+            Ok(d) => {
+                let mut services = d.services;
                 services.extend(rc.services.clone());
-                return Ok(services);
+                return Ok((services, d.names));
             }
             Err(e) if rc.kind == Some(RepoKind::Container) => {
                 return Err(e.context(format!("{repo}: `{}` is a container repo but compose config failed", repo)));
@@ -375,7 +381,9 @@ fn effective_services(
             }
         }
     }
-    Ok(rc.services.clone())
+    // No derive (host repo, or a failed/absent compose config): the declared set
+    // is all we know, and its keys double as the service-name list.
+    Ok((rc.services.clone(), rc.services.keys().cloned().collect()))
 }
 
 /// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*

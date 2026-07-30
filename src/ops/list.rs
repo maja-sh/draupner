@@ -60,7 +60,7 @@ pub fn run() -> Result<()> {
                 // status of the remote stack isn't knowable from here.
                 match site.as_ref() {
                     Some(s @ crate::remote::Site::Remote { .. }) => {
-                        cfg.script_command(repo, "status").and_then(|cmd| {
+                        cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
                             let extra_env = inject::prepare(
                                 &cfg, s, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
                             )
@@ -77,7 +77,7 @@ pub fn run() -> Result<()> {
             } else {
                 // Local workspace: run the `status` hook/script locally (Inspect —
                 // no allocation/derive; the recorded ports come from `.ws-meta`).
-                hooks::resolve(&cfg, &ws.root, repo, "status").and_then(|action| {
+                hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
                     let extra_env = inject::prepare(
                         &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
                         inject::Phase::Inspect,

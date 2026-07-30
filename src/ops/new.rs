@@ -222,7 +222,7 @@ fn run_post_create(
             }
         }
     } else {
-        if let Some(action) = hooks::resolve(cfg, ws_root, repo, "post-create") {
+        if let Some(action) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path)) {
             let step = crate::ui::step(repo, "Post-create hook");
             hooks::run_action(ws_root, wt_path, repo, sanitized, "post-create", &action, extra_env)?;
             step.ok();
