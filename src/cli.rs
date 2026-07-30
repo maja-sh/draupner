@@ -42,8 +42,6 @@ enum Cmd {
     Rm    { branch: String, #[arg(long)] force: bool },
     /// List active task worktrees
     List,
-    /// Print worktree paths for the current task
-    Here,
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
     /// Ready the host for routing (rootless bits directly; privileged bits consented)
@@ -134,7 +132,6 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
         Cmd::List                    => crate::ops::list::run(),
-        Cmd::Here                    => crate::ops::here::run(),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,yes}         => crate::ops::setup::run(yes, port),
         Cmd::Remote{cmd}             => match cmd {
