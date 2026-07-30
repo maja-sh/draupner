@@ -333,11 +333,19 @@ pub fn run(
         return Ok(());
     }
 
-    // Deliver the gaps per host model.
+    // Deliver the gaps per host *role*, not merely per platform. The interactive
+    // walk is platform-agnostic machinery; what differs is whether we can name the
+    // exact commands for this machine, and whether a versioned script already owns
+    // them. A Linux box that runs the stacks has such a script and defers to it; a
+    // Linux *client* has none, so print-only would be strictly worse UX than macOS
+    // for identical transparency.
     match plat {
-        Platform::MacOs => apply_macos_gaps(site, domain, &report, yes),
+        Platform::MacOs => walk_gaps(macos_steps(site, domain, &report), yes),
+        Platform::Linux if site.is_remote() => {
+            walk_gaps(linux_client_steps(site, domain, &report), yes)
+        }
         Platform::Linux => {
-            guide_linux_gaps(site, domain, &report);
+            guide_linux_gaps(domain, &report);
             Ok(())
         }
         Platform::Other => {
@@ -350,22 +358,15 @@ pub fn run(
     }
 }
 
-/// Walk the macOS privileged gaps interactively (or unattended with `--yes`).
-fn apply_macos_gaps(site: &Site, domain: &str, report: &Report, yes: bool) -> Result<()> {
+/// The macOS privileged gaps as consentable steps.
+fn macos_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     if !report.dns_ok {
         steps.push(dns_step_macos(domain, &report.address));
     }
     if !report.ca_ok {
-        // Fetch + persist the root CA (to ws's own config dir, not $TMPDIR) so the
-        // trust command has a concrete, non-clobberable file to point at. Fetched
-        // from `site` — for an offload workspace that's the *server's* root, which
-        // is the one signing the leaves this client will see.
-        match crate::caddy::write_root_ca(site) {
-            Ok(path) => steps.push(ca_step_macos(&path.to_string_lossy())),
-            Err(e) => crate::ui::note(&format!(
-                "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is Caddy running?"
-            )),
+        if let Some(path) = fetch_root_ca(site) {
+            steps.push(ca_step_macos(&path));
         }
     }
     if report.port < 1024 && !report.port_ok {
@@ -375,7 +376,30 @@ fn apply_macos_gaps(site: &Site, domain: &str, report: &Report, yes: bool) -> Re
             report.port
         ));
     }
+    steps
+}
 
+/// Fetch + persist Caddy's root CA (to `ws`'s own config dir, not `$TMPDIR`) so a
+/// trust command has a concrete, non-clobberable file to point at. Fetched from
+/// `site` — for an offload workspace that's the **server's** root, the one signing
+/// the leaves this client will see. `None` (with a note) when Caddy can't be
+/// reached, so the caller simply omits the step.
+fn fetch_root_ca(site: &Site) -> Option<String> {
+    match crate::caddy::write_root_ca(site) {
+        Ok(path) => Some(path.to_string_lossy().into_owned()),
+        Err(e) => {
+            let whose = if site.is_remote() { "the server's Caddy" } else { "Caddy" };
+            crate::ui::note(&format!(
+                "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is {whose} running?"
+            ));
+            None
+        }
+    }
+}
+
+/// Walk a set of privileged gaps interactively (or unattended with `--yes`).
+/// Platform-agnostic: the steps carry the platform-specific commands.
+fn walk_gaps(steps: Vec<Step>, yes: bool) -> Result<()> {
     let mut printed = false;
     for step in &steps {
         printed |= apply_step(step, yes)?;
@@ -435,18 +459,15 @@ fn run_commands(commands: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// On a Linux host the privileged bits are shown rather than driven by `ws` — the
-/// transparency contract. *Which* guidance depends on the machine's role:
+/// For a Linux box that **runs the stacks**, the privileged bits are shown rather
+/// than driven by `ws`: they live in `server-setup/<distro>.sh`, which owns them
+/// plus the runtime prerequisites, and the script *is* the transparency.
+/// `--address` is named explicitly because the script defaults to loopback.
 ///
-/// - **Runs the stacks itself** (local workspace): `server-setup/<distro>.sh`,
-///   which owns every privileged bit plus the runtime prerequisites. `--address`
-///   is named explicitly because the script defaults to loopback.
-/// - **Client of an offload server** (remote workspace): the setup script does
-///   **not** apply. It provisions a machine to *run* stacks — podman, a compose
-///   provider, mutagen, the podman API socket — none of which a client needs to
-///   resolve a hostname. Pointing a laptop at it would install a server's worth of
-///   software to fix a DNS entry. Only the two client-side bits are shown.
-fn guide_linux_gaps(site: &Site, domain: &str, report: &Report) {
+/// A Linux *client* of an offload server never reaches here — it has no script to
+/// defer to, so it gets the same interactive walk macOS does
+/// ([`linux_client_steps`]).
+fn guide_linux_gaps(domain: &str, report: &Report) {
     let mut needs = Vec::new();
     if !report.dns_ok {
         needs.push(format!("wildcard DNS (*.{domain} → {})", report.address));
@@ -459,10 +480,6 @@ fn guide_linux_gaps(site: &Site, domain: &str, report: &Report) {
     }
     crate::ui::note(&format!("missing: {}", needs.join("; ")));
 
-    if site.is_remote() {
-        guide_linux_client(site, domain, report);
-        return;
-    }
     crate::ui::nudge(
         "run the setup script for your distro — it applies the privileged bits transparently:",
     );
@@ -477,43 +494,176 @@ fn guide_linux_gaps(site: &Site, domain: &str, report: &Report) {
     )]);
 }
 
-/// The client-side half for a Linux machine offloading to a server: resolve the
-/// wildcard at the server, and trust the server's root CA. No `ws` runs on the
-/// server, and no server script runs here — these are this machine's own bits.
+/// The Linux-client privileged gaps as consentable steps — the same interactive
+/// treatment macOS gets, since there's no setup script to defer to here.
 ///
-/// The resolver hop is environment-specific (dnsmasq vs systemd-resolved), so both
-/// forms are printed rather than one being chosen — the same call
-/// `server-setup/debian.sh` makes for its own last hop.
-fn guide_linux_client(site: &Site, domain: &str, report: &Report) {
-    let mut cmds = linux_client_commands(report, domain);
-    if !report.ca_ok {
-        // Fetch from `site` — the *server's* root is the one signing the leaves
-        // this client will see. Written locally so the trust command points at a
-        // real file, same as the macOS path.
-        match crate::caddy::write_root_ca(site) {
-            Ok(path) => {
-                cmds.push("# trust the server's Caddy root CA:".to_string());
-                cmds.push(format!(
-                    "sudo cp {} /usr/local/share/ca-certificates/ws-caddy-root.crt",
-                    sh_quote(&path.to_string_lossy())
-                ));
-                cmds.push("sudo update-ca-certificates".to_string());
+/// The resolver hop is the one genuinely environment-specific bit (systemd-resolved
+/// vs dnsmasq vs a plain `resolv.conf`), and writing the wrong one either silently
+/// no-ops or disturbs system DNS. So it's offered as a runnable step **only** when
+/// the mechanism is detected; otherwise it falls back to printing both forms, which
+/// is honest about the ambiguity rather than guessing with `sudo`.
+fn linux_client_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
+    let mut steps = Vec::new();
+    if !report.dns_ok {
+        match dns_step_linux(domain, &report.address) {
+            Some(step) => steps.push(step),
+            None => {
+                crate::ui::note(
+                    "couldn't tell which resolver this machine uses, so the wildcard isn't \
+                     offered as a step — wire one of these by hand:",
+                );
+                crate::ui::command_block(&linux_client_commands(report, domain));
             }
-            Err(e) => crate::ui::note(&format!(
-                "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is the server's \
-                 Caddy running?"
-            )),
         }
     }
-    crate::ui::nudge(
-        "this machine is a client — the server setup script doesn't apply here. \
-         It needs only these two bits:",
-    );
-    crate::ui::command_block(&cmds);
+    if !report.ca_ok {
+        if let Some(path) = fetch_root_ca(site) {
+            match ca_step_linux(&path) {
+                Some(step) => steps.push(step),
+                None => crate::ui::note(&format!(
+                    "no system trust-store tool found (`update-ca-certificates` / \
+                     `update-ca-trust`) — trust this file by your distro's method: {path}"
+                )),
+            }
+        }
+    }
+    steps
 }
 
-/// The resolver half of the client guidance, split out from the CA half because
-/// that one has to reach the server's Caddy — this stays pure and testable.
+/// Wire `*.<domain>` → `address` on Linux, matching the detected resolver.
+///
+/// systemd-resolved is detected the same way `server-setup/debian.sh` detects it —
+/// `/etc/resolv.conf` symlinked into systemd — and needs a concrete interface, so
+/// the default route's device is read. dnsmasq gets a drop-in file. `None` when
+/// neither is identifiable, leaving the caller to print instead of guess.
+fn dns_step_linux(domain: &str, address: &str) -> Option<Step> {
+    if resolv_conf_is_systemd() {
+        let iface = default_route_iface()?;
+        return Some(Step {
+            // resolvectl is runtime-scoped: it survives until the link drops or the
+            // machine reboots, not beyond. Say so rather than implying permanence.
+            what: format!(
+                "resolve `*.{domain}` → {address} via systemd-resolved on `{iface}` \
+                 (runtime-scoped — re-run after a reboot, or set it in your network config)"
+            ),
+            commands: vec![
+                format!("sudo resolvectl dns {iface} {address}"),
+                format!("sudo resolvectl domain {iface} '~{domain}'"),
+            ],
+        });
+    }
+    if which("dnsmasq").is_some() {
+        // Configuring dnsmasq only resolves anything if the system actually asks
+        // dnsmasq. A non-loopback `nameserver` means it doesn't — the drop-in
+        // would be written, dnsmasq restarted, and lookups would still go
+        // straight past it. Say so in the step rather than reporting success on
+        // a no-op; `ws` won't rewrite `resolv.conf` itself, which is usually
+        // owned by NetworkManager or dhcp.
+        let asks_dnsmasq = system_resolver_is_local();
+        let caveat = if asks_dnsmasq {
+            ""
+        } else {
+            " — NOTE: this machine's resolver is not local, so you must also point \
+             /etc/resolv.conf at 127.0.0.1 for this to take effect"
+        };
+        return Some(Step {
+            what: format!("resolve `*.{domain}` → {address} (dnsmasq drop-in){caveat}"),
+            commands: vec![
+                format!(
+                    "echo 'address=/{domain}/{address}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"
+                ),
+                "sudo systemctl restart dnsmasq".to_string(),
+            ],
+        });
+    }
+    None
+}
+
+/// Whether the system's configured resolver is on loopback — i.e. queries reach a
+/// local resolver (dnsmasq, systemd-resolved) rather than going straight out to a
+/// router or upstream. Decides whether a dnsmasq drop-in can take effect at all.
+/// Unreadable `resolv.conf` reads as "not local": the honest default, since it
+/// makes the step carry its caveat rather than silently promising a fix.
+fn system_resolver_is_local() -> bool {
+    let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") else {
+        return false;
+    };
+    text.lines()
+        .filter_map(|l| l.strip_prefix("nameserver "))
+        .filter_map(|a| a.trim().parse::<std::net::IpAddr>().ok())
+        .any(|ip| ip.is_loopback())
+}
+
+/// Trust a PEM in the system store, matching the detected trust-store tool
+/// (Debian/Ubuntu vs RHEL/Fedora/Arch). `None` when neither is present.
+fn ca_step_linux(pem_path: &str) -> Option<Step> {
+    let (dir, update) = if which("update-ca-certificates").is_some() {
+        ("/usr/local/share/ca-certificates", "update-ca-certificates")
+    } else if which("update-ca-trust").is_some() {
+        ("/etc/pki/ca-trust/source/anchors", "update-ca-trust")
+    } else {
+        return None;
+    };
+    Some(Step {
+        what: "trust Caddy's root CA in the system store".to_string(),
+        commands: vec![
+            format!("sudo cp {} {dir}/ws-caddy-root.crt", sh_quote(pem_path)),
+            format!("sudo {update}"),
+        ],
+    })
+}
+
+/// Whether `/etc/resolv.conf` is the systemd-resolved symlink — the same signal
+/// `server-setup/debian.sh` uses to pick its resolver guidance.
+fn resolv_conf_is_systemd() -> bool {
+    std::fs::read_link("/etc/resolv.conf")
+        .map(|t| t.to_string_lossy().contains("systemd"))
+        .unwrap_or(false)
+}
+
+/// The interface carrying the default route (`ip -o route show default`), which
+/// `resolvectl` needs as a concrete link name.
+fn default_route_iface() -> Option<String> {
+    let out = Command::new("ip").args(["-o", "route", "show", "default"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_route_iface(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `dev <iface>` token from `ip -o route show default` output.
+fn parse_route_iface(text: &str) -> Option<String> {
+    let mut toks = text.split_whitespace();
+    while let Some(t) = toks.next() {
+        if t == "dev" {
+            return toks.next().map(str::to_string).filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+/// Whether a binary exists, searching `/usr/sbin` and `/sbin` as well as `PATH`.
+///
+/// Both tools this looks for — `update-ca-certificates` and `dnsmasq` — live in
+/// `/usr/sbin` on Debian, which is **not** on a normal user's `PATH`. A plain
+/// `command -v` therefore reports them missing on the exact systems that have
+/// them, which would silently downgrade a runnable step into a printed hint.
+/// `server-setup/debian.sh` hit this first and documents the same fix.
+fn which(bin: &str) -> Option<()> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("PATH=\"$PATH:/usr/sbin:/sbin\" command -v {bin}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()
+        .filter(|s| s.success())
+        .map(|_| ())
+}
+
+/// The resolver half of the client guidance as plain text — the fallback when the
+/// resolver can't be identified, and what `guide_linux_gaps` prints for a
+/// non-interactive read. Pure, so it's testable without a network.
 fn linux_client_commands(report: &Report, domain: &str) -> Vec<String> {
     if report.dns_ok {
         return Vec::new();
@@ -610,6 +760,20 @@ mod tests {
         // It must still wire the wildcard at the *server's* address.
         assert!(joined.contains("address=/myapp.test/100.64.1.2"), "{joined}");
         assert!(joined.contains("resolvectl"), "both resolver forms are offered: {joined}");
+    }
+
+    #[test]
+    fn route_iface_is_read_from_the_dev_token() {
+        // Real `ip -o route show default` shape. `resolvectl` needs a concrete
+        // link name, so a misparse here would generate an unrunnable command.
+        assert_eq!(
+            parse_route_iface("default via 192.168.1.1 dev enp1s0 proto dhcp metric 100 \n")
+                .as_deref(),
+            Some("enp1s0")
+        );
+        // A machine with no default route yields nothing rather than a bad guess.
+        assert_eq!(parse_route_iface(""), None);
+        assert_eq!(parse_route_iface("default via 10.0.0.1 proto static"), None);
     }
 
     #[test]
