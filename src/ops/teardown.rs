@@ -151,6 +151,17 @@ pub fn remove_task(
         delete_branch(&main, branch);
     }
 
+    // Free port reservations for configured repos that never got a worktree for
+    // this branch. A cross-repo `${WS_PORT_<peer>.<svc>}` pre-allocates the peer's
+    // port (so it resolves before the peer is built); a peer that's never created
+    // would otherwise leak that `.ws-meta` reservation past the branch's teardown.
+    // Exact repo names — never a prefix match — so a sibling branch is untouched.
+    let torn_down: std::collections::HashSet<&str> =
+        worktrees.iter().map(|(r, _)| r.as_str()).collect();
+    for repo in cfg.repos.iter().map(|r| r.name()).filter(|r| !torn_down.contains(r)) {
+        ports::forget(root, &sanitized, repo);
+    }
+
     // Best-effort: drop the now-empty task dir. Leftover files (a stray
     // .DS_Store, an unmanaged sibling) make this a silent no-op.
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
