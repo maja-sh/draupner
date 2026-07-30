@@ -107,10 +107,17 @@ pub struct RepoConfig {
     /// A `BTreeMap` so iteration/serialization order is stable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub services: BTreeMap<String, ServiceConfig>,
-    /// Declarative lifecycle commands, keyed by event (`post-create`, `up`,
-    /// `down`, `post-remove`, `status`). Each is one command or an array of
+    /// Declarative lifecycle commands, keyed by event (`prepare`, `post-create`,
+    /// `up`, `down`, `post-remove`, `status`). Each is one command or an array of
     /// commands, run via `sh -c` with the `WS_*` env forwarded. A value may be a
     /// path to a script file for complex logic. Supersedes `.ws-hooks/`.
+    ///
+    /// Most events run **where the stack lives** (the server, for a remote
+    /// workspace). The exception is **`prepare`**: it runs on the **client** just
+    /// before `up`, even when offloading, so it can stage data that only exists
+    /// locally (dump the main checkout's db, gather local certs) into the worktree
+    /// — the up flush then carries it to the server. It sees `WS_REMOTE`, so one
+    /// script can branch (dump-for-sync remotely vs a same-host copy locally).
     /// A `BTreeMap` so a config rewrite (`ws remote set/unset`) is
     /// deterministic — `.ws.json` isn't gitignored, so hash-random key order
     /// would churn a possibly-committed file.
