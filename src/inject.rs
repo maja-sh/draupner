@@ -90,7 +90,14 @@ pub fn prepare(
     repo: &str,
     phase: Phase,
 ) -> Result<Vec<(String, String)>> {
-    let Some(rc) = cfg.repo_config(repo) else { return Ok(Vec::new()) };
+    // Workspace-context vars every hook receives, independent of repo config or
+    // routing: the container runtime (so a shared hook can call `$WS_RUNTIME
+    // compose` instead of hardcoding podman/docker) and whether the workspace
+    // offloads (so a hook can branch local-vs-remote behaviour — e.g. same-host db
+    // copy locally vs importing a synced dump on the server). Emitted even for a
+    // bare-name repo, which returns early below with no routing env.
+    let context = workspace_context(cfg);
+    let Some(rc) = cfg.repo_config(repo) else { return Ok(context) };
 
     // The worktree path at the execution site: the local path, or the synced dir
     // on the server (absolute — see `site_worktree_path`). `compose config`/the
@@ -185,7 +192,19 @@ pub fn prepare(
             phase, join_ws_net,
         )?);
     }
+    env.extend(context);
     Ok(env)
+}
+
+/// The workspace-context env pairs (`WS_RUNTIME`, `WS_REMOTE`) every hook sees.
+/// `WS_REMOTE` reflects whether the *workspace* offloads (`cfg.remote`), not the
+/// site a given call runs against, so a hook reads one consistent answer wherever
+/// it executes. `1`/`0` for shell-friendly `[ "$WS_REMOTE" = 1 ]` tests.
+fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
+    vec![
+        ("WS_RUNTIME".to_string(), cfg.runtime().to_string()),
+        ("WS_REMOTE".to_string(), if cfg.remote.is_some() { "1" } else { "0" }.to_string()),
+    ]
 }
 
 /// The worktree path at the execution site: the local path for a local
@@ -561,6 +580,27 @@ mod tests {
     /// The repo's declared services as the sorted map `ws_vars` now takes.
     fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
         rc.services.clone()
+    }
+
+    #[test]
+    fn workspace_context_reports_runtime_and_remoteness() {
+        use crate::config::{RemoteConfig, WsConfig};
+
+        // Default runtime, local workspace.
+        let local = WsConfig::default();
+        let ctx = workspace_context(&local);
+        assert!(ctx.contains(&("WS_RUNTIME".to_string(), "podman".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("WS_REMOTE".to_string(), "0".to_string())), "{ctx:?}");
+
+        // Explicit runtime + a remote block flips both.
+        let remote = WsConfig {
+            runtime: Some("docker".to_string()),
+            remote: Some(RemoteConfig::new("srv".to_string(), None)),
+            ..WsConfig::default()
+        };
+        let ctx = workspace_context(&remote);
+        assert!(ctx.contains(&("WS_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("WS_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
     }
 
     #[test]

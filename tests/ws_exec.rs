@@ -162,8 +162,9 @@ fn remote_workspace_dispatches_over_ssh() {
     assert_eq!(lines[lines.len() - 2], "srv", "the connection precedes the script");
     assert_eq!(
         lines[lines.len() - 1],
-        "cd workspace/feat-foo/api && WS_REPO=api WS_BRANCH_SANITIZED=feat-foo exec php artisan migrate",
-        "remote script cds, exports WS_*, and execs the command"
+        "cd workspace/feat-foo/api && WS_REPO=api WS_BRANCH_SANITIZED=feat-foo \
+         WS_RUNTIME=podman WS_REMOTE=1 exec php artisan migrate",
+        "remote script cds, exports WS_* (incl. runtime + remoteness), and execs the command"
     );
     // The command must NOT have run locally.
     assert!(!f.path().join(".worktrees/feat-foo/api/marker").exists());
