@@ -8,7 +8,6 @@ const SKILLS: &[(&str, &str)] = &[
     ("ws-down",     include_str!("../skills/ws-down/SKILL.md")),
     ("ws-rm",       include_str!("../skills/ws-rm/SKILL.md")),
     ("ws-list",     include_str!("../skills/ws-list/SKILL.md")),
-    ("ws-here",     include_str!("../skills/ws-here/SKILL.md")),
     ("ws-clean",    include_str!("../skills/ws-clean/SKILL.md")),
     ("ws-init",     include_str!("../skills/ws-init/SKILL.md")),
     ("ws-resume",   include_str!("../skills/ws-resume/SKILL.md")),
