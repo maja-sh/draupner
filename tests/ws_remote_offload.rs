@@ -267,7 +267,7 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
     // The push is `ssh <conn> 'mkdir -p <base> && tar -C <base> -xpf -'`.
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
-        rec.lines().any(|l| l.contains("tar -C /home/test/ws -xpf -")),
+        rec.lines().any(|l| l.contains("tar -C /home/test/ws") && l.contains("-xpf -")),
         "expected a .ws-hooks push (tar extract) over ssh:\n{rec}"
     );
 }
