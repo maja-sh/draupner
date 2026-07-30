@@ -244,9 +244,9 @@ fn sh_quote(s: &str) -> String {
 }
 
 /// Run `ws setup`: ensure the rootless infra directly, then walk each privileged
-/// gap per the host's delivery model. `port` (from `--port`) opts into a
-/// non-default HTTPS port (443 for clean URLs) and is persisted before Caddy is
-/// (re-)seeded so the change takes effect.
+/// gap per the host's delivery model. Any `--port` / `--admin-port` opt-in is
+/// already persisted by the caller (`ops::setup`), so the probe and Caddy
+/// bring-up here read the new values back through `https_port()`/`admin_port()`.
 ///
 /// `site` is where the routing data plane lives and `address` is where the client
 /// reaches it. The rootless Caddy is ensured **at the site** — locally for a local
@@ -265,16 +265,10 @@ pub fn run(
     domain: Option<&str>,
     runtime: &str,
     yes: bool,
-    port: Option<u16>,
     address: &str,
     publish_addr: &str,
 ) -> Result<()> {
     crate::ui::header("ws-setup", domain.unwrap_or("(no domain)"));
-
-    if let Some(p) = port {
-        crate::caddy::set_https_port(p)?;
-        crate::ui::note(&format!("HTTPS port set to {p} (persisted)"));
-    }
 
     if site.is_remote() {
         crate::ui::note(&format!(

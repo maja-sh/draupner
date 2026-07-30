@@ -200,7 +200,7 @@ fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
 /// (no `ss`, unreachable) reads as **not free**, so `free_port` moves on / fails
 /// loudly rather than colliding silently. (`ss` — iproute2 — is a server
 /// prerequisite; without it every port reads busy and allocation bails clearly.)
-fn port_free_at(site: &Site, port: u16) -> bool {
+pub fn port_free_at(site: &Site, port: u16) -> bool {
     match site {
         Site::Local => TcpListener::bind(("127.0.0.1", port)).is_ok(),
         Site::Remote { .. } => {

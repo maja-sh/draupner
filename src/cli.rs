@@ -55,6 +55,9 @@ enum Cmd {
         /// Persist a non-default HTTPS port (e.g. 443 for clean, suffix-free URLs)
         #[arg(long, value_name = "PORT")]
         port: Option<u16>,
+        /// Persist a non-default Caddy admin port (move it off :2019 if a Caddy already runs there)
+        #[arg(long, value_name = "PORT")]
+        admin_port: Option<u16>,
         /// Run the privileged steps without prompting (for automation)
         #[arg(long)]
         yes: bool,
@@ -139,7 +142,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
-        Cmd::Setup{port,yes}         => crate::ops::setup::run(yes, port),
+        Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
         Cmd::Remote{cmd}             => match cmd {
             RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
             RemoteCmd::Set{connection,path,domain,no_verify} =>

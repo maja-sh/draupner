@@ -20,8 +20,10 @@
 //! persists the choice + re-seeds Caddy. See `https_port` / `ensure_running`.
 //!
 //! **Admin API on a host-loopback-published TCP port.** `ws` reaches the admin at
-//! `127.0.0.1:2019`, published from the container to the host loopback only
-//! (`-p 127.0.0.1:2019:2019`). A unix socket would be tighter, but it can't cross
+//! `127.0.0.1:2019` by default, published from the container to the host loopback
+//! only (`-p 127.0.0.1:2019:2019`). The host port is configurable
+//! (`ws setup --admin-port`) for a box already running its own Caddy on 2019 —
+//! the container always listens on 2019 inside. See [`admin_port`]. A unix socket would be tighter, but it can't cross
 //! the podman-machine VM boundary on macOS (the socket lives in the VM, not on the
 //! Mac), so `curl --unix-socket` is Linux-only — this TCP path is the one form that
 //! works identically on macOS and Linux. The publish is loopback-scoped, so the
@@ -60,9 +62,13 @@ pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 /// Mount point inside the Caddy container holding the pinned boot config
 /// (`caddy.json`), bind-mounted from `config_dir()`.
 const SOCK_MOUNT: &str = "/sock";
-/// The admin API port, published to the host loopback (`127.0.0.1:ADMIN_PORT`).
-/// Caddy's conventional admin port; a singleton per host (one `ws-caddy`).
-const ADMIN_PORT: u16 = 2019;
+/// Caddy's conventional admin port, and `ws`'s default.
+///
+/// **Not a constant in practice**: a host that already runs its own Caddy is
+/// holding this exact port, since 2019 is *Caddy's* default too — not merely a
+/// port `ws` happened to pick. The original "a singleton per host" assumption
+/// only holds when `ws` owns the box's only Caddy. See [`admin_port`].
+const DEFAULT_ADMIN_PORT: u16 = 2019;
 /// Named volume for Caddy's data dir (`/data`): the internal CA root + issued
 /// leaf certs. Persisting it keeps the root stable across container recreation
 /// (so a client trusts it once) and avoids reissuing every leaf on restart.
@@ -85,7 +91,7 @@ fn admin_args(_site: &Site, path: &str) -> Vec<String> {
     if let Ok(url) = std::env::var("WS_CADDY_ADMIN") {
         vec![format!("{}{}", url.trim_end_matches('/'), path)]
     } else {
-        vec![format!("http://127.0.0.1:{ADMIN_PORT}{path}")]
+        vec![format!("http://127.0.0.1:{}{path}", admin_port())]
     }
 }
 
@@ -170,6 +176,36 @@ pub fn set_https_port(port: u16) -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("https_port"), format!("{port}\n"))
         .with_context(|| "persist https_port".to_string())
+}
+
+/// The admin API port `ws` publishes to the site's loopback. `WS_CADDY_ADMIN_PORT`
+/// (test seam) wins, else the persisted opt-in in `~/.config/ws/admin_port`
+/// (written by `ws setup --admin-port`), else Caddy's conventional default.
+///
+/// Configurable for the same reason `https_port` is, but a sharper one: an offload
+/// server that already runs its own Caddy holds 2019 *because that is Caddy's
+/// default*, so the collision is likely rather than unlucky. Every route CRUD call
+/// dials this, so it must be stable across runs — hence persisted, never picked
+/// fresh per invocation.
+pub fn admin_port() -> u16 {
+    if let Some(p) = std::env::var("WS_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+        if p != 0 {
+            return p;
+        }
+    }
+    std::fs::read_to_string(config_dir().join("admin_port"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|&p| p != 0)
+        .unwrap_or(DEFAULT_ADMIN_PORT)
+}
+
+/// Persist the opt-in admin port so every later `ws` run dials the same one.
+pub fn set_admin_port(port: u16) -> Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(dir.join("admin_port"), format!("{port}\n"))
+        .with_context(|| "persist admin_port".to_string())
 }
 
 /// A route's stable admin `@id` for a worktree service. Includes the repo so
@@ -284,6 +320,19 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         }
     }
     ensure_net(site, runtime)?;
+
+    // Pre-flight the two ports Caddy must bind before attempting the run. A busy
+    // port otherwise surfaces as a raw `rootlessport ... address already in use`
+    // and a half-created container — unactionable. This is exactly the failure a
+    // box already running its own Caddy hits: it holds :2019 (Caddy's own default
+    // admin port), and often an HTTPS port too. Check at the site, and name the
+    // flag that moves each. A running `ws-caddy` (ours or a peer's) is handled
+    // above and returns before here, so this only pre-flights against a *foreign*
+    // holder. The narrow race — a peer starting `ws-caddy` between that check and
+    // this one — would misreport a benign peer as a conflict; it's the same brief
+    // TOCTOU the retry-once logic below already accepts, not a new one.
+    preflight_ports(site)?;
+
     let dir = write_boot_config(site)?;
     if run_caddy(site, runtime, &dir, publish_addr).is_none() {
         return wait_admin_ready(site);
@@ -305,6 +354,32 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         "could not start the {CADDY_CONTAINER} container: {}",
         reason.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+/// Refuse to attempt a Caddy run when either port it must publish is already held
+/// at `site`, with a message that names the flag to move it. Returns the first
+/// conflict as an error; `Ok(())` when both are free (or freeness can't be
+/// determined, which `port_free_at` treats as busy only on a positive signal).
+///
+/// Under `WS_CADDY_ADMIN` (externally-managed) `ws` publishes nothing itself, so
+/// there's nothing to pre-flight — but `ensure_running` already returns early in
+/// that mode before reaching here.
+fn preflight_ports(site: &Site) -> Result<()> {
+    let https = https_port();
+    let admin = admin_port();
+    for (port, what, flag) in [
+        (https, "HTTPS", "--port"),
+        (admin, "admin API", "--admin-port"),
+    ] {
+        if !crate::ports::port_free_at(site, port) {
+            let whose = if site.is_remote() { "the server" } else { "this machine" };
+            bail!(
+                "{what} port :{port} is already in use on {whose} — another service (often an \
+                 existing Caddy) holds it. Move ws's Caddy off it with `ws setup {flag} <port>`."
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The HTTPS port the running Caddy is actually listening on, read from its admin
@@ -427,7 +502,9 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
     let port = https_port();
     let publish = publish_spec(publish_addr, port);
     // Admin published to the host loopback only — reachable by `ws`, not the LAN.
-    let admin_publish = format!("127.0.0.1:{ADMIN_PORT}:{ADMIN_PORT}");
+    let admin = admin_port();
+    // Published to loopback only; the container always listens on 2019 inside.
+    let admin_publish = format!("127.0.0.1:{admin}:{DEFAULT_ADMIN_PORT}");
     let sock_mount = format!("{dir}:{SOCK_MOUNT}:Z");
     let data_vol = format!("{DATA_VOLUME}:/data");
     let config_vol = format!("{CONFIG_VOLUME}:/config");
@@ -627,7 +704,7 @@ fn boot_config() -> serde_json::Value {
         // `Origin` header, which `curl` doesn't send, so it would reject `ws`'s own
         // requests. The residual (a `ws-net` tenant reaching `caddy:2019`) is the
         // documented local-dev tradeoff; a dedicated admin network is the fix.
-        "admin": { "listen": format!("0.0.0.0:{ADMIN_PORT}") },
+        "admin": { "listen": format!("0.0.0.0:{DEFAULT_ADMIN_PORT}") },
         "apps": {
             "http": {
                 "https_port": port,
@@ -882,6 +959,18 @@ mod tests {
     }
 
     #[test]
+    fn admin_port_seam_wins_and_zero_falls_through() {
+        let _g = env_guard();
+        std::env::set_var("WS_CADDY_ADMIN_PORT", "2020");
+        assert_eq!(admin_port(), 2020);
+        // A `0` must not publish port 0 — fall through like the HTTPS path.
+        std::env::set_var("WS_CADDY_ADMIN_PORT", "0");
+        assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
+        std::env::remove_var("WS_CADDY_ADMIN_PORT");
+        assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
+    }
+
+    #[test]
     fn parse_listen_port_reads_the_served_port() {
         assert_eq!(parse_listen_port(r#"[":8443"]"#), Some(8443));
         assert_eq!(parse_listen_port(r#"["127.0.0.1:443"]"#), Some(443));
@@ -915,12 +1004,16 @@ mod tests {
     fn admin_listens_on_the_admin_port_over_tcp() {
         // TCP on the admin port (a unix socket can't cross the macOS podman VM),
         // bound to the routable interface so the loopback-scoped publish reaches it.
-        assert_eq!(boot_config()["admin"]["listen"], format!("0.0.0.0:{ADMIN_PORT}"));
+        assert_eq!(boot_config()["admin"]["listen"], format!("0.0.0.0:{DEFAULT_ADMIN_PORT}"));
     }
 
     #[test]
     fn admin_args_hit_the_loopback_admin_port() {
+        // Reads `admin_port()` twice (inside `admin_args` and in the expectation),
+        // so it must hold the env guard — else a concurrent `WS_CADDY_ADMIN_PORT`
+        // mutation between the two reads makes them disagree.
+        let _g = env_guard();
         let args = admin_args(&Site::Local, "/config/");
-        assert_eq!(args, vec![format!("http://127.0.0.1:{ADMIN_PORT}/config/")]);
+        assert_eq!(args, vec![format!("http://127.0.0.1:{}/config/", admin_port())]);
     }
 }
