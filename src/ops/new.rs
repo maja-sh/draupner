@@ -96,26 +96,32 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
             step.ok();
         }
 
-        // A symlinked node_modules is a *file* to git, so a repo's conventional
-        // `node_modules/` (trailing slash = dir-only) rule won't match it —
-        // without this the worktree reads as permanently dirty.
-        git::add_worktree_excludes(&wt_path, &excludes)
-            .with_context(|| format!("register worktree excludes for {repo_name}"))?;
-
         // Seed declared untracked files (dev certs/keys/env) from the main checkout
-        // into the fresh worktree. Runs before the remote sync below so they ride
-        // it to the server, and before post-create so build steps see them.
+        // into the fresh worktree. Ordered before the excludes registration below so
+        // the copied paths join them — `copy` seeds files that aren't in git, and one
+        // that isn't gitignored either would otherwise leave the worktree reading
+        // permanently dirty. Also before the remote sync (so they ride it to the
+        // server) and before post-create (so build steps see them).
         let copies = repo_entry.copy();
         if !copies.is_empty() {
             let step = crate::ui::step(repo_name, "files copied");
             match seed_copies(&repo_path, &wt_path, copies) {
-                Ok(()) => step.ok(),
+                Ok(dests) => {
+                    excludes.extend(dests);
+                    step.ok()
+                }
                 Err(e) => {
                     remove_worktree(&repo_path, &wt_path);
                     return Err(e.context(format!("copy for {repo_name}")));
                 }
             }
         }
+
+        // A symlinked node_modules is a *file* to git, so a repo's conventional
+        // `node_modules/` (trailing slash = dir-only) rule won't match it —
+        // without this the worktree reads as permanently dirty.
+        git::add_worktree_excludes(&wt_path, &excludes)
+            .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
         // Advisory isolation lint — run once, here, when the worktree's compose
         // file first lands (not on every `ws up`): its constructs are static
@@ -328,7 +334,12 @@ fn cp_r(src: &Path, dst: &Path) -> Result<()> {
 /// checkout `repo` into worktree `wt`. No-clobber: an existing dest is left as-is.
 /// A source with no match is skipped (seed-if-present). `..` is refused so a
 /// config entry can't escape the repo.
-fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<()> {
+///
+/// Returns the anchored git-exclude entries (`/build-dev/cert`) for what it
+/// actually copied, so the caller can keep them out of `git status` — a seeded
+/// file that the repo doesn't already gitignore would otherwise read as untracked.
+fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>> {
+    let mut excludes = Vec::new();
     for entry in entries {
         if Path::new(entry).components().any(|c| c == Component::ParentDir) {
             bail!("copy entry `{entry}` must not contain `..`");
@@ -349,9 +360,13 @@ fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<()> {
                     .with_context(|| format!("create {}", parent.display()))?;
             }
             cp_r(&src, &dst)?;
+            // Anchored to the worktree root (`/build-dev/cert`), matching the
+            // `/vendor` + `/node_modules` convention — an unanchored pattern would
+            // match the same name at any depth.
+            excludes.push(format!("/{}", rel.display()));
         }
     }
-    Ok(())
+    Ok(excludes)
 }
 
 #[cfg(unix)]
@@ -397,7 +412,7 @@ mod tests {
         touch(&repo.join("storage/oauth-private.key"), "k");
         touch(&repo.join("storage/other.txt"), "o");
 
-        seed_copies(
+        let excludes = seed_copies(
             &repo,
             &wt,
             &[".env".into(), "build-dev/cert".into(), "storage/oauth-*.key".into()],
@@ -408,6 +423,15 @@ mod tests {
         assert!(wt.join("build-dev/cert/a.pem").is_file(), "directory copied recursively");
         assert!(wt.join("storage/oauth-private.key").is_file());
         assert!(!wt.join("storage/other.txt").exists(), "glob must not pull non-matches");
+
+        // Every copied path comes back as an anchored exclude entry, so a seeded
+        // file the repo doesn't gitignore can't leave the worktree reading dirty.
+        let mut got = excludes.clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["/.env", "/build-dev/cert", "/storage/oauth-private.key"],
+        );
     }
 
     #[test]
@@ -418,9 +442,10 @@ mod tests {
         touch(&repo.join(".env"), "from-main");
         touch(&wt.join(".env"), "local-edit");
 
-        seed_copies(&repo, &wt, &[".env".into()]).unwrap();
+        let excludes = seed_copies(&repo, &wt, &[".env".into()]).unwrap();
 
         assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "local-edit");
+        assert!(excludes.is_empty(), "a skipped copy contributes no exclude entry");
     }
 
     #[test]
@@ -431,9 +456,11 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
         fs::create_dir_all(&wt).unwrap();
 
-        seed_copies(&repo, &wt, &["nope.env".into(), "missing/*.key".into()]).unwrap();
+        let excludes =
+            seed_copies(&repo, &wt, &["nope.env".into(), "missing/*.key".into()]).unwrap();
 
         assert!(!wt.join("nope.env").exists());
+        assert!(excludes.is_empty());
     }
 
     #[test]
