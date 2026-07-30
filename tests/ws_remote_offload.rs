@@ -93,6 +93,10 @@ fn up_runs_the_script_on_the_server_over_ssh() {
     assert!(line.contains("WS_WORKSPACE_ROOT=/home/test/ws"), "WS_WORKSPACE_ROOT not absolute:\n{line}");
     assert!(line.contains("WS_REPO=api"), "missing WS_REPO:\n{line}");
     assert!(line.contains("WS_PORT_mysql="), "missing allocated port env:\n{line}");
+    // The server-side hook must see it's the remote side and which runtime, so a
+    // shared hook can branch (import a synced dump vs same-host copy; docker vs podman).
+    assert!(line.contains("WS_REMOTE=1"), "missing WS_REMOTE=1 on the server:\n{line}");
+    assert!(line.contains("WS_RUNTIME="), "missing WS_RUNTIME:\n{line}");
 }
 
 #[test]
