@@ -209,7 +209,15 @@ fn run_script(
     script: &Script,
     extra_env: &[(String, String)],
 ) -> Result<()> {
-    let joined = script.commands().join(" && ");
+    // Anchor `.ws-hooks/…` references to `$WS_WORKSPACE_ROOT` — same as the remote
+    // path's `command_for` — so a config names `.ws-hooks/up.sh` and it resolves
+    // whether the hook runs here or on the server.
+    let joined = script
+        .commands()
+        .iter()
+        .map(|c| crate::config::anchor_ws_hooks(c))
+        .collect::<Vec<_>>()
+        .join(" && ");
     run_one(workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env)
 }
 

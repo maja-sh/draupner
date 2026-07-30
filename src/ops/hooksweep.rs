@@ -465,7 +465,17 @@ fn sweep_host(
     let worktree = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-            crate::remote::worktree_path(&site.abs_base(&r.worktree_base(root)), sanitized, repo)
+            let base = site.abs_base(&r.worktree_base(root));
+            // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/
+            // .ws-hooks/…` resolves on the server (same lane the container path uses).
+            if event == "up" {
+                if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
+                    crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
+                    result.failed.push(repo.to_string());
+                    return;
+                }
+            }
+            crate::remote::worktree_path(&base, sanitized, repo)
         }
         None => wt.to_string_lossy().into_owned(),
     };
