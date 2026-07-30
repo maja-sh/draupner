@@ -203,6 +203,13 @@ fn valid_address(address: &str) -> bool {
 /// entry alongside the new one means the browser can still be handed 127.0.0.1
 /// and fail. `sed -i.ws-bak` takes its suffix attached, which is the form both
 /// BSD (macOS) and GNU sed accept, and leaves the prior file recoverable.
+///
+/// dnsmasq is (re)started with `restart`, not `start`: `start` is a **no-op when
+/// dnsmasq is already running**, so it would leave the just-edited config unread
+/// and dnsmasq serving its old in-memory answer — the exact failure of re-running
+/// setup after a local↔remote flip (the wildcard file says the server, dnsmasq
+/// still says loopback). `restart` reloads a running instance and starts a stopped
+/// one, so it's correct either way.
 fn dns_step_macos(domain: &str, address: &str) -> Step {
     let conf = "\"$(brew --prefix)/etc/dnsmasq.conf\"";
     // Dots are regex metacharacters; the domain is `[a-z0-9.-]`-validated, so
@@ -214,7 +221,7 @@ fn dns_step_macos(domain: &str, address: &str) -> Step {
             "brew install dnsmasq".to_string(),
             format!("sed -i.ws-bak '/^address=\\/{pattern}\\//d' {conf}"),
             format!("echo 'address=/{domain}/{address}' >> {conf}"),
-            "sudo brew services start dnsmasq".to_string(),
+            "sudo brew services restart dnsmasq".to_string(),
             "sudo mkdir -p /etc/resolver".to_string(),
             format!("echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{domain}"),
         ],
@@ -704,6 +711,10 @@ mod tests {
         let joined = step.commands.join("\n");
         assert!(joined.contains("address=/myapp.test/127.0.0.1"), "{joined}");
         assert!(joined.contains("/etc/resolver/myapp.test"), "{joined}");
+        // Must `restart`, not `start`: `start` no-ops on an already-running
+        // dnsmasq, leaving the edited config unread and the old answer live.
+        assert!(joined.contains("services restart dnsmasq"), "{joined}");
+        assert!(!joined.contains("services start dnsmasq"), "{joined}");
     }
 
     #[test]
