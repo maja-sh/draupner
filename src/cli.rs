@@ -50,7 +50,7 @@ enum Cmd {
     List,
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
-    /// Ready the host for routing (rootless bits directly; privileged bits consented)
+    /// Ready this machine for routing (rootless bits directly; privileged bits consented)
     Setup {
         /// Persist a non-default HTTPS port (e.g. 443 for clean, suffix-free URLs)
         #[arg(long, value_name = "PORT")]

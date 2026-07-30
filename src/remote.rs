@@ -269,6 +269,63 @@ pub fn reachable(connection: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The address a **client** can reach the offload server at, derived from the SSH
+/// connection alone: `ssh -G` applies `~/.ssh/config` (so an alias, `User`,
+/// `Hostname` and `ProxyJump` rewrites are all honoured) and reports the real
+/// `hostname` it would dial, which a DNS lookup turns into an IP.
+///
+/// Deliberately **transport-agnostic**: if you can SSH to the box you already have
+/// a routable address for it, so a LAN IP, a public IP, an `~/.ssh/config` alias
+/// and Tailscale MagicDNS all arrive through this one path. Tailscale is a *case
+/// that works*, never a code path — `ws` takes no position on the user's network
+/// topology.
+///
+/// `-G` only parses config, it never connects, so this is cheap and safe to call
+/// on an unreachable server. IPv4 is preferred when a name resolves to both (a
+/// tailnet name gives a `100.x` and an `fd7a:` address; the v4 is the less
+/// surprising thing to write into a resolver and a `curl --resolve`). `None` when
+/// `ssh -G` fails or the hostname doesn't resolve — the caller turns that into a
+/// "set `remote.publish_address`" message rather than guessing.
+pub fn routing_address(connection: &str) -> Option<String> {
+    if !connection_looks_safe(connection) {
+        return None; // defense-in-depth: never hand ssh an option-shaped host
+    }
+    let out = Command::new(ssh_bin())
+        .arg("-G")
+        .arg(connection)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let host = ssh_g_hostname(&String::from_utf8_lossy(&out.stdout))?;
+    resolve_to_ip(&host)
+}
+
+/// The effective `Hostname` from `ssh -G` output, which prints one lowercased
+/// `<keyword> <value>` per line. This is the value `ssh` would actually dial, so
+/// an `~/.ssh/config` alias has already been rewritten to the real host.
+fn ssh_g_hostname(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|l| l.strip_prefix("hostname ").map(str::trim))
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve a hostname (or pass through a literal IP) to a single address string.
+/// IPv4 wins when a name resolves to both — a tailnet name gives a `100.x` and an
+/// `fd7a:` address, and the v4 is the less surprising thing to write into a
+/// resolver entry and a `curl --resolve`.
+fn resolve_to_ip(host: &str) -> Option<String> {
+    use std::net::ToSocketAddrs;
+    // Port is irrelevant to resolution, but `to_socket_addrs` demands one.
+    let addrs: Vec<_> = (host, 22u16).to_socket_addrs().ok()?.collect();
+    let pick = addrs.iter().find(|a| a.is_ipv4()).or_else(|| addrs.first())?;
+    Some(pick.ip().to_string())
+}
+
 /// Run a **read-only** `script` on `connection` over SSH and capture stdout.
 /// `BatchMode`/`ConnectTimeout` fail fast instead of hanging; `None` when SSH
 /// itself can't connect (unreachable / auth), so a caller can tell "server said
@@ -418,6 +475,39 @@ pub fn ssh_command(connection: &str, script: &str, want_tty: bool) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_g_hostname_reads_the_effective_host() {
+        // Real `ssh -G` shape: lowercased keyword, space, value. The `hostname`
+        // line is post-`~/.ssh/config`, so an alias arrives already rewritten.
+        let out = "user hbackman\nhostname srv.tail1234.ts.net\nport 22\n";
+        assert_eq!(
+            ssh_g_hostname(out).as_deref(),
+            Some("srv.tail1234.ts.net")
+        );
+        // `hostkeyalias` must not be mistaken for `hostname`.
+        assert_eq!(ssh_g_hostname("hostkeyalias other\nhostname real.host\n").as_deref(), Some("real.host"));
+        assert_eq!(ssh_g_hostname("port 22\n"), None);
+        assert_eq!(ssh_g_hostname("hostname \n"), None);
+    }
+
+    #[test]
+    fn resolve_to_ip_passes_literal_addresses_through() {
+        // A connection that's already an IP needs no DNS — and must survive the
+        // round trip unchanged, since it becomes the client's wildcard answer.
+        assert_eq!(resolve_to_ip("127.0.0.1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(resolve_to_ip("::1").as_deref(), Some("::1"));
+        // RFC 2606 reserves `.invalid`: never resolves, so this can't flake.
+        assert_eq!(resolve_to_ip("ws-no-such-server.invalid"), None);
+    }
+
+    #[test]
+    fn routing_address_refuses_an_option_shaped_connection() {
+        // The argument-injection guard must hold on this path too — `ssh -G`
+        // parses `-oProxyCommand=…` and would run it locally.
+        assert_eq!(routing_address("-oProxyCommand=touch /tmp/pwned"), None);
+        assert_eq!(routing_address(""), None);
+    }
 
     #[test]
     fn site_local_command_runs_the_program_directly() {
