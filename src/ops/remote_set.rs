@@ -70,8 +70,16 @@ pub fn set(
     // of serializing N pushes.
     let mut created = Vec::new();
     let mut failed = false;
-    for (task, repo, wt) in all_worktrees(&ws.root) {
+    // Enumerated from **git**, not from `.worktrees/` on disk — the shared
+    // `workspace::worktrees` every op uses. A directory that git doesn't know as
+    // a worktree (a failed `ws rm`'s residue, a hand-made copy) is not something
+    // to push to a server; `ws clean` reports those instead. Unmanaged worktrees
+    // (outside `.worktrees/`) are skipped too: they have no task dir, so there's
+    // no server path to sync them to.
+    for wt in workspace::worktrees(&ws.root, &cfg) {
         super::bail_if_interrupted()?;
+        let Some(task) = wt.task else { continue };
+        let repo = wt.repo;
         let session = mutagen::session_name(&task, &repo);
 
         // Recreate every session from a clean slate. An existing one may point
@@ -87,16 +95,15 @@ pub fn set(
             continue;
         }
 
-        // Only config-known repos get a (re)created sync — those are the
-        // `ws`-managed ones; syncing a stray unmanaged dir to the server would
-        // be surprising. Their stale sessions were still torn down above.
+        // `worktrees` only walks configured repos, so the entry is always found;
+        // it's needed here for the repo's declared sync excludes.
         let Some(entry) = cfg.repos.iter().find(|r| r.name() == repo) else {
             continue;
         };
         let remote_path = remote::worktree_path(&base, &task, &repo);
-        let ignores = mutagen::sync_ignores(entry.worktree_excludes(), &wt);
+        let ignores = mutagen::sync_ignores(entry.worktree_excludes(), &wt.path);
         let step = crate::ui::step(&format!("{task}/{repo}"), "Sync created");
-        match mutagen::create(&session, &wt, &connection, &remote_path, &ignores) {
+        match mutagen::create(&session, &wt.path, &connection, &remote_path, &ignores) {
             Ok(()) => {
                 created.push(session);
                 step.ok();
@@ -152,6 +159,13 @@ pub fn unset() -> Result<()> {
     // wide net can only clean up more. Best-effort: a failed terminate is
     // reported but never blocks going local (`mutagen sync terminate ws-…` is
     // the documented escape hatch).
+    //
+    // Deliberately the **filesystem** walk, not `workspace::worktrees`: this is
+    // the asymmetry between creating and destroying. `set` must be strict (only
+    // sync what git calls a worktree), but `unset` must be broad — a directory
+    // git doesn't know may still have a live session pointing at the server,
+    // including one an older, laxer `set` created. Narrowing this to git would
+    // strand exactly those.
     for (task, repo, _wt) in all_worktrees(&ws.root) {
         super::bail_if_interrupted()?;
         let session = mutagen::session_name(&task, &repo);

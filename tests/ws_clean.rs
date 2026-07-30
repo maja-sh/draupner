@@ -113,3 +113,31 @@ fn never_committed_worktree_is_removed_with_force() {
     assert!(!f.path().join(".worktrees/feat-empty/api").exists(), "never-committed worktree should be removed");
     assert!(err.contains("Removed 1"), "expected removal in:\n{err}");
 }
+
+#[test]
+fn a_directory_git_doesnt_know_is_reported_not_audited() {
+    // The exact shape that made `ws remote set` and `ws list` disagree: a dir
+    // under .worktrees/ that git never registered. It must never be treated as a
+    // worktree (audited, removed, synced), but it must be named — silence here is
+    // what let it get pushed to a server as if it were real.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    std::fs::create_dir_all(f.path().join(".worktrees/feat-ghost/api")).unwrap();
+
+    let out = f.run_ok(&["clean"]);
+    let err = stderr(&out);
+
+    assert!(err.contains("not registered with git"), "expected an orphan report in:\n{err}");
+    assert!(err.contains("feat-ghost"), "expected the path named in:\n{err}");
+    // Reported, never removed: `ws` didn't put it there and can't judge it.
+    assert!(f.path().join(".worktrees/feat-ghost/api").exists(), "must not remove an orphan");
+}
+
+#[test]
+fn a_real_worktree_is_never_reported_as_an_orphan() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/real"]);
+
+    let out = f.run_ok(&["clean"]);
+    let err = stderr(&out);
+    assert!(!err.contains("not registered with git"), "a git worktree is not an orphan:\n{err}");
+}
