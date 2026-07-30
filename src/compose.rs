@@ -229,7 +229,7 @@ fn render_override(
         if !env.is_empty() {
             out.push_str("    environment:\n");
             for (k, v) in env {
-                out.push_str(&format!("      {k}: {}\n", yaml_dquote(v)));
+                out.push_str(&format!("      {k}: {}\n", yaml_dquote(&compose_escape(v))));
             }
         }
     }
@@ -246,6 +246,17 @@ fn render_override(
 /// ambiguity `derive` already carries.)
 pub(crate) fn compose_service(key: &str, internal_port: u16) -> &str {
     key.strip_suffix(&format!("_{internal_port}")).unwrap_or(key)
+}
+
+/// Escape `$` as `$$` for Compose's own variable interpolation, which runs
+/// *after* YAML parsing. `ws` has already substituted every `${WS_*}` token it
+/// knows; anything with a residual `$` — an unresolved cross-repo token (a peer
+/// not yet built), or a literal `$` in a declared value — must be passed through
+/// untouched, or Compose tries to interpolate it and aborts the whole `up`
+/// (`invalid interpolation format … escape any $ with another $`). A fully
+/// resolved value has no `$` and is unaffected.
+fn compose_escape(v: &str) -> String {
+    v.replace('$', "$$")
 }
 
 /// Double-quote a YAML scalar, escaping `\`, `"`, and the control characters
@@ -671,6 +682,19 @@ mod tests {
         assert_eq!(out.matches("APP_URL:").count(), 2, "{out}");
         // The URL's `:` is safe because the value is double-quoted.
         assert!(out.contains("APP_URL: \"https://feat-x.web.myapp.test\""), "{out}");
+    }
+
+    #[test]
+    fn override_escapes_dollars_so_compose_wont_interpolate_an_unresolved_token() {
+        // A cross-repo `${WS_PORT_app.web}` whose peer isn't built stays literal.
+        // Written raw, docker-compose interpolates it and aborts the whole `up`;
+        // escaped as `$$…`, compose passes `${WS_PORT_app.web}` through untouched.
+        let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
+        let env = [("SSO".to_string(), "host:${WS_PORT_app.web}/login".to_string())];
+        let out = render_override(&services, &names(&services), &BTreeMap::new(), &env, false)
+            .expect("some override");
+        assert!(out.contains(r#"SSO: "host:$${WS_PORT_app.web}/login""#), "{out}");
+        assert!(!out.contains(r#"SSO: "host:${WS_PORT_app.web}"#), "raw token must not survive: {out}");
     }
 
     #[test]
