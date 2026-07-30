@@ -358,22 +358,40 @@ fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>
             glob::glob(&pattern).with_context(|| format!("invalid copy pattern `{entry}`"))?;
         for src in matches.flatten() {
             let rel = src.strip_prefix(repo).expect("a glob match lies under its root");
-            let dst = wt.join(rel);
-            if dst.exists() {
-                continue; // no-clobber — a worktree's local edit wins
-            }
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            cp_r(&src, &dst)?;
-            // Anchored to the worktree root (`/build-dev/cert`), matching the
-            // `/vendor` + `/node_modules` convention — an unanchored pattern would
-            // match the same name at any depth.
-            excludes.push(format!("/{}", rel.display()));
+            seed_one(&src, rel, wt, &mut excludes)?;
         }
     }
     Ok(excludes)
+}
+
+/// Seed a single source path (file or directory) into the worktree with
+/// **per-file** no-clobber. A directory is walked and merged file-by-file rather
+/// than copied as a unit: the worktree already contains any tracked file the dir
+/// carries (e.g. a `.gitkeep`), so a whole-directory `exists()` check would skip
+/// the dir and strand its *untracked* contents — the exact reason a generated
+/// cert under a tracked `certs/` never arrived. Each copied file is recorded as an
+/// anchored git-exclude so it stays out of `git status`.
+fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Result<()> {
+    if src.is_dir() {
+        for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+            let entry = entry?;
+            seed_one(&entry.path(), &rel.join(entry.file_name()), wt, excludes)?;
+        }
+        return Ok(());
+    }
+    let dst = wt.join(rel);
+    if dst.exists() {
+        return Ok(()); // no-clobber — a worktree's local edit wins
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    cp_r(src, &dst)?;
+    // Anchored to the worktree root (`/certs/local.crt`), matching the
+    // `/vendor` + `/node_modules` convention — an unanchored pattern would match
+    // the same name at any depth.
+    excludes.push(format!("/{}", rel.display()));
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -435,10 +453,35 @@ mod tests {
         // file the repo doesn't gitignore can't leave the worktree reading dirty.
         let mut got = excludes.clone();
         got.sort();
+        // Per-file excludes (a directory is merged file-by-file, not as a unit).
         assert_eq!(
             got,
-            vec!["/.env", "/build-dev/cert", "/storage/oauth-private.key"],
+            vec!["/.env", "/build-dev/cert/a.pem", "/storage/oauth-private.key"],
         );
+    }
+
+    #[test]
+    fn merges_into_an_existing_dir_seeding_its_untracked_files() {
+        // The real bug: a `copy` dir that already exists in the worktree because it
+        // holds a tracked file (a `.gitkeep`) must still receive its untracked
+        // siblings. A whole-directory no-clobber skipped them — stranding, e.g., a
+        // generated cert under a tracked `certs/`.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        touch(&repo.join("certs/.gitkeep"), "");
+        touch(&repo.join("certs/local.crt"), "CERT");
+        // The worktree already has the tracked .gitkeep (as after `git worktree add`).
+        touch(&wt.join("certs/.gitkeep"), "");
+
+        let excludes = seed_copies(&repo, &wt, &["certs".into()]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(wt.join("certs/local.crt")).unwrap(),
+            "CERT",
+            "the untracked cert must be seeded despite the dir already existing",
+        );
+        assert_eq!(excludes, vec!["/certs/local.crt"], "only the newly-copied file");
     }
 
     #[test]
