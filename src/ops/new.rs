@@ -218,7 +218,7 @@ fn run_post_create(
         let step = crate::ui::step(repo, "Post-create hook");
         // `run_remote_event` flushes the sync first so the just-rendered templates
         // (and the initial sync) are on the server before post-create runs there.
-        match super::run_remote_event(r, ws_root, branch, sanitized, repo, "post-create", &cmd, extra_env) {
+        match super::run_remote_event(site, r, ws_root, branch, sanitized, repo, "post-create", &cmd, extra_env) {
             Ok(()) => {
                 step.ok();
                 Ok(())
