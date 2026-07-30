@@ -10,7 +10,7 @@ use crate::mutagen;
 use crate::remote;
 use crate::workspace;
 
-pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
+pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
     // Where the stack lives (local, or the server for a remote workspace). For a
@@ -182,6 +182,13 @@ pub fn run(repos_arg: &str, branch: &str) -> Result<()> {
         .map(|(name, path)| format!("{name}: {}", path.display()))
         .collect();
     crate::ui::summary_ok(&summary);
+
+    // `--up`: chain straight into the bring-up rather than making the caller run a
+    // second command. Delegates to the same op `ws up` runs, so the two can't
+    // drift — including its own header, per-repo steps, and failure semantics.
+    if up {
+        return super::up::run(branch);
+    }
     crate::ui::nudge(&format!("ws up {branch}"));
 
     Ok(())

@@ -33,7 +33,13 @@ enum Cmd {
     /// Install Claude Code skill files (~/.claude/skills/ws-*)
     Claude,
     /// Create worktrees for a task
-    New   { repos: String, branch: String },
+    New   {
+        repos: String,
+        branch: String,
+        /// Bring the stack up immediately after creating the worktrees
+        #[arg(long)]
+        up: bool,
+    },
     /// Bring a task's stack up
     Up    { branch: String },
     /// Stop a task's stack
@@ -127,7 +133,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Init { refresh_schema, remote, remote_path, domain, runtime, no_verify } =>
             crate::ops::init::run(refresh_schema, remote, remote_path, domain, runtime, no_verify),
         Cmd::Claude                  => crate::ops::claude::run(),
-        Cmd::New{repos,branch}       => crate::ops::new::run(&repos, &branch),
+        Cmd::New{repos,branch,up}    => crate::ops::new::run(&repos, &branch, up),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),

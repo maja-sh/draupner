@@ -335,3 +335,61 @@ echo "WS_WORKSPACE_ROOT=$WS_WORKSPACE_ROOT""#,
         "expected WS_WORKSPACE_ROOT in:\n{err}"
     );
 }
+
+/// Wait briefly for a detached host process to write its marker (`supervise::up`
+/// returns as soon as it's launched, so the write races the assertion).
+fn wait_for(p: &std::path::Path) -> bool {
+    for _ in 0..40 {
+        if p.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+fn up_marker_fixture() -> WorkspaceFixture {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    // A host repo — its `up` is launched by ws itself, so this needs no runtime.
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":9000}},
+            "scripts":{"up":"touch up-ran"}}]}"#,
+    );
+    f
+}
+
+#[test]
+fn new_with_up_brings_the_stack_up_in_one_command() {
+    // `--up` chains into the same op `ws up` runs, so the worktrees are created
+    // AND the stack comes up — no second command, and no `ws up` nudge.
+    let f = up_marker_fixture();
+
+    let out = f.run_ok(&["new", "api", "feat/foo", "--up"]);
+    assert!(out.status.success(), "ws new --up failed:\n{}", stderr(&out));
+
+    let err = stderr(&out);
+    assert!(err.contains("ws-new"), "should still do the create:\n{err}");
+    assert!(err.contains("ws-up"), "should chain into up:\n{err}");
+    assert!(
+        wait_for(&f.path().join(".worktrees/feat-foo/api/up-ran")),
+        "up script should have run:\n{err}"
+    );
+    // The "next: ws up" nudge is pointless once we've already brought it up.
+    assert!(!err.contains("next: ws up"), "nudge should be suppressed:\n{err}");
+
+    let _ = f.run(&["rm", "feat/foo", "--force"]);
+}
+
+#[test]
+fn new_without_up_only_creates_and_nudges() {
+    let f = up_marker_fixture();
+
+    let out = f.run_ok(&["new", "api", "feat/foo"]);
+    let err = stderr(&out);
+    assert!(
+        !f.path().join(".worktrees/feat-foo/api/up-ran").exists(),
+        "up must not run without --up:\n{err}"
+    );
+    assert!(err.contains("ws up feat/foo"), "should nudge:\n{err}");
+}
