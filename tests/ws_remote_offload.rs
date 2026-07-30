@@ -205,3 +205,36 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
     assert!(rec.contains("WS_PORT_web="), "allocated port not injected:\n{rec}");
     assert!(rec.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{rec}");
 }
+
+#[test]
+fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
+    // `prepare` is the one hook that stays on the client even when offloading, so
+    // it can stage local data (a db dump) into the worktree for the sync to carry.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(remote_container_ws());
+    f.add_hook("api", "prepare", "echo staged > \"$WS_WORKTREE/prepared.txt\"");
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    let args = f.path().join("up-ssh.txt");
+    let out = f.run_with_env(
+        &["up", "feat/foo"],
+        &[
+            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+
+    // prepare wrote into the LOCAL worktree — it ran on this machine, not over ssh.
+    assert!(
+        f.path().join(".worktrees/feat-foo/api/prepared.txt").exists(),
+        "prepare must run on the client for a remote workspace"
+    );
+    // ...while `up` itself was dispatched to the server over ssh.
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    assert!(rec.contains("exec sh -c 'echo starting'"), "up must dispatch over ssh:\n{rec}");
+}

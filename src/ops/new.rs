@@ -107,6 +107,14 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             let step = crate::ui::step(repo_name, "files copied");
             match seed_copies(&repo_path, &wt_path, copies) {
                 Ok(dests) => {
+                    // Also exclude the copy *sources* in the main checkout. A
+                    // `copy` source is a ws-managed untracked file (a dev cert, a
+                    // seed dump) living in main at the same relative path it lands
+                    // in the worktree — so the worktree excludes double as main's.
+                    // Best-effort: keeps main's `git status` clean and ws's
+                    // footprint fully local (nothing committed), but a failure to
+                    // write main's exclude must not block creating the worktree.
+                    let _ = git::add_worktree_excludes(&repo_path, &dests);
                     excludes.extend(dests);
                     step.ok()
                 }

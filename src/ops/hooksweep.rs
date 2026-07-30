@@ -158,6 +158,17 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
+        // Client-side prep before the stack comes up. `prepare` runs on THIS
+        // machine even for a remote workspace — the one hook that doesn't follow
+        // the stack to the server — so it can stage data from client-side
+        // resources (e.g. dump the main checkout's db) into the local worktree.
+        // The flush inside the up dispatch then carries that output to the server,
+        // where `up` consumes it. A failed prepare fails the repo and skips its up:
+        // no point bringing a stack up whose seed never staged.
+        if event == "up" && !run_prepare(&cfg, &ws.root, wt, &sanitized, repo, &mut result) {
+            continue;
+        }
+
         // Host processes are supervised as a detached `ws`-owned process, not run as a
         // blocking hook — `up` launches it (detached, survives `ws` exiting), `down`
         // stops. Their `up` script binds the injected `WS_PORT_*`.
@@ -211,6 +222,49 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     }
 
     Ok(result)
+}
+
+/// Run a repo's client-side `prepare` hook (opt-in) locally, ahead of `up`.
+///
+/// Unlike every other lifecycle hook, `prepare` runs on the **client** regardless
+/// of where the stack lives — so a remote workspace can stage data that only
+/// exists on the client (the main checkout's live db, local certs) into the
+/// worktree, which the up dispatch's mutagen flush then ships to the server. The
+/// site is therefore always `Local` and the worktree the local one; `WS_REMOTE`
+/// still reports the workspace's remoteness (it's keyed off `cfg.remote`), so one
+/// script can branch dump-for-sync vs a same-host copy. Phase is `Inspect` —
+/// prepare stages data, it doesn't allocate ports or render templates.
+///
+/// Returns `false` (and files the repo under `failed`) when the hook fails, so the
+/// caller skips the up; `true` on success or when there's no `prepare` hook (the
+/// common case — it never prints a skip line).
+fn run_prepare(
+    cfg: &config::WsConfig,
+    root: &std::path::Path,
+    wt: &std::path::Path,
+    sanitized: &str,
+    repo: &str,
+    result: &mut SweepResult,
+) -> bool {
+    let Some(action) = hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt))
+    else {
+        return true;
+    };
+    let extra_env =
+        inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
+            .unwrap_or_default();
+    let step = crate::ui::step(repo, "prepare hook");
+    match hooks::run_action(root, wt, repo, sanitized, "prepare", &action, &extra_env) {
+        Ok(()) => {
+            step.ok();
+            true
+        }
+        Err(e) => {
+            step.fail(&format!("{e}"));
+            result.failed.push(repo.to_string());
+            false
+        }
+    }
 }
 
 /// Handle one container repo on the server for a remote workspace: run its

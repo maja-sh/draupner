@@ -19,6 +19,48 @@ fn happy_path_both_hooks_run() {
 }
 
 #[test]
+fn prepare_hook_runs_before_up() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook("api", "prepare", "echo PREPARE-RAN");
+    f.add_hook("api", "up", "echo UP-RAN");
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    let out = f.run_ok(&["up", "feat/foo"]);
+    let err = stderr(&out);
+
+    assert!(err.contains("prepare hook"), "a prepare step line should show:\n{err}");
+    let p = err.find("PREPARE-RAN").expect("prepare ran");
+    let u = err.find("UP-RAN").expect("up ran");
+    assert!(p < u, "prepare must run before up:\n{err}");
+}
+
+#[test]
+fn prepare_is_opt_in_no_step_when_absent() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook("api", "up", "echo UP-RAN");
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    let out = f.run_ok(&["up", "feat/foo"]);
+    assert!(
+        !stderr(&out).contains("prepare hook"),
+        "prepare is opt-in — no step when there's no prepare hook"
+    );
+}
+
+#[test]
+fn a_failed_prepare_skips_up() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook("api", "prepare", "echo staging; exit 1");
+    f.add_hook("api", "up", "echo UP-RAN");
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    let out = f.run(&["up", "feat/foo"]);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "a failed prepare must fail the up:\n{err}");
+    assert!(!err.contains("UP-RAN"), "up must be skipped when prepare fails:\n{err}");
+}
+
+#[test]
 fn partial_only_repos_with_worktrees_run() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
     f.add_hook("api", "up", "echo API-UP-RAN");
