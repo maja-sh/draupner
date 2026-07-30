@@ -24,10 +24,15 @@
 //!   interactively — show the exact command, `[R]un / [S]kip / show-me`. `[R]un`
 //!   shells the command (with its `sudo`) inheriting the terminal, so `sudo`
 //!   prompts for the password directly — `ws` never reads or stores it.
-//! - **Linux host / remote offload box**: the privileged bits live in a
-//!   versioned, readable `server-setup/<distro>.sh` the user runs themselves (the
-//!   script *is* the transparency). `ws setup` here reports the gaps and points
-//!   at the script rather than driving `sudo` itself.
+//! - **Linux box that runs the stacks**: the privileged bits live in a versioned,
+//!   readable `server-setup/<distro>.sh` the user runs themselves (the script *is*
+//!   the transparency). `ws setup` here reports the gaps and points at the script
+//!   rather than driving `sudo` itself.
+//! - **Linux client of an offload server**: the setup script does **not** apply —
+//!   it provisions a machine to *run* stacks (podman, a compose provider, mutagen,
+//!   the podman socket), none of which a client needs to resolve a hostname. Only
+//!   the two client-side bits are shown: the wildcard pointed at the server, and
+//!   the server's root CA trusted here.
 //!
 //! Non-interactive (stdin not a TTY): print the commands and bail — never hang on
 //! a `sudo` password prompt. `--yes` runs the macOS steps unattended.
@@ -332,7 +337,7 @@ pub fn run(
     match plat {
         Platform::MacOs => apply_macos_gaps(site, domain, &report, yes),
         Platform::Linux => {
-            guide_linux_gaps(domain, &report);
+            guide_linux_gaps(site, domain, &report);
             Ok(())
         }
         Platform::Other => {
@@ -430,11 +435,18 @@ fn run_commands(commands: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// On a Linux host the privileged bits live in the versioned setup script — point
-/// at it rather than driving `sudo` from `ws`. The script's `--address` is exactly
-/// the report's address, so name it: on an offload client the default (loopback)
-/// would wire the wildcard to the wrong machine, and that's silent breakage.
-fn guide_linux_gaps(domain: &str, report: &Report) {
+/// On a Linux host the privileged bits are shown rather than driven by `ws` — the
+/// transparency contract. *Which* guidance depends on the machine's role:
+///
+/// - **Runs the stacks itself** (local workspace): `server-setup/<distro>.sh`,
+///   which owns every privileged bit plus the runtime prerequisites. `--address`
+///   is named explicitly because the script defaults to loopback.
+/// - **Client of an offload server** (remote workspace): the setup script does
+///   **not** apply. It provisions a machine to *run* stacks — podman, a compose
+///   provider, mutagen, the podman API socket — none of which a client needs to
+///   resolve a hostname. Pointing a laptop at it would install a server's worth of
+///   software to fix a DNS entry. Only the two client-side bits are shown.
+fn guide_linux_gaps(site: &Site, domain: &str, report: &Report) {
     let mut needs = Vec::new();
     if !report.dns_ok {
         needs.push(format!("wildcard DNS (*.{domain} → {})", report.address));
@@ -446,6 +458,11 @@ fn guide_linux_gaps(domain: &str, report: &Report) {
         needs.push("allow rootless bind to the privileged port (sysctl)".to_string());
     }
     crate::ui::note(&format!("missing: {}", needs.join("; ")));
+
+    if site.is_remote() {
+        guide_linux_client(site, domain, report);
+        return;
+    }
     crate::ui::nudge(
         "run the setup script for your distro — it applies the privileged bits transparently:",
     );
@@ -458,6 +475,60 @@ fn guide_linux_gaps(domain: &str, report: &Report) {
             format!(" --port {}", report.port)
         }
     )]);
+}
+
+/// The client-side half for a Linux machine offloading to a server: resolve the
+/// wildcard at the server, and trust the server's root CA. No `ws` runs on the
+/// server, and no server script runs here — these are this machine's own bits.
+///
+/// The resolver hop is environment-specific (dnsmasq vs systemd-resolved), so both
+/// forms are printed rather than one being chosen — the same call
+/// `server-setup/debian.sh` makes for its own last hop.
+fn guide_linux_client(site: &Site, domain: &str, report: &Report) {
+    let mut cmds = linux_client_commands(report, domain);
+    if !report.ca_ok {
+        // Fetch from `site` — the *server's* root is the one signing the leaves
+        // this client will see. Written locally so the trust command points at a
+        // real file, same as the macOS path.
+        match crate::caddy::write_root_ca(site) {
+            Ok(path) => {
+                cmds.push("# trust the server's Caddy root CA:".to_string());
+                cmds.push(format!(
+                    "sudo cp {} /usr/local/share/ca-certificates/ws-caddy-root.crt",
+                    sh_quote(&path.to_string_lossy())
+                ));
+                cmds.push("sudo update-ca-certificates".to_string());
+            }
+            Err(e) => crate::ui::note(&format!(
+                "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is the server's \
+                 Caddy running?"
+            )),
+        }
+    }
+    crate::ui::nudge(
+        "this machine is a client — the server setup script doesn't apply here. \
+         It needs only these two bits:",
+    );
+    crate::ui::command_block(&cmds);
+}
+
+/// The resolver half of the client guidance, split out from the CA half because
+/// that one has to reach the server's Caddy — this stays pure and testable.
+fn linux_client_commands(report: &Report, domain: &str) -> Vec<String> {
+    if report.dns_ok {
+        return Vec::new();
+    }
+    // One line per entry: `command_block` indents each element, so an embedded
+    // newline would render flush-left and break the block's alignment.
+    let addr = &report.address;
+    vec![
+        "# wildcard DNS — dnsmasq:".to_string(),
+        format!("echo 'address=/{domain}/{addr}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"),
+        "sudo systemctl restart dnsmasq".to_string(),
+        "# …or systemd-resolved, routing just this domain:".to_string(),
+        format!("sudo resolvectl dns    <iface> {addr}"),
+        format!("sudo resolvectl domain <iface> '~{domain}'"),
+    ]
 }
 
 /// The `:port` suffix a browser URL carries, empty for the standard `:443`.
@@ -517,6 +588,28 @@ mod tests {
         let del = joined.find("sed -i.ws-bak").unwrap();
         let add = joined.find("echo 'address=/myapp.test/100.64.1.2'").unwrap();
         assert!(del < add, "the delete must precede the append: {joined}");
+    }
+
+    #[test]
+    fn linux_client_guidance_never_points_at_the_server_script() {
+        // A Linux client of an offload server must not be told to run
+        // `server-setup/debian.sh` — that provisions a machine to *run* stacks
+        // (podman, compose, mutagen, the podman socket) to fix a DNS entry.
+        // Asserted on the command text because that's what the user acts on.
+        let report = Report {
+            port: 8443,
+            address: "100.64.1.2".to_string(),
+            dns_ok: false,
+            ca_ok: true, // skip the CA branch: it would try to reach a Caddy
+            port_ok: true,
+        };
+        let cmds = linux_client_commands(&report, "myapp.test");
+        let joined = cmds.join("\n");
+        assert!(!joined.contains("server-setup"), "client guidance named the server script: {joined}");
+        assert!(!joined.contains("podman"), "{joined}");
+        // It must still wire the wildcard at the *server's* address.
+        assert!(joined.contains("address=/myapp.test/100.64.1.2"), "{joined}");
+        assert!(joined.contains("resolvectl"), "both resolver forms are offered: {joined}");
     }
 
     #[test]
