@@ -268,8 +268,11 @@ fn run(
 }
 
 /// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
-/// wait for exit. Shared by file-hook `run` and declarative `run_script`.
-fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
+/// wait for exit. Shared by file-hook `run`, declarative `run_script`, and the
+/// remote lifecycle dispatch (`remote::run_event`) so a hook's output gets the
+/// same gutter + spinner-suspend whether it ran locally or over SSH. The child
+/// must be spawned with stdout+stderr piped.
+pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
     let tag_out = tag.to_string();
