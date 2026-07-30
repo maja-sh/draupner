@@ -406,7 +406,7 @@ pub fn run_event(
     event: &str,
     command: &str,
     extra_env: &[(String, String)],
-) -> std::io::Result<std::process::ExitStatus> {
+) -> Result<std::process::ExitStatus> {
     let dir = worktree_path(worktree_base, task, repo);
     let mut env: Vec<(&str, &str)> = vec![
         ("WS_REPO", repo),
@@ -418,7 +418,18 @@ pub fn run_event(
     env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     let cmd = ["sh".to_string(), "-c".to_string(), command.to_string()];
     let script = remote_script(&dir, &env, &cmd);
-    ssh_command(connection, &script, false).status()
+    // Pipe the SSH stdio and stream it through the same `hook_line` path a local
+    // hook uses, instead of letting the ssh child inherit the terminal — otherwise
+    // the server's output writes straight over the step spinner (the interleaving
+    // wart). Now a remote hook lands with the same `│ [repo-event]` gutter and
+    // suspends the spinner per line, identical to local.
+    let child = ssh_command(connection, &script, false)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn ssh to {connection}"))?;
+    crate::hooks::stream_and_wait(child, &format!("{repo}-{event}"))
 }
 
 /// Run a repo's read-only `status` command on the server and return its first
