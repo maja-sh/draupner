@@ -184,7 +184,7 @@ fn teardown_remote(
             continue;
         };
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match super::run_remote_event(r, root, branch, sanitized, repo, event, &cmd, &extra_env) {
+        match super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &extra_env) {
             Ok(()) => step.ok(),
             Err(e) => {
                 step.fail(&e.to_string());
