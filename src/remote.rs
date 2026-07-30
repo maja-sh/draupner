@@ -343,20 +343,30 @@ pub fn push_ws_hooks(site: &Site, ws_root: &Path, base: &str) -> Result<()> {
     if !ws_root.join(".ws-hooks").is_dir() {
         return Ok(());
     }
+    // Quiet plumbing: the push isn't a hook, so its output shouldn't stream into
+    // one. `tar` stderr is dropped; the ssh side is captured and only surfaced on
+    // failure. `--warning=no-unknown-keyword` on the server extract also silences
+    // GNU tar's noise about the `com.apple.provenance` xattr headers macOS `tar`
+    // stamps in — cosmetic, the extract succeeds regardless.
     let mut tar = Command::new("tar")
         .args(["-C", &ws_root.to_string_lossy(), "-cf", "-", ".ws-hooks"])
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .context("spawn tar for the .ws-hooks push")?;
     let archive = tar.stdout.take().expect("tar stdout was piped");
-    let remote = format!("mkdir -p {b} && tar -C {b} -xpf -", b = shell_quote(base));
-    let status = ssh_command(connection, &remote, false)
+    let remote =
+        format!("mkdir -p {b} && tar -C {b} --warning=no-unknown-keyword -xpf -", b = shell_quote(base));
+    let out = ssh_command(connection, &remote, false)
         .stdin(Stdio::from(archive))
-        .status()
+        .output()
         .context("ssh for the .ws-hooks push")?;
     let _ = tar.wait();
-    if !status.success() {
-        bail!("couldn't push .ws-hooks to {connection} (see the tar/ssh output above)");
+    if !out.status.success() {
+        bail!(
+            "couldn't push .ws-hooks to {connection}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
