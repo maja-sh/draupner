@@ -74,7 +74,7 @@ pub fn remove_task(
             // Resource teardown hooks — best-effort. A failing hook is reported
             // but doesn't stop removal (the user wants the worktree gone).
             for event in ["down", "post-remove"] {
-                if let Some(action) = hooks::resolve(cfg, root, repo, event) {
+                if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
                     let step = crate::ui::step(repo, &format!("{event} hook"));
                     match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
                         Ok(()) => step.ok(),
@@ -180,7 +180,7 @@ fn teardown_remote(
     let extra_env =
         inject::prepare(cfg, site, root, wt, sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
     for event in ["down", "post-remove"] {
-        let Some(cmd) = cfg.script_command(repo, event) else {
+        let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
             continue;
         };
         let step = crate::ui::step(repo, &format!("{event} hook"));

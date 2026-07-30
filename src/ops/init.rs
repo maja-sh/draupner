@@ -178,7 +178,7 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     // yet — the workspace is being created), so derivation runs on the local site.
     let services = compose::has_compose_file(&repo_dir)
         .then(|| {
-            compose::derive(&crate::remote::Site::Local, runtime, &repo_dir.to_string_lossy()).ok()
+            compose::derive(&crate::remote::Site::Local, runtime, &repo_dir.to_string_lossy()).ok().map(|d| d.services)
         })
         .flatten()
         .filter(|s| !s.is_empty());
