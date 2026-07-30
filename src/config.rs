@@ -75,6 +75,21 @@ impl RemoteConfig {
     }
 }
 
+/// Anchor a `.ws-hooks/`-relative command to the workspace root. `ws` is
+/// opinionated that shared hook scripts live in `.ws-hooks/` at the workspace root
+/// (pushed to the server for a remote workspace), so a command that starts with
+/// `.ws-hooks/` is rewritten to run under `$WS_WORKSPACE_ROOT` — which `ws` sets in
+/// the hook env both locally and on the server. So a config names `.ws-hooks/up.sh`
+/// and it resolves in either place, without spelling out `$WS_WORKSPACE_ROOT/` or
+/// caring that the worktree cwd is elsewhere. Any other command is untouched. The
+/// var is quoted so a workspace path with spaces still resolves as one word.
+pub fn anchor_ws_hooks(cmd: &str) -> String {
+    match cmd.strip_prefix(".ws-hooks/") {
+        Some(rest) => format!("\"$WS_WORKSPACE_ROOT\"/.ws-hooks/{rest}"),
+        None => cmd.to_string(),
+    }
+}
+
 /// The default server-side worktree base when none is configured: the
 /// workspace's own directory name (so two projects on one server don't collide),
 /// or `"workspace"` when the root has no name. Shared by `RemoteConfig::worktree_base`
@@ -314,7 +329,7 @@ impl WsConfig {
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
         self.repo_config(repo)
             .and_then(|rc| rc.scripts.get(event))
-            .map(|s| s.commands().join(" && "))
+            .map(|s| s.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && "))
     }
 
     /// The command for `event`: the declared `scripts` entry, else the container
@@ -558,6 +573,24 @@ fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::anchor_ws_hooks;
+
+    #[test]
+    fn anchor_ws_hooks_prefixes_only_a_ws_hooks_reference() {
+        // A `.ws-hooks/` script is anchored to the (quoted) workspace root...
+        assert_eq!(
+            anchor_ws_hooks(".ws-hooks/up.sh"),
+            "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/up.sh"
+        );
+        assert_eq!(
+            anchor_ws_hooks(".ws-hooks/db/seed.sh --fresh"),
+            "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/db/seed.sh --fresh"
+        );
+        // ...while an ordinary command is left exactly as written.
+        assert_eq!(anchor_ws_hooks("podman compose up -d"), "podman compose up -d");
+        assert_eq!(anchor_ws_hooks("echo .ws-hooks/x"), "echo .ws-hooks/x");
+    }
+
     #[test]
     fn container_defaults_cover_the_compose_lifecycle() {
         assert_eq!(default_script("podman", "up").as_deref(), Some("podman compose up -d"));

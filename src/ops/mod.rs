@@ -133,6 +133,13 @@ pub(crate) fn run_remote_event(
     // `WS_WORKSPACE_ROOT` relative, so a hook resolving `$WS_WORKSPACE_ROOT/…` from
     // the worktree cwd lands in the wrong place.
     let base = site.abs_base(&r.worktree_base(root));
+    // Ship the workspace-root `.ws-hooks/` to the server so a hook here can call
+    // `$WS_WORKSPACE_ROOT/.ws-hooks/…` — scripts that live outside the repos (and
+    // so never ride the worktree sync). Before dispatch, and fatal: a hook that
+    // can't find its script would fail anyway, with a muddier error.
+    if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
+        return Err(op_failure(format!("{event} on {}: {e}", r.connection)));
+    }
     match crate::remote::run_event(&r.connection, &base, sanitized, repo, event, cmd, extra_env) {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(op_failure(format!("{event} script exited {}", s.code().unwrap_or(-1)))),
