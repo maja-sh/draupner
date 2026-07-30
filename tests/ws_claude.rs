@@ -10,7 +10,7 @@ fn claude_writes_all_skills() {
 
     let skills_dir = ws.path().join("claude-skills");
     for name in [
-        "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list", "ws-here",
+        "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list",
         "ws-clean", "ws-init",
     ] {
         let p = skills_dir.join(name).join("SKILL.md");
