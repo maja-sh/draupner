@@ -258,7 +258,7 @@ fn sweep_container_remote(
 
     let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
     let step = crate::ui::step(repo, &format!("{event} hook"));
-    let res = super::run_remote_event(r, root, branch, sanitized, repo, event, &cmd, &extra_env);
+    let res = super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &extra_env);
     let up_ok = res.is_ok();
     result.record(repo, step, res);
 

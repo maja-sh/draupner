@@ -87,7 +87,10 @@ fn up_runs_the_script_on_the_server_over_ssh() {
         .lines()
         .find(|l| l.contains("exec sh -c 'echo starting'"))
         .unwrap_or_else(|| panic!("up script not dispatched over ssh:\n{rec}"));
-    assert!(line.contains("cd ws/feat-foo/api &&"), "wrong server dir:\n{line}");
+    // Absolute, home-resolved server dir — a relative base leaves
+    // WS_WORKSPACE_ROOT relative and breaks `$WS_WORKSPACE_ROOT/…` in a hook.
+    assert!(line.contains("cd /home/test/ws/feat-foo/api &&"), "wrong server dir:\n{line}");
+    assert!(line.contains("WS_WORKSPACE_ROOT=/home/test/ws"), "WS_WORKSPACE_ROOT not absolute:\n{line}");
     assert!(line.contains("WS_REPO=api"), "missing WS_REPO:\n{line}");
     assert!(line.contains("WS_PORT_mysql="), "missing allocated port env:\n{line}");
 }
@@ -114,7 +117,7 @@ fn down_runs_the_script_on_the_server_over_ssh() {
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
-        rec.lines().any(|l| l.contains("cd ws/feat-foo/api &&")
+        rec.lines().any(|l| l.contains("cd /home/test/ws/feat-foo/api &&")
             && l.contains("exec sh -c 'echo stopping'")),
         "down script not dispatched over ssh:\n{rec}"
     );
