@@ -12,32 +12,33 @@ pub fn run(force: bool) -> Result<()> {
 
     crate::ui::header("ws-clean", if force { "--force" } else { "" });
 
-    let mut task_dirs = workspace::all_task_dirs(&ws.root);
-    task_dirs.sort();
+    // The audit runs over what **git** calls a worktree (the shared enumeration),
+    // grouped back into tasks. The filesystem residue git doesn't know about is a
+    // separate question, reported below rather than audited — `audit` asks git
+    // things (dirty? unmerged commits?) that a stray directory can't answer.
+    let known = workspace::worktrees(&ws.root, &cfg);
+    let mut by_task: std::collections::BTreeMap<String, Vec<(String, std::path::PathBuf)>> =
+        std::collections::BTreeMap::new();
+    for wt in &known {
+        let Some(task) = wt.task.as_deref() else { continue };
+        by_task.entry(task.to_string()).or_default().push((wt.repo.clone(), wt.path.clone()));
+    }
 
     let mut removed = 0usize;
     let mut removable = 0usize;
     let mut kept = 0usize;
 
-    for task_dir in &task_dirs {
+    for (task_name, worktrees) in &by_task {
         super::bail_if_interrupted()?;
+        let task_name = task_name.clone();
 
-        let task_name = match task_dir.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let worktrees = workspace::all_worktrees_for(&ws.root, &task_name);
-        if worktrees.is_empty() {
-            continue;
-        }
-
-        match audit(&worktrees, &task_name) {
+        match audit(worktrees, &task_name) {
             Verdict::Remove { branch, reason } => {
                 crate::ui::clean_verdict(&task_name, true, &reason, !force);
                 if force {
                     // Reuse the shared teardown. A hook failure here is reported
                     // by the step line; we don't abort the whole clean over it.
-                    let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, &worktrees)?;
+                    let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, worktrees)?;
                     removed += 1;
                 } else {
                     removable += 1;
@@ -50,8 +51,30 @@ pub fn run(force: bool) -> Result<()> {
         }
     }
 
+    // Directories under `.worktrees/` that git doesn't know as worktrees. Never
+    // removed — `ws` didn't necessarily put them there and can't judge what's in
+    // them — but always named, because the alternative is what they cost you
+    // otherwise: invisible to every op that reasons about worktrees, yet real
+    // enough on disk for a filesystem walk to pick up and act on.
+    let orphans = workspace::orphan_dirs(&ws.root, &known);
+    if !orphans.is_empty() {
+        crate::ui::note(&format!(
+            "{} director{} under .worktrees/ {} not registered with git — leftovers from an \
+             interrupted removal, or copied by hand. `ws` ignores them; remove by hand once \
+             you've checked them:",
+            orphans.len(),
+            if orphans.len() == 1 { "y" } else { "ies" },
+            if orphans.len() == 1 { "is" } else { "are" },
+        ));
+        crate::ui::command_block(
+            &orphans.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        );
+    }
+
     if removed + removable + kept == 0 {
-        crate::ui::clean_empty();
+        if orphans.is_empty() {
+            crate::ui::clean_empty();
+        }
         return Ok(());
     }
 

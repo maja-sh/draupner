@@ -1,7 +1,5 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::config;
@@ -25,83 +23,70 @@ pub fn run() -> Result<()> {
 
     crate::ui::header("ws-list", "");
 
-    let canonical_root = ws.root.canonicalize().unwrap_or_else(|_| ws.root.clone());
-    let worktrees_root = canonical_root.join(".worktrees");
-
     // Collected rows keyed by task dir name (managed) or "(unmanaged)".
     // Value carries each row plus its git branch so the group can label itself.
     let mut tasks: BTreeMap<String, Vec<(ListRow, Option<String>)>> = BTreeMap::new();
 
-    for repo_entry in &cfg.repos {
-        let repo = repo_entry.name();
-        let repo_path = ws.root.join(repo);
-        if !workspace::is_git_repo(&repo_path) {
-            continue;
-        }
-        let repo_canon = repo_path.canonicalize().unwrap_or_else(|_| repo_path.clone());
+    // One shared enumeration — the same one `remote set` and `clean` use, so the
+    // ops can never disagree about which worktrees exist.
+    for wt in workspace::worktrees(&ws.root, &cfg) {
+        let workspace::Worktree { repo, path: wt_path, branch, task } = wt;
+        let repo = repo.as_str();
+        let managed = task.is_some();
+        let task_key = task.unwrap_or_else(|| "(unmanaged)".to_string());
+        let dirty = git::is_dirty(&wt_path);
 
-        for (wt_path, branch) in git_worktrees(&repo_path) {
-            let wt_canon = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
-            // Skip the main checkout — it's not a task worktree.
-            if wt_canon == repo_canon {
-                continue;
-            }
-
-            let (task_key, managed) = classify(&wt_canon, &worktrees_root);
-            let dirty = git::is_dirty(&wt_path);
-
-            let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
-            let status = if !managed {
-                None
-            } else if let Some(r) = cfg.remote.as_ref() {
-                // Remote workspace: run the declared `status` script ON THE SERVER
-                // (a legacy `.ws-hooks` file lives on the host and can't). Skip when
-                // the server is unreachable (`site` didn't resolve to `Remote`) —
-                // status of the remote stack isn't knowable from here.
-                match site.as_ref() {
-                    Some(s @ crate::remote::Site::Remote { .. }) => {
-                        cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
-                            let extra_env = inject::prepare(
-                                &cfg, s, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
-                            )
-                            .unwrap_or_default();
-                            let base = s.abs_base(&r.worktree_base(&ws.root));
-                            crate::remote::capture_status(
-                                &r.connection, &base, &sanitized, repo, &extra_env, &cmd,
-                                STATUS_TIMEOUT.as_secs(),
-                            )
-                        })
-                    }
-                    _ => None,
+        let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
+        let status = if !managed {
+            None
+        } else if let Some(r) = cfg.remote.as_ref() {
+            // Remote workspace: run the declared `status` script ON THE SERVER
+            // (a legacy `.ws-hooks` file lives on the host and can't). Skip when
+            // the server is unreachable (`site` didn't resolve to `Remote`) —
+            // status of the remote stack isn't knowable from here.
+            match site.as_ref() {
+                Some(s @ crate::remote::Site::Remote { .. }) => {
+                    cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
+                        let extra_env = inject::prepare(
+                            &cfg, s, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
+                        )
+                        .unwrap_or_default();
+                        let base = s.abs_base(&r.worktree_base(&ws.root));
+                        crate::remote::capture_status(
+                            &r.connection, &base, &sanitized, repo, &extra_env, &cmd,
+                            STATUS_TIMEOUT.as_secs(),
+                        )
+                    })
                 }
-            } else {
-                // Local workspace: run the `status` hook/script locally (Inspect —
-                // no allocation/derive; the recorded ports come from `.ws-meta`).
-                hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
-                    let extra_env = inject::prepare(
-                        &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
-                        inject::Phase::Inspect,
-                    )
-                    .unwrap_or_default();
-                    hooks::capture_action(
-                        &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
-                        &extra_env,
-                    )
-                })
-            };
+                _ => None,
+            }
+        } else {
+            // Local workspace: run the `status` hook/script locally (Inspect —
+            // no allocation/derive; the recorded ports come from `.ws-meta`).
+            hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
+                let extra_env = inject::prepare(
+                    &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
+                    inject::Phase::Inspect,
+                )
+                .unwrap_or_default();
+                hooks::capture_action(
+                    &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
+                    &extra_env,
+                )
+            })
+        };
 
-            let note = if managed {
-                branch.is_none().then(|| "detached".to_string())
-            } else {
-                Some(match &branch {
-                    None => "unmanaged, detached".to_string(),
-                    Some(b) => format!("unmanaged, {b}"),
-                })
-            };
+        let note = if managed {
+            branch.is_none().then(|| "detached".to_string())
+        } else {
+            Some(match &branch {
+                None => "unmanaged, detached".to_string(),
+                Some(b) => format!("unmanaged, {b}"),
+            })
+        };
 
-            let row = ListRow { repo: repo.to_string(), dirty, status, note };
-            tasks.entry(task_key).or_default().push((row, branch));
-        }
+        let row = ListRow { repo: repo.to_string(), dirty, status, note };
+        tasks.entry(task_key).or_default().push((row, branch));
     }
 
     if tasks.is_empty() {
@@ -139,50 +124,4 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
         }
     }
     key.to_string()
-}
-
-/// Classify a worktree path. Returns `(task_key, managed)`. Managed worktrees
-/// live under `<root>/.worktrees/<task>/…`; anything else is "(unmanaged)".
-fn classify(wt_canon: &Path, worktrees_root: &Path) -> (String, bool) {
-    match workspace::task_repo_under(wt_canon, worktrees_root) {
-        Some((task, _)) => (task, true),
-        None => ("(unmanaged)".to_string(), false),
-    }
-}
-
-/// Parse `git worktree list --porcelain` into `(path, branch)` pairs. `branch`
-/// is `None` for a detached HEAD. The main checkout is included by git and
-/// filtered out by the caller.
-fn git_worktrees(repo: &Path) -> Vec<(PathBuf, Option<String>)> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "list", "--porcelain"])
-        .output();
-    let Ok(out) = out else { return Vec::new() };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-
-    let mut result = Vec::new();
-    let mut cur_path: Option<PathBuf> = None;
-    let mut cur_branch: Option<String> = None;
-    for line in text.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            // A new record begins — flush the previous one.
-            if let Some(path) = cur_path.take() {
-                result.push((path, cur_branch.take()));
-            }
-            cur_path = Some(PathBuf::from(p));
-            cur_branch = None;
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            cur_branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
-        }
-        // "detached", "bare", "HEAD …", "locked", "prunable" need no handling.
-    }
-    if let Some(path) = cur_path.take() {
-        result.push((path, cur_branch.take()));
-    }
-    result
 }
