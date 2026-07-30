@@ -107,11 +107,13 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
         return Ok(());
     };
 
-    let report = setup::probe(cfg.runtime(), domain, None);
+    // This is the *local* half of `ws remote check` — the site and the address are
+    // loopback by definition (the remote half has its own server-side probes).
+    let report = setup::probe(&crate::remote::Site::Local, cfg.runtime(), domain, "127.0.0.1", None);
     setup::render_report(&report, domain);
     if verbose {
         crate::ui::command_block(&[
-            format!("resolve a `*.{domain}` name → 127.0.0.1 (wildcard DNS)"),
+            format!("resolve a `*.{domain}` name → {} (wildcard DNS)", report.address),
             "TLS handshake to Caddy validates against the system trust store (CA)".to_string(),
         ]);
     }

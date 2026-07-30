@@ -5,9 +5,17 @@
 //!
 //! - **Rootless** (`ws-net`, the Caddy container): `ws` just does these — no
 //!   privilege, no prompt.
-//! - **Privileged** (wildcard DNS `*.<domain>` → loopback, trusting Caddy's root
-//!   CA, and — only if you opt into `:443` — the `ip_unprivileged_port_start`
-//!   sysctl): these are shown and consented, never silent.
+//! - **Privileged** (wildcard DNS `*.<domain>` → the routing address, trusting
+//!   Caddy's root CA, and — only if you opt into `:443` — the
+//!   `ip_unprivileged_port_start` sysctl): these are shown and consented, never
+//!   silent.
+//!
+//! Every step is parameterised by **where the routing data plane lives**: a
+//! `Site` (the local host, or the offload server over SSH) plus the address the
+//! *client* must reach it at. Locally that address is loopback; for a
+//! remote-offload workspace it's the server's routable address, and the client
+//! still needs both bits — DNS pointing at the server and the server's CA
+//! trusted — or the browser can't reach or trust a worktree URL.
 //!
 //! How the privileged bits are delivered differs by host, matching where each
 //! platform's setup is best expressed:
@@ -29,6 +37,8 @@
 
 use anyhow::{bail, Context, Result};
 use std::process::Command;
+
+use crate::remote::Site;
 
 /// The host platform `ws` is running on, deciding how privileged bits are
 /// delivered (macOS → interactive command-prompt; Linux → the setup script).
@@ -54,7 +64,13 @@ fn platform() -> Platform {
 pub struct Report {
     /// The HTTPS port Caddy is set to serve (8443 default, 443 opt-in).
     pub port: u16,
-    /// `*.<domain>` resolves to loopback (browser can find worktree hosts).
+    /// The address the client must resolve `*.<domain>` to and reach Caddy at —
+    /// loopback for a local workspace, the server's routable address when
+    /// offloading. Carried on the report so every rendered line, generated
+    /// command and probe agrees on one value.
+    pub address: String,
+    /// `*.<domain>` resolves to [`Report::address`] (browser can find worktree
+    /// hosts).
     pub dns_ok: bool,
     /// Caddy's internal root CA is trusted by the system store (no cert warning).
     pub ca_ok: bool,
@@ -75,7 +91,11 @@ impl Report {
 /// Render a probe report as readiness status lines — shared by `ws setup` and
 /// `ws remote check`'s local mode so the two never drift.
 pub fn render_report(report: &Report, domain: &str) {
-    crate::ui::status_line(report.dns_ok, "wildcard DNS", &format!("*.{domain} → 127.0.0.1"));
+    crate::ui::status_line(
+        report.dns_ok,
+        "wildcard DNS",
+        &format!("*.{domain} → {}", report.address),
+    );
     crate::ui::status_line(report.ca_ok, "CA trust", "Caddy root CA in the system store");
     if report.port < 1024 {
         crate::ui::status_line(
@@ -87,41 +107,52 @@ pub fn render_report(report: &Report, domain: &str) {
 }
 
 /// Probe the routing prerequisites without changing anything. Safe to call on
-/// any `ws up`. `known_dns` lets a caller that already resolved the wildcard
-/// (the `ws up` auto-offer learns it from `ensure_routing`) pass the answer in,
-/// so the hot path doesn't resolve DNS a second time; `None` resolves it here.
-/// The single owner of "what counts as ready" — the auto-offer and `ws setup`
-/// both read the resulting `Report`.
-pub fn probe(runtime: &str, domain: &str, known_dns: Option<bool>) -> Report {
-    // `ws setup` is a host-role command: it wires the *client's* DNS/CA/port, so
-    // it always probes the local site (remote setup is a later slice).
-    let site = crate::remote::Site::Local;
+/// any `ws up`. `site` is where Caddy runs and `address` is where the client
+/// reaches it (see [`Report::address`]) — for a local workspace those are the
+/// local host and loopback; for a remote one, the server and its routable
+/// address. `known_dns` lets a caller that already resolved the wildcard (the
+/// `ws up` auto-offer learns it from `ensure_routing`) pass the answer in, so the
+/// hot path doesn't resolve DNS a second time; `None` resolves it here. The
+/// single owner of "what counts as ready" — the auto-offer and `ws setup` both
+/// read the resulting `Report`.
+pub fn probe(
+    site: &Site,
+    runtime: &str,
+    domain: &str,
+    address: &str,
+    known_dns: Option<bool>,
+) -> Report {
     let port = crate::caddy::https_port();
     // CA trust only means something once Caddy is up to serve a cert to test.
-    let caddy_up = crate::caddy::is_running(&site, runtime);
+    let caddy_up = crate::caddy::is_running(site, runtime);
     Report {
         port,
-        dns_ok: known_dns.unwrap_or_else(|| crate::caddy::domain_resolves(&site, domain)),
-        ca_ok: caddy_up && ca_trusted(domain, port),
-        port_ok: crate::caddy::port_bindable(&site, port),
+        dns_ok: known_dns.unwrap_or_else(|| crate::caddy::domain_resolves(site, domain)),
+        ca_ok: caddy_up && ca_trusted(domain, port, address),
+        port_ok: crate::caddy::port_bindable(site, port),
+        address: address.to_string(),
     }
 }
 
 /// Whether the system trust store already trusts Caddy's internal root. Rather
 /// than extract the cert and compare fingerprints per-platform, ask the question
-/// that actually matters: does a TLS handshake to the local Caddy **validate**
-/// against the system store? `--resolve` avoids needing DNS; no `-k`, so curl
-/// validates the chain; on-demand TLS mints a leaf for the probe host signed by
-/// the internal root, so curl succeeds iff that root is trusted. Any HTTP status
-/// (even the 503 stopped-stack page) counts — only a cert error (curl 60) or an
-/// unreachable Caddy fails it.
-fn ca_trusted(domain: &str, port: u16) -> bool {
+/// that actually matters: does a TLS handshake to Caddy **validate** against the
+/// system store? `--resolve` pins the handshake at `address` so it needs no DNS;
+/// no `-k`, so curl validates the chain; on-demand TLS mints a leaf for the probe
+/// host signed by the internal root, so curl succeeds iff that root is trusted.
+/// Any HTTP status (even the 503 stopped-stack page) counts — only a cert error
+/// (curl 60) or an unreachable Caddy fails it.
+///
+/// The curl always runs **on the client**, even when Caddy is on the server:
+/// the question is whether *this* machine's trust store validates the chain.
+fn ca_trusted(domain: &str, port: u16, address: &str) -> bool {
     let host = format!("ws-ca-probe.{domain}");
     Command::new("curl")
-        // Short timeout: a real loopback handshake is milliseconds, and this runs
-        // on the `ws up` hot path — a wedged Caddy mustn't stall the up.
+        // Short timeout: a loopback handshake is milliseconds and a LAN/tailnet one
+        // barely more, and this runs on the `ws up` hot path — a wedged or
+        // unreachable Caddy mustn't stall the up.
         .args(["-sS", "-o", "/dev/null", "-m", "4", "--resolve"])
-        .arg(format!("{host}:{port}:127.0.0.1"))
+        .arg(format!("{host}:{port}:{address}"))
         .arg(format!("https://{host}:{port}"))
         .output()
         .map(|o| o.status.success())
@@ -135,9 +166,8 @@ struct Step {
     commands: Vec<String>,
 }
 
-/// Whether a domain is safe to interpolate into a shell command — the only
-/// externally-sourced value that reaches the generated setup commands. Hostnames
-/// are `[a-z0-9.-]`; anything else (spaces, shell metacharacters) is refused so a
+/// Whether a domain is safe to interpolate into a shell command — hostnames are
+/// `[a-z0-9.-]`; anything else (spaces, shell metacharacters) is refused so a
 /// hand-edited `.ws.json` can't smuggle a command into a consented `sudo` line.
 fn valid_domain(domain: &str) -> bool {
     !domain.is_empty()
@@ -145,14 +175,29 @@ fn valid_domain(domain: &str) -> bool {
         && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
-/// The macOS command to wire `*.<domain>` → 127.0.0.1: a dnsmasq wildcard plus a
-/// `/etc/resolver/<domain>` entry pointing the private TLD at it.
-fn dns_step_macos(domain: &str) -> Step {
+/// Whether a routing address is safe to interpolate into a shell command. The
+/// other externally-sourced value reaching a generated `sudo` line: it comes from
+/// `remote.publish_address` in a possibly-cloned `.ws.json`, or from `ssh -G`
+/// output. **Must parse as a literal IP** — dnsmasq's `address=/domain/<answer>`
+/// wants an address, not a name, so this is the real format requirement and not
+/// merely a safety net; an IP is also inert in a shell.
+fn valid_address(address: &str) -> bool {
+    address.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// The macOS command to wire `*.<domain>` → `address`: a dnsmasq wildcard plus a
+/// `/etc/resolver/<domain>` entry pointing the private TLD at it. `address` is the
+/// wildcard's *answer* (loopback locally, the offload server otherwise); the
+/// resolver entry always points at dnsmasq itself on loopback, which is what
+/// serves that answer.
+fn dns_step_macos(domain: &str, address: &str) -> Step {
     Step {
-        what: format!("resolve `*.{domain}` → 127.0.0.1 (dnsmasq + /etc/resolver)"),
+        what: format!("resolve `*.{domain}` → {address} (dnsmasq + /etc/resolver)"),
         commands: vec![
             "brew install dnsmasq".to_string(),
-            format!("echo 'address=/{domain}/127.0.0.1' >> \"$(brew --prefix)/etc/dnsmasq.conf\""),
+            format!(
+                "echo 'address=/{domain}/{address}' >> \"$(brew --prefix)/etc/dnsmasq.conf\""
+            ),
             "sudo brew services start dnsmasq".to_string(),
             "sudo mkdir -p /etc/resolver".to_string(),
             format!("echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{domain}"),
@@ -186,12 +231,21 @@ fn sh_quote(s: &str) -> String {
 /// gap per the host's delivery model. `port` (from `--port`) opts into a
 /// non-default HTTPS port (443 for clean URLs) and is persisted before Caddy is
 /// (re-)seeded so the change takes effect.
+///
+/// `site` is where the routing data plane lives and `address` is where the client
+/// reaches it. The **rootless Caddy spinup only happens for a local site** — an
+/// offload workspace's Caddy is the server's, provisioned by
+/// `server-setup/<distro>.sh`, and starting a second one on the client would be
+/// pointless (and could fight for `:443`). The privileged client-side bits (DNS,
+/// CA trust) run either way: they're what makes the server's routes reachable and
+/// trusted from *this* machine.
 pub fn run(
+    site: &Site,
     domain: Option<&str>,
     runtime: &str,
     yes: bool,
     port: Option<u16>,
-    publish_addr: &str,
+    address: &str,
 ) -> Result<()> {
     crate::ui::header("ws-setup", domain.unwrap_or("(no domain)"));
 
@@ -200,14 +254,23 @@ pub fn run(
         crate::ui::note(&format!("HTTPS port set to {p} (persisted)"));
     }
 
-    // Rootless bits — no privilege, no prompt. ensure_running also re-seeds Caddy
-    // if the port just changed.
-    let step = crate::ui::step("caddy", "rootless network + Caddy container");
-    match crate::caddy::ensure_running(&crate::remote::Site::Local, runtime, publish_addr) {
-        Ok(()) => step.ok(),
-        Err(e) => {
-            step.fail(&format!("{e}"));
-            return Err(crate::ops::op_failure(format!("rootless Caddy setup failed: {e:#}")));
+    if site.is_remote() {
+        crate::ui::note(&format!(
+            "this workspace offloads to {address} — Caddy runs there (provision it with \
+             `server-setup/<distro>.sh`, verify with `ws remote check`). Setting up this \
+             machine's DNS + CA trust so the routes are reachable from here."
+        ));
+    } else {
+        // Rootless bits — no privilege, no prompt. ensure_running also re-seeds Caddy
+        // if the port just changed.
+        let publish_addr = crate::caddy::publish_address(site, None);
+        let step = crate::ui::step("caddy", "rootless network + Caddy container");
+        match crate::caddy::ensure_running(site, runtime, &publish_addr) {
+            Ok(()) => step.ok(),
+            Err(e) => {
+                step.fail(&format!("{e}"));
+                return Err(crate::ops::op_failure(format!("rootless Caddy setup failed: {e:#}")));
+            }
         }
     }
 
@@ -223,8 +286,14 @@ pub fn run(
              (expected a hostname of [a-z0-9.-])"
         )));
     }
+    if !valid_address(address) {
+        return Err(crate::ops::op_failure(format!(
+            "refusing to build setup commands for `{address}` — the routing address must be \
+             a literal IP. Set `remote.publish_address` in .ws.json to the server's address."
+        )));
+    }
 
-    let report = probe(runtime, domain, None);
+    let report = probe(site, runtime, domain, address, None);
     let plat = platform();
 
     render_report(&report, domain);
@@ -239,31 +308,33 @@ pub fn run(
 
     // Deliver the gaps per host model.
     match plat {
-        Platform::MacOs => apply_macos_gaps(domain, &report, yes),
+        Platform::MacOs => apply_macos_gaps(site, domain, &report, yes),
         Platform::Linux => {
-            guide_linux_gaps(&report);
+            guide_linux_gaps(domain, &report);
             Ok(())
         }
         Platform::Other => {
-            crate::ui::note(
+            crate::ui::note(&format!(
                 "automated setup isn't available on this platform yet — wire \
-                 `*.<domain>` → 127.0.0.1 and trust Caddy's root CA manually.",
-            );
+                 `*.{domain}` → {address} and trust Caddy's root CA manually."
+            ));
             Ok(())
         }
     }
 }
 
 /// Walk the macOS privileged gaps interactively (or unattended with `--yes`).
-fn apply_macos_gaps(domain: &str, report: &Report, yes: bool) -> Result<()> {
+fn apply_macos_gaps(site: &Site, domain: &str, report: &Report, yes: bool) -> Result<()> {
     let mut steps: Vec<Step> = Vec::new();
     if !report.dns_ok {
-        steps.push(dns_step_macos(domain));
+        steps.push(dns_step_macos(domain, &report.address));
     }
     if !report.ca_ok {
         // Fetch + persist the root CA (to ws's own config dir, not $TMPDIR) so the
-        // trust command has a concrete, non-clobberable file to point at.
-        match crate::caddy::write_root_ca(&crate::remote::Site::Local) {
+        // trust command has a concrete, non-clobberable file to point at. Fetched
+        // from `site` — for an offload workspace that's the *server's* root, which
+        // is the one signing the leaves this client will see.
+        match crate::caddy::write_root_ca(site) {
             Ok(path) => steps.push(ca_step_macos(&path.to_string_lossy())),
             Err(e) => crate::ui::note(&format!(
                 "couldn't fetch Caddy's root CA to set up trust ({e:#}) — is Caddy running?"
@@ -338,23 +409,33 @@ fn run_commands(commands: &[String]) -> Result<()> {
 }
 
 /// On a Linux host the privileged bits live in the versioned setup script — point
-/// at it rather than driving `sudo` from `ws`.
-fn guide_linux_gaps(report: &Report) {
+/// at it rather than driving `sudo` from `ws`. The script's `--address` is exactly
+/// the report's address, so name it: on an offload client the default (loopback)
+/// would wire the wildcard to the wrong machine, and that's silent breakage.
+fn guide_linux_gaps(domain: &str, report: &Report) {
     let mut needs = Vec::new();
     if !report.dns_ok {
-        needs.push("wildcard DNS (*.<domain> → 127.0.0.1)");
+        needs.push(format!("wildcard DNS (*.{domain} → {})", report.address));
     }
     if !report.ca_ok {
-        needs.push("trust Caddy's root CA");
+        needs.push("trust Caddy's root CA".to_string());
     }
     if report.port < 1024 && !report.port_ok {
-        needs.push("allow rootless bind to the privileged port (sysctl)");
+        needs.push("allow rootless bind to the privileged port (sysctl)".to_string());
     }
     crate::ui::note(&format!("missing: {}", needs.join("; ")));
     crate::ui::nudge(
-        "run the setup script for your distro — `server-setup/debian.sh` \
-         (Debian/Ubuntu) — it applies the privileged bits transparently.",
+        "run the setup script for your distro — it applies the privileged bits transparently:",
     );
+    crate::ui::command_block(&[format!(
+        "server-setup/debian.sh {domain} --address {}{}",
+        report.address,
+        if report.port == crate::caddy::DEFAULT_HTTPS_PORT {
+            String::new()
+        } else {
+            format!(" --port {}", report.port)
+        }
+    )]);
 }
 
 /// The `:port` suffix a browser URL carries, empty for the standard `:443`.
@@ -382,10 +463,35 @@ mod tests {
 
     #[test]
     fn macos_dns_step_wires_the_wildcard_and_resolver() {
-        let step = dns_step_macos("myapp.test");
+        let step = dns_step_macos("myapp.test", "127.0.0.1");
         let joined = step.commands.join("\n");
         assert!(joined.contains("address=/myapp.test/127.0.0.1"), "{joined}");
         assert!(joined.contains("/etc/resolver/myapp.test"), "{joined}");
+    }
+
+    #[test]
+    fn macos_dns_step_points_the_wildcard_at_an_offload_server() {
+        // The whole point of piece B: for a remote workspace the wildcard must
+        // answer with the *server's* address, while the resolver entry still
+        // points at dnsmasq on loopback (dnsmasq is what serves that answer).
+        let step = dns_step_macos("myapp.test", "100.64.1.2");
+        let joined = step.commands.join("\n");
+        assert!(joined.contains("address=/myapp.test/100.64.1.2"), "{joined}");
+        assert!(!joined.contains("address=/myapp.test/127.0.0.1"), "{joined}");
+        assert!(joined.contains("nameserver 127.0.0.1"), "{joined}");
+    }
+
+    #[test]
+    fn valid_address_requires_a_literal_ip() {
+        assert!(valid_address("127.0.0.1"));
+        assert!(valid_address("100.64.1.2"));
+        assert!(valid_address("::1"));
+        // A name isn't a usable dnsmasq answer, however harmless it looks.
+        assert!(!valid_address("srv"));
+        assert!(!valid_address(""));
+        // And a shell metacharacter can never reach a consented `sudo` line.
+        assert!(!valid_address("127.0.0.1; rm -rf /"));
+        assert!(!valid_address("$(whoami)"));
     }
 
     #[test]
@@ -399,7 +505,13 @@ mod tests {
 
     #[test]
     fn privileged_gaps_ignores_the_rootless_caddy_bit() {
-        let mut r = Report { port: 8443, dns_ok: true, ca_ok: true, port_ok: true };
+        let mut r = Report {
+            port: 8443,
+            address: "127.0.0.1".to_string(),
+            dns_ok: true,
+            ca_ok: true,
+            port_ok: true,
+        };
         assert!(!r.privileged_gaps(), "caddy_up is rootless, not a privileged gap");
         r.dns_ok = false;
         assert!(r.privileged_gaps());

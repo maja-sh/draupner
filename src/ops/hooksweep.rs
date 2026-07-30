@@ -132,14 +132,25 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             };
             // Auto-offer setup when a privileged bit (DNS / CA trust / :443) is
             // missing — a non-mutating nudge to run `ws setup`. Skipped under an
-            // externally-managed Caddy (BYO / the test seam) and for a remote
-            // workspace: `ws setup` is host-role and its probe reports the *host's*
-            // DNS/CA, not the server's (remote setup is a later slice).
-            if !site.is_remote()
-                && !crate::caddy::externally_managed()
-                && crate::setup::probe(cfg.runtime(), domain, Some(dns_ok)).privileged_gaps()
-            {
-                crate::ui::nudge("`ws setup` — some routing setup (DNS / CA trust) is incomplete");
+            // externally-managed Caddy (BYO / the test seam).
+            //
+            // `ws setup` handles a remote workspace too (the client's DNS + the
+            // server's CA), but the full probe isn't worth its cost on the remote
+            // up path: it would need the server address resolved and its CA check
+            // dials the server. `dns_ok` is already in hand for free and is the bit
+            // that usually isn't wired, so remote nudges on that alone.
+            if !crate::caddy::externally_managed() {
+                let incomplete = if site.is_remote() {
+                    !dns_ok
+                } else {
+                    crate::setup::probe(&site, cfg.runtime(), domain, "127.0.0.1", Some(dns_ok))
+                        .privileged_gaps()
+                };
+                if incomplete {
+                    crate::ui::nudge(
+                        "`ws setup` — some routing setup (DNS / CA trust) is incomplete",
+                    );
+                }
             }
         }
     }
