@@ -164,7 +164,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        let Some(action) = hooks::resolve(&cfg, &ws.root, repo, event) else {
+        let Some(action) = hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt)) else {
             crate::ui::skip(repo, &format!("no {event} hook"));
             result.skipped.push(repo.clone());
             continue;
@@ -223,7 +223,7 @@ fn sweep_container_remote(
     phase: inject::Phase,
     result: &mut SweepResult,
 ) {
-    let Some(cmd) = cfg.script_command(repo, event) else {
+    let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
         crate::ui::skip(repo, &format!("no {event} script"));
         result.skipped.push(repo.to_string());
         return;

@@ -30,23 +30,34 @@ pub enum Action<'a> {
     Script(&'a Script),
     /// Path to the hook file, relative to the workspace root.
     File(String),
+    /// A `ws`-synthesized container default (see `config::default_script`) — no
+    /// declared script, no hook file. Runs exactly like a declared one-liner.
+    Command(String),
 }
 
 /// Resolve the action for `event`: declared `scripts` win; else a `.ws-hooks/`
-/// file (via `lookup`). `None` when neither exists — the caller treats that as
+/// file (via `lookup`); else, for a container repo, the compose default (see
+/// `config::default_script`). `None` when none apply — the caller treats that as
 /// a dim skip.
 pub fn resolve<'a>(
     cfg: &'a WsConfig,
     workspace_root: &Path,
     repo: &str,
     event: &str,
+    is_container: bool,
 ) -> Option<Action<'a>> {
     let rc = cfg.repo_config(repo);
     if let Some(s) = rc.and_then(|c| c.scripts.get(event)) {
         return Some(Action::Script(s));
     }
     let override_path = rc.and_then(|c| c.hooks.get(event).map(String::as_str));
-    lookup(workspace_root, repo, event, override_path).map(Action::File)
+    if let Some(f) = lookup(workspace_root, repo, event, override_path) {
+        return Some(Action::File(f));
+    }
+    is_container
+        .then(|| crate::config::default_script(cfg.runtime(), event))
+        .flatten()
+        .map(Action::Command)
 }
 
 /// Find a legacy hook file for the given repo and event. Returns the relative
@@ -178,6 +189,9 @@ pub fn run_action(
         Action::File(rel) => {
             run(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
         }
+        Action::Command(cmd) => run_one(
+            workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
+        ),
     }
 }
 
@@ -196,8 +210,23 @@ fn run_script(
     extra_env: &[(String, String)],
 ) -> Result<()> {
     let joined = script.commands().join(" && ");
+    run_one(workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env)
+}
+
+/// Run one already-joined shell command in the worktree, streaming its output.
+/// Shared by a declared `scripts` entry and a synthesized container default.
+#[allow(clippy::too_many_arguments)]
+fn run_one(
+    workspace_root: &Path,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    cmd: &str,
+    extra_env: &[(String, String)],
+) -> Result<()> {
     let mut c = script_command(
-        workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
+        workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
     );
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = c.spawn().with_context(|| format!("spawn `sh -c` for {event} script"))?;
@@ -283,6 +312,9 @@ pub fn capture_action(
             }
             file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
         }
+        Action::Command(cmd) => script_command(
+            workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
+        ),
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     capture_child(cmd.spawn().ok()?, timeout)
