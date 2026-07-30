@@ -9,8 +9,9 @@
 //! file either locally or on the server, so the stack subsystems (`caddy`,
 //! `compose`, `ports`) are written once and work in both places.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Where a workspace's stack runs, and thus where `ws` drives podman, Caddy,
@@ -324,6 +325,40 @@ fn resolve_to_ip(host: &str) -> Option<String> {
     let addrs: Vec<_> = (host, 22u16).to_socket_addrs().ok()?.collect();
     let pick = addrs.iter().find(|a| a.is_ipv4()).or_else(|| addrs.first())?;
     Some(pick.ip().to_string())
+}
+
+/// Push the workspace-root `.ws-hooks/` to the server so a hook running there can
+/// reference `$WS_WORKSPACE_ROOT/.ws-hooks/…` — the lane for shared, repo-invisible
+/// hook scripts (a db-seed `up.sh`) that live *outside* the managed repos and
+/// therefore never reach the server via the worktree sync.
+///
+/// One-way (client → server), whole-directory, **mode bits preserved** so an
+/// executable script stays executable. Implemented as a `tar | ssh 'tar -x'` pipe:
+/// portable, atomic-per-file, and it keeps the `+x` a `sh -c "<path>"` invocation
+/// relies on. No-op for a local site or an absent `.ws-hooks/`. `base` is the
+/// absolute server worktree base (= `WS_WORKSPACE_ROOT` on the server), so the
+/// directory lands at `<base>/.ws-hooks/`.
+pub fn push_ws_hooks(site: &Site, ws_root: &Path, base: &str) -> Result<()> {
+    let Site::Remote { connection, .. } = site else { return Ok(()) };
+    if !ws_root.join(".ws-hooks").is_dir() {
+        return Ok(());
+    }
+    let mut tar = Command::new("tar")
+        .args(["-C", &ws_root.to_string_lossy(), "-cf", "-", ".ws-hooks"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn tar for the .ws-hooks push")?;
+    let archive = tar.stdout.take().expect("tar stdout was piped");
+    let remote = format!("mkdir -p {b} && tar -C {b} -xpf -", b = shell_quote(base));
+    let status = ssh_command(connection, &remote, false)
+        .stdin(Stdio::from(archive))
+        .status()
+        .context("ssh for the .ws-hooks push")?;
+    let _ = tar.wait();
+    if !status.success() {
+        bail!("couldn't push .ws-hooks to {connection} (see the tar/ssh output above)");
+    }
+    Ok(())
 }
 
 /// Run a **read-only** `script` on `connection` over SSH and capture stdout.

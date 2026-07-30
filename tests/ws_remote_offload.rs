@@ -238,3 +238,36 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(rec.contains("exec sh -c 'echo starting'"), "up must dispatch over ssh:\n{rec}");
 }
+
+#[test]
+fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
+    // A workspace-root `.ws-hooks/` script lives OUTSIDE the repos, so it can't
+    // ride the worktree sync — `ws` pushes the dir to the server so a hook can
+    // reference `$WS_WORKSPACE_ROOT/.ws-hooks/…` there.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(remote_container_ws());
+    std::fs::create_dir_all(f.path().join(".ws-hooks")).unwrap();
+    std::fs::write(f.path().join(".ws-hooks/up.sh"), "#!/usr/bin/env bash\necho hi\n").unwrap();
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    let args = f.path().join("up-ssh.txt");
+    let out = f.run_with_env(
+        &["up", "feat/foo"],
+        &[
+            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+
+    // The push is `ssh <conn> 'mkdir -p <base> && tar -C <base> -xpf -'`.
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    assert!(
+        rec.lines().any(|l| l.contains("tar -C /home/test/ws -xpf -")),
+        "expected a .ws-hooks push (tar extract) over ssh:\n{rec}"
+    );
+}
