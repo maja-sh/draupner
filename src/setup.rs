@@ -190,14 +190,25 @@ fn valid_address(address: &str) -> bool {
 /// wildcard's *answer* (loopback locally, the offload server otherwise); the
 /// resolver entry always points at dnsmasq itself on loopback, which is what
 /// serves that answer.
+///
+/// The wildcard is **replaced, not appended**. A plain `>>` is wrong whenever a
+/// line for this domain already exists — flipping a workspace local↔remote, or
+/// changing `remote.publish_address`, is precisely when you re-run this — and
+/// dnsmasq answers with *every* matching `address=` line, so a stale loopback
+/// entry alongside the new one means the browser can still be handed 127.0.0.1
+/// and fail. `sed -i.ws-bak` takes its suffix attached, which is the form both
+/// BSD (macOS) and GNU sed accept, and leaves the prior file recoverable.
 fn dns_step_macos(domain: &str, address: &str) -> Step {
+    let conf = "\"$(brew --prefix)/etc/dnsmasq.conf\"";
+    // Dots are regex metacharacters; the domain is `[a-z0-9.-]`-validated, so
+    // escaping them is the only quoting the pattern needs.
+    let pattern = domain.replace('.', "\\.");
     Step {
         what: format!("resolve `*.{domain}` → {address} (dnsmasq + /etc/resolver)"),
         commands: vec![
             "brew install dnsmasq".to_string(),
-            format!(
-                "echo 'address=/{domain}/{address}' >> \"$(brew --prefix)/etc/dnsmasq.conf\""
-            ),
+            format!("sed -i.ws-bak '/^address=\\/{pattern}\\//d' {conf}"),
+            format!("echo 'address=/{domain}/{address}' >> {conf}"),
             "sudo brew services start dnsmasq".to_string(),
             "sudo mkdir -p /etc/resolver".to_string(),
             format!("echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/{domain}"),
@@ -233,12 +244,17 @@ fn sh_quote(s: &str) -> String {
 /// (re-)seeded so the change takes effect.
 ///
 /// `site` is where the routing data plane lives and `address` is where the client
-/// reaches it. The **rootless Caddy spinup only happens for a local site** — an
-/// offload workspace's Caddy is the server's, provisioned by
-/// `server-setup/<distro>.sh`, and starting a second one on the client would be
-/// pointless (and could fight for `:443`). The privileged client-side bits (DNS,
-/// CA trust) run either way: they're what makes the server's routes reachable and
-/// trusted from *this* machine.
+/// reaches it. The rootless Caddy is ensured **at the site** — locally for a local
+/// workspace, on the server over SSH for an offload one. It is `ws`-owned state in
+/// both cases (nothing in `server-setup/<distro>.sh` starts it), and readying it is
+/// exactly this command's job: without it the CA fetch below has nothing to fetch
+/// from, and `ws remote check` reports a failure only `ws up` could clear.
+///
+/// What is *not* done for a remote workspace is starting a **second, local** Caddy:
+/// that one really would be pointless, and it could fight for `:443`.
+///
+/// The privileged client-side bits (DNS, CA trust) run either way — they're what
+/// makes the server's routes reachable and trusted from *this* machine.
 pub fn run(
     site: &Site,
     domain: Option<&str>,
@@ -246,6 +262,7 @@ pub fn run(
     yes: bool,
     port: Option<u16>,
     address: &str,
+    publish_addr: &str,
 ) -> Result<()> {
     crate::ui::header("ws-setup", domain.unwrap_or("(no domain)"));
 
@@ -256,21 +273,26 @@ pub fn run(
 
     if site.is_remote() {
         crate::ui::note(&format!(
-            "this workspace offloads to {address} — Caddy runs there (provision it with \
-             `server-setup/<distro>.sh`, verify with `ws remote check`). Setting up this \
+            "this workspace offloads to {address} — readying Caddy there, then this \
              machine's DNS + CA trust so the routes are reachable from here."
         ));
-    } else {
-        // Rootless bits — no privilege, no prompt. ensure_running also re-seeds Caddy
-        // if the port just changed.
-        let publish_addr = crate::caddy::publish_address(site, None);
-        let step = crate::ui::step("caddy", "rootless network + Caddy container");
-        match crate::caddy::ensure_running(site, runtime, &publish_addr) {
-            Ok(()) => step.ok(),
-            Err(e) => {
-                step.fail(&format!("{e}"));
-                return Err(crate::ops::op_failure(format!("rootless Caddy setup failed: {e:#}")));
-            }
+    }
+
+    // Rootless bits — no privilege, no prompt — at whichever site routing lives.
+    // ensure_running also re-seeds Caddy if the port just changed.
+    let step = crate::ui::step(
+        "caddy",
+        if site.is_remote() {
+            "network + Caddy container on the server"
+        } else {
+            "rootless network + Caddy container"
+        },
+    );
+    match crate::caddy::ensure_running(site, runtime, publish_addr) {
+        Ok(()) => step.ok(),
+        Err(e) => {
+            step.fail(&format!("{e}"));
+            return Err(crate::ops::op_failure(format!("Caddy setup failed: {e:#}")));
         }
     }
 
@@ -479,6 +501,22 @@ mod tests {
         assert!(joined.contains("address=/myapp.test/100.64.1.2"), "{joined}");
         assert!(!joined.contains("address=/myapp.test/127.0.0.1"), "{joined}");
         assert!(joined.contains("nameserver 127.0.0.1"), "{joined}");
+    }
+
+    #[test]
+    fn macos_dns_step_replaces_an_existing_wildcard_instead_of_stacking_one() {
+        // Re-running setup (a local↔remote flip, or a changed publish_address) must
+        // not leave two `address=` lines for one domain: dnsmasq answers with both,
+        // so a stale loopback entry would keep winning half the time.
+        let step = dns_step_macos("myapp.test", "100.64.1.2");
+        let joined = step.commands.join("\n");
+        assert!(joined.contains("sed -i.ws-bak"), "must delete before appending: {joined}");
+        // The delete pattern is anchored and dot-escaped, so `myapp.test` can't
+        // also match `myappXtest` or a domain that merely contains it.
+        assert!(joined.contains(r"/^address=\/myapp\.test\//d"), "{joined}");
+        let del = joined.find("sed -i.ws-bak").unwrap();
+        let add = joined.find("echo 'address=/myapp.test/100.64.1.2'").unwrap();
+        assert!(del < add, "the delete must precede the append: {joined}");
     }
 
     #[test]

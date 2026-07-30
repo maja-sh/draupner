@@ -16,7 +16,12 @@ pub fn run(yes: bool, port: Option<u16>) -> Result<()> {
     let cfg = crate::config::load(&ws.root)?;
     let site = crate::remote::Site::resolve(&cfg)?;
     let address = routing_address(&cfg)?;
-    crate::setup::run(&site, cfg.domain.as_deref(), cfg.runtime(), yes, port, &address)
+    // Where Caddy *binds* at its site — distinct from `address`, which is where
+    // this machine dials it. They coincide locally (both loopback) and diverge on
+    // a server (bind all interfaces, dial its routable address).
+    let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
+    let publish = crate::caddy::publish_address(&site, configured);
+    crate::setup::run(&site, cfg.domain.as_deref(), cfg.runtime(), yes, port, &address, &publish)
 }
 
 /// The address this machine must reach the routing Caddy at.
