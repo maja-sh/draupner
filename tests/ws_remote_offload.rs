@@ -270,4 +270,11 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
         rec.lines().any(|l| l.contains("tar -C /home/test/ws") && l.contains("-xpf -")),
         "expected a .ws-hooks push (tar extract) over ssh:\n{rec}"
     );
+    // …and repairs the executable bit on shebang files. `-xpf` preserves the mode,
+    // so a hook the client rewrote as 644 would otherwise land unrunnable and fail
+    // at hook time with a bare `Permission denied` (exit 126).
+    assert!(
+        rec.lines().any(|l| l.contains("chmod +x") && l.contains("#!")),
+        "expected the push to restore +x on shebang scripts:\n{rec}"
+    );
 }
