@@ -113,9 +113,13 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             // serves every worktree to the internet, and nothing else here would
             // tell you that.
             if site.is_remote() && configured.is_none() {
+                // Name the subject and the consequence. The old wording led with a
+                // bare verb ("publishing on all interfaces") that never said what
+                // was publishing or what it cost, so it read as a config nag rather
+                // than the exposure notice it is.
                 crate::ui::note(
-                    "publishing on all interfaces — set `remote.publish_address` in .ws.json \
-                     to pin it to the server's tailnet/LAN address",
+                    "server Caddy binds every interface — worktree HTTP is exposed on all of \
+                     the server's networks; pin one with `remote.publish_address` in .ws.json",
                 );
             }
             let dns_ok = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
@@ -397,16 +401,24 @@ fn sync_forwards(
     event: &str,
 ) {
     let Some(r) = cfg.remote.as_ref() else { return };
+    // Successes collapse into one line. A stack with a dozen services produced a
+    // dozen near-identical notes that buried everything else in the sweep, and the
+    // interesting part of each was two words wide. Failures keep their own line:
+    // they're rare, individually actionable, and carry an error to read.
+    let mut forwarded: Vec<String> = Vec::new();
     for (svc, port) in crate::ports::load(root, sanitized, repo) {
         let session = crate::mutagen::forward_session_name(branch, repo, port);
         if event == "down" {
             let _ = crate::mutagen::forward_terminate(&session);
         } else {
             match crate::mutagen::forward_create(&session, &r.connection, port) {
-                Ok(()) => crate::ui::note(&format!("{svc}: reachable at localhost:{port}")),
+                Ok(()) => forwarded.push(format!("{svc}:{port}")),
                 Err(e) => crate::ui::note(&format!("{svc}: forward localhost:{port} failed: {e}")),
             }
         }
+    }
+    if !forwarded.is_empty() {
+        crate::ui::note(&format!("forwarded to localhost — {}", forwarded.join("  ")));
     }
 }
 
