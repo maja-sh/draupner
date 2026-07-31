@@ -557,4 +557,9 @@ podman_socket
 # stacks, and on a dedicated one `ws` isn't installed — the client drives it over
 # SSH. `ws remote check` is the right call from wherever `ws` lives, reporting on
 # the server when a `remote` block exists and on the local host otherwise.
-say "Done. Re-check from the machine running \`ws\`: \`ws remote check\`."
+#
+# Say that `ws` may not be here, without claiming to know. Phrasing this as a bare
+# "re-check from the machine running ws" reads, to someone sitting on the server
+# that just printed it, as an instruction to run a command that isn't installed.
+say "Done. Re-check with \`ws remote check\`, run from wherever you use \`ws\`"
+say "— on a dedicated offload box that's your client machine, not this one."
