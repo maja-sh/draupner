@@ -163,7 +163,7 @@ fn remote_workspace_dispatches_over_ssh() {
     assert_eq!(
         lines[lines.len() - 1],
         "cd workspace/feat-foo/api && WS_REPO=api WS_BRANCH_SANITIZED=feat-foo \
-         WS_RUNTIME=podman WS_REMOTE=1 exec php artisan migrate",
+         WS_RUNTIME=podman WS_REMOTE=1 WS_CONNECTION=srv exec php artisan migrate",
         "remote script cds, exports WS_* (incl. runtime + remoteness), and execs the command"
     );
     // The command must NOT have run locally.

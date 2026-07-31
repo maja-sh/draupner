@@ -196,14 +196,30 @@ pub fn prepare(
     Ok(env)
 }
 
-/// The workspace-context env pairs (`WS_RUNTIME`, `WS_REMOTE`) every hook sees.
-/// `WS_REMOTE` reflects whether the *workspace* offloads (`cfg.remote`), not the
-/// site a given call runs against, so a hook reads one consistent answer wherever
-/// it executes. `1`/`0` for shell-friendly `[ "$WS_REMOTE" = 1 ]` tests.
+/// The workspace-context env pairs (`WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`)
+/// every hook sees. `WS_REMOTE` reflects whether the *workspace* offloads
+/// (`cfg.remote`), not the site a given call runs against, so a hook reads one
+/// consistent answer wherever it executes. `1`/`0` for shell-friendly
+/// `[ "$WS_REMOTE" = 1 ]` tests.
+///
+/// `WS_CONNECTION` is the SSH destination, empty for a local workspace. Without
+/// it a **client-side** hook knows it is offloading but not to where, so it
+/// cannot reach the server without the user hardcoding a hostname into a script
+/// that `.ws.json` already names. That closes the loop on client-side state the
+/// server needs but no repo contains — a dev CA, a registry token, an auth.json:
+/// `prepare` runs on the client before every `up`, and can now push it.
+///
+/// Derived from config rather than declared, and deliberately not named
+/// `WS_REMOTE_HOST` — that is an *input* override `ws` itself reads, and a hook
+/// inheriting it would silently re-target a nested `ws` call.
 fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     vec![
         ("WS_RUNTIME".to_string(), cfg.runtime().to_string()),
         ("WS_REMOTE".to_string(), if cfg.remote.is_some() { "1" } else { "0" }.to_string()),
+        (
+            "WS_CONNECTION".to_string(),
+            cfg.remote.as_ref().map(|r| r.connection.clone()).unwrap_or_default(),
+        ),
     ]
 }
 
@@ -613,6 +629,8 @@ mod tests {
         let ctx = workspace_context(&local);
         assert!(ctx.contains(&("WS_RUNTIME".to_string(), "podman".to_string())), "{ctx:?}");
         assert!(ctx.contains(&("WS_REMOTE".to_string(), "0".to_string())), "{ctx:?}");
+        // Always present, so a hook can test it without an unset-variable guard.
+        assert!(ctx.contains(&("WS_CONNECTION".to_string(), String::new())), "{ctx:?}");
 
         // Explicit runtime + a remote block flips both.
         let remote = WsConfig {
@@ -623,6 +641,8 @@ mod tests {
         let ctx = workspace_context(&remote);
         assert!(ctx.contains(&("WS_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
         assert!(ctx.contains(&("WS_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
+        // The destination, so a client-side `prepare` can actually reach the server.
+        assert!(ctx.contains(&("WS_CONNECTION".to_string(), "srv".to_string())), "{ctx:?}");
     }
 
     #[test]
