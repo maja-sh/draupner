@@ -207,6 +207,13 @@ const SSH_MUX_OPTS: &[&str] = &[
     "-o", "ControlMaster=auto",
     "-o", "ControlPath=~/.ssh/ws-cm-%C",
     "-o", "ControlPersist=30",
+    // Multiplexing's own parting words. Every `ws exec` ended with `Shared
+    // connection to <host> closed.` on stderr — ssh narrating its bookkeeping over
+    // the output of the command the user actually ran. It is logged at INFO, so
+    // raising the floor to ERROR drops it while leaving anything worth acting on:
+    // verified by hand that `Host key verification failed.` and `connect to host …
+    // Connection timed out` both still surface at this level.
+    "-o", "LogLevel=ERROR",
 ];
 
 /// An `ssh` command to `connection` with the non-interactive fail-fast options
