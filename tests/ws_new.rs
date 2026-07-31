@@ -30,6 +30,13 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
     assert!(rec.contains("ws-feat-foo-api"), "expected the session name:\n{rec}");
     assert!(rec.contains("--ignore-vcs"), "expected --ignore-vcs:\n{rec}");
+    // Mutagen defaults to 0600/0700, which is owner-only — and the owner maps to
+    // root in a rootless container, so a service running as www-data can't read
+    // the code. Without these the synced tree is unservable.
+    assert!(
+        rec.contains("--default-file-mode=0644") && rec.contains("--default-directory-mode=0755"),
+        "synced tree must be readable by a container's non-root service user:\n{rec}"
+    );
     assert!(
         rec.contains("srv:workspace/feat-foo/api"),
         "expected the scp-style beta endpoint:\n{rec}"

@@ -213,6 +213,23 @@ pub fn create(
     let beta = beta_endpoint(connection, remote_path);
     let mut cmd = Command::new(mutagen_bin());
     cmd.args(["sync", "create", "--name", session, "--ignore-vcs"]);
+    // Mutagen's portable permission mode propagates only the executable bit and
+    // creates everything else at its defaults, 0600/0700 — owner-only. The owner
+    // is the SSH user, which a rootless container maps to root, so a service
+    // running as a non-root user (php-fpm's pool as www-data, nginx as nginx, any
+    // correctly-configured image) cannot read the code it was pointed at. The
+    // symptom is remote: php-fpm reports `File not found.` for a file that is
+    // plainly there, because the *directories* above it aren't traversable.
+    //
+    // 0644/0755 is what a plain `git checkout` produces, so this makes the synced
+    // tree look like the one the same stack reads happily when it runs locally.
+    // It does mean `copy`-seeded secrets land group/other-readable on the server —
+    // the same exposure as any checkout of the repo on that box, and the
+    // alternative is a stack that cannot serve.
+    cmd.args([
+        "--default-file-mode=0644",
+        "--default-directory-mode=0755",
+    ]);
     for ig in ignores {
         cmd.arg(format!("--ignore={ig}"));
     }
