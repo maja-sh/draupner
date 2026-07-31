@@ -390,12 +390,60 @@ pub fn value(text: &str) {
 /// A single dim, subordinate line to stderr. Used by `ws exec` to note where a
 /// command is being dispatched (e.g. the remote host) without polluting the
 /// command's own stdout.
+///
+/// Indented to the repo column (2), like `step` and `warn`. Column 0 belongs to
+/// op-level lines — the header and the closing summary — and a note printed
+/// there read as a peer of the operation itself rather than a detail of it,
+/// leaving a long one flush against the edge while everything around it was
+/// inset.
 pub fn note(text: &str) {
     if tty() {
-        eprintln!("{}", style(text).dim());
+        eprintln!("  {}", style(text).dim());
     } else {
-        eprintln!("{text}");
+        eprintln!("  {text}");
     }
+}
+
+/// A titled, column-aligned detail block: a dim title at the repo column and
+/// `key   value` rows inset under it.
+///
+/// For a set of related facts that would otherwise be N repetitive `note` lines
+/// — the per-service port forwards, where every line shared a prefix and the
+/// distinguishing part was two words wide. One line per fact is right; N
+/// unaligned sentences are not. Padding is applied to the raw key before
+/// styling, since ANSI escapes would otherwise be counted in the field width.
+pub fn table(title: &str, rows: &[(String, String)]) {
+    if rows.is_empty() {
+        return;
+    }
+    let w = key_width(rows);
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("  {}", style(title).dim());
+            for (k, v) in rows {
+                eprintln!("    {}  {}", style(pad_key(k, w)).dim(), style(v).dim().bold());
+            }
+        } else {
+            eprintln!("  {title}");
+            for (k, v) in rows {
+                eprintln!("    {}  {}", pad_key(k, w), v);
+            }
+        }
+    });
+}
+
+/// Width of a table's key column: the widest key, counted in `chars` so a
+/// multi-byte service name doesn't over-pad.
+fn key_width(rows: &[(String, String)]) -> usize {
+    rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0)
+}
+
+/// Pad a key to the column width. Applied to the raw string, never a styled
+/// one — `style()` emits ANSI escapes that a width specifier would count as
+/// visible characters, so every coloured row would pad short by the escape
+/// length and the value column would ragged out.
+fn pad_key(k: &str, w: usize) -> String {
+    format!("{k:<w$}")
 }
 
 pub fn nudge(text: &str) {
@@ -521,6 +569,26 @@ mod tests {
     fn strip_control_removes_csi() {
         assert_eq!(strip_control("\x1b[2Jclean"), "clean");
         assert_eq!(strip_control("red\x1b[31mgreen\x1b[0m"), "redgreen");
+    }
+
+    #[test]
+    fn table_values_all_start_in_the_same_column() {
+        // The point of the block over N notes is that the values line up, so
+        // assert the column rather than eyeballing a sample render.
+        let rows: Vec<(String, String)> = [("db", "localhost:20000"), ("elasticsearch", "localhost:20002")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let w = key_width(&rows);
+        assert_eq!(w, "elasticsearch".len());
+
+        let cols: Vec<usize> = rows
+            .iter()
+            .map(|(k, v)| format!("    {}  {}", pad_key(k, w), v).find("localhost").unwrap())
+            .collect();
+        assert_eq!(cols[0], cols[1], "value column must not depend on key length");
+        // The widest key is padded to exactly itself — no trailing filler.
+        assert_eq!(pad_key("elasticsearch", w), "elasticsearch");
     }
 
     #[test]

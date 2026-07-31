@@ -401,25 +401,25 @@ fn sync_forwards(
     event: &str,
 ) {
     let Some(r) = cfg.remote.as_ref() else { return };
-    // Successes collapse into one line. A stack with a dozen services produced a
+    // Successes become one aligned block. A stack with a dozen services produced a
     // dozen near-identical notes that buried everything else in the sweep, and the
     // interesting part of each was two words wide. Failures keep their own line:
     // they're rare, individually actionable, and carry an error to read.
-    let mut forwarded: Vec<String> = Vec::new();
+    let mut forwarded: Vec<(String, String)> = Vec::new();
     for (svc, port) in crate::ports::load(root, sanitized, repo) {
         let session = crate::mutagen::forward_session_name(branch, repo, port);
         if event == "down" {
             let _ = crate::mutagen::forward_terminate(&session);
         } else {
             match crate::mutagen::forward_create(&session, &r.connection, port) {
-                Ok(()) => forwarded.push(format!("{svc}:{port}")),
+                // The value is the full dial string, not a bare port, so it can be
+                // pasted straight into a client.
+                Ok(()) => forwarded.push((svc, format!("localhost:{port}"))),
                 Err(e) => crate::ui::note(&format!("{svc}: forward localhost:{port} failed: {e}")),
             }
         }
     }
-    if !forwarded.is_empty() {
-        crate::ui::note(&format!("forwarded to localhost — {}", forwarded.join("  ")));
-    }
+    crate::ui::table("port forwards", &forwarded);
 }
 
 /// Handle one host repo in a sweep. `up` starts its declared `up` script as a
