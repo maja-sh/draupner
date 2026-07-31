@@ -10,8 +10,11 @@
 //! `compose`, `ports`) are written once and work in both places.
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use std::process::{Command, Stdio};
 
 /// Where a workspace's stack runs, and thus where `ws` drives podman, Caddy,
@@ -404,6 +407,107 @@ pub fn ssh_capture(connection: &str, script: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Marks where the probe's own output begins. An interactive rc is entitled to
+/// print (prompt frameworks, `nvm use` chatter, MOTD-alikes), so the reply is
+/// only trusted after this line.
+const PROBE_SENTINEL: &str = "__WS_PATH_PROBE__";
+
+/// How long the login shell gets. A misbehaving rc that blocks forever must
+/// degrade to "no harvested PATH", never hang the op.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Cached per connection: harvesting is worth ~1s of interactive-rc evaluation,
+/// and a single `ws up` dispatches several hooks. Held in-process only — a run
+/// never sees a stale value, so there is no invalidation problem to get wrong.
+static LOGIN_PATH: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+
+/// The `PATH` a hook would see if the user ran it in their own terminal on
+/// `connection`, or `None` when it can't be determined.
+///
+/// A `kind: host` repo gets its toolchain from the user's shell environment,
+/// but `ws` dispatches hooks over non-interactive SSH as `sh -c`, where none of
+/// it exists — so `npm ci` in a hook fails with `npm: not found` on a server
+/// where `npm` is plainly present. Version managers (nvm, asdf, pyenv, mise,
+/// volta) are shell-function shims installed by rc files, so no amount of
+/// detection in `ws` would find them: the only thing that knows is the user's
+/// shell. We ask it, rather than guessing.
+///
+/// **Interactive**, not login: nvm's own installer appends to `.zshrc`/`.bashrc`,
+/// which a login shell does not source — `-l` misses the common case entirely.
+///
+/// Only `PATH` is taken. A full env delta would import the probe shell's
+/// `SSH_AUTH_SOCK` over the forwarded agent's, breaking any hook that
+/// authenticates (a private-repo `composer install`), plus session-owned noise
+/// like `TERM`/`PWD`/`SHLVL`. `PATH` is where the toolchain actually lives.
+///
+/// Known limit: `nvm` *the command* still won't resolve in a hook. It is a shell
+/// function, and functions don't survive an environment. The binaries it puts on
+/// `PATH` — `node`, `npm`, and every shim-based manager — do.
+pub fn login_path(connection: &str) -> Option<String> {
+    let cache = LOGIN_PATH.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(connection) {
+        return hit.clone();
+    }
+    let probed = probe_login_path(connection);
+    cache.lock().unwrap().insert(connection.to_string(), probed.clone());
+    probed
+}
+
+/// One probe round trip. `$SHELL -i` so rc files run; `</dev/null` so a shell
+/// that reads stdin sees EOF instead of blocking; stderr dropped because an
+/// interactive shell without a tty legitimately complains about job control.
+fn probe_login_path(connection: &str) -> Option<String> {
+    if !connection_looks_safe(connection) {
+        return None;
+    }
+    let script = format!(
+        "exec \"${{SHELL:-/bin/sh}}\" -ic 'printf \"%s\\n%s\\n\" {PROBE_SENTINEL} \"$PATH\"'"
+    );
+    let child = ssh_command(connection, &script, false)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    parse_probe(&capture_within(child, PROBE_TIMEOUT)?)
+}
+
+/// Read a child's stdout on a helper thread (a full pipe buffer would otherwise
+/// deadlock the wait loop) and give up after `timeout`, killing the child.
+fn capture_within(mut child: std::process::Child, timeout: Duration) -> Option<String> {
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let text = reader.join().unwrap_or_default();
+                return status.success().then_some(text);
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Pull the `PATH` out of a probe reply: the line after the sentinel. Everything
+/// before it is whatever the user's rc decided to print and is discarded.
+fn parse_probe(out: &str) -> Option<String> {
+    let mut lines = out.lines();
+    lines.find(|l| l.trim() == PROBE_SENTINEL)?;
+    let path = lines.next()?.trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 /// Server-side path of a synced worktree: `<workspace_path>/<task>/<repo>`.
 ///
 /// Mirrors the local `.worktrees/<task>/<repo>` layout minus the `.worktrees`
@@ -474,6 +578,16 @@ pub fn run_event(
         ("WS_WORKSPACE_ROOT", worktree_base),
     ];
     env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    // Give the hook the PATH the user would have in their own terminal here, so a
+    // `kind: host` repo's toolchain (nvm/asdf/pyenv/mise) resolves. Best-effort and
+    // cached; an unavailable probe just leaves the default non-interactive PATH.
+    // Placed after `extra_env` so a repo that declares its own PATH still wins.
+    let harvested = login_path(connection);
+    if let Some(p) = &harvested {
+        if !extra_env.iter().any(|(k, _)| k == "PATH") {
+            env.push(("PATH", p));
+        }
+    }
     let cmd = ["sh".to_string(), "-c".to_string(), command.to_string()];
     let script = remote_script(&dir, &env, &cmd);
     // Pipe the SSH stdio and stream it through the same `hook_line` path a local
@@ -671,5 +785,31 @@ mod tests {
         let cmd = vec!["echo".to_string(), "hello world".to_string()];
         let s = remote_script("/w/t/r", &[], &cmd);
         assert_eq!(s, "cd /w/t/r && exec echo 'hello world'");
+    }
+
+    #[test]
+    fn probe_reply_survives_a_chatty_rc() {
+        // The realistic case: an interactive rc prints a prompt-framework banner
+        // and `nvm use` chatter before our printf ever runs. Anything ahead of the
+        // sentinel is the user's shell talking, not the answer.
+        let out = format!(
+            "[p10k] instant prompt\nNow using node v22.22.2\n{PROBE_SENTINEL}\n/home/u/.nvm/versions/node/v22.22.2/bin:/usr/bin\n"
+        );
+        assert_eq!(
+            parse_probe(&out).unwrap(),
+            "/home/u/.nvm/versions/node/v22.22.2/bin:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn probe_reply_without_a_sentinel_is_refused() {
+        // A shell that failed before reaching the printf still exits 0 in some
+        // configurations; without the marker there is no answer to trust, and
+        // guessing at the last line could hand a hook a garbage PATH.
+        assert_eq!(parse_probe("/usr/bin:/bin\n"), None);
+        assert_eq!(parse_probe(""), None);
+        // Sentinel present but nothing after it (rc killed mid-write).
+        assert_eq!(parse_probe(&format!("{PROBE_SENTINEL}\n")), None);
+        assert_eq!(parse_probe(&format!("{PROBE_SENTINEL}\n   \n")), None);
     }
 }
