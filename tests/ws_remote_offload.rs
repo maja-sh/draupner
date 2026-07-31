@@ -216,6 +216,62 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
 }
 
 #[test]
+fn a_host_process_that_dies_on_launch_fails_the_step_and_shows_its_log() {
+    // `nohup … &` always yields a pid, so launching cannot fail — which meant a dev
+    // server that died on the spot (unresolvable shebang, first-run setup wanting a
+    // tty) was reported as started, with the reason buried in a log file the user
+    // had no reason to open. The launch script now re-checks the process and returns
+    // the tail of its log.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("svc");
+    f.write_ws_json(
+        r#"{
+            "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
+                      "scripts":{"up":"run --port $WS_PORT_web"}}],
+            "remote":{"connection":"srv","workspace_path":"ws"}
+        }"#,
+    );
+    // As the real launch script behaves when the process is gone half a second on.
+    let ssh = f.stub(
+        "fake-ssh-dead",
+        r#"printf '%s\n' "$@" >> "$ARGS_FILE"
+last="${!#}"
+case "$last" in
+  *__WS_PATH_PROBE__*) printf '%s\n%s\n' __WS_PATH_PROBE__ /harvested/bin:/usr/bin ;;
+  *nohup*) echo __WS_HOST_DIED__; echo "/usr/bin/env: 'node': No such file or directory" ;;
+  *'printf %s'*) printf /home/test ;;
+  *'ss -Hltn'*) echo free ;;
+  *'kill -0'*) exit 3 ;;
+  *) exit 0 ;;
+esac"#,
+    );
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "svc", &ssh, &mg);
+
+    let args = f.path().join("up-ssh.txt");
+    let out = f.run_with_env(
+        &["up", "feat/foo"],
+        &[
+            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("ARGS_FILE", args.to_str().unwrap()),
+        ],
+    );
+
+    let err = stderr(&out);
+    assert!(!out.status.success(), "a dead host process must fail `ws up`:\n{err}");
+    assert!(
+        err.contains("exited immediately"),
+        "the step must say the process died, not report it started:\n{err}"
+    );
+    // The reason is the entire content of this failure — it belongs on screen.
+    assert!(
+        err.contains("No such file or directory"),
+        "the log tail must be surfaced, not left in ~/.ws-run:\n{err}"
+    );
+}
+
+#[test]
 fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     // `prepare` is the one hook that stays on the client even when offloading, so
     // it can stage local data (a db dump) into the worktree for the sync to carry.
