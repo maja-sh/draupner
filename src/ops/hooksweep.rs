@@ -419,7 +419,7 @@ fn sync_forwards(
             }
         }
     }
-    crate::ui::table("port forwards", &forwarded);
+    crate::ui::table(repo, "port forwards", &forwarded);
 }
 
 /// Handle one host repo in a sweep. `up` starts its declared `up` script as a
