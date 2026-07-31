@@ -113,3 +113,69 @@ fn host_up_with_no_up_script_is_skipped() {
         "nothing to launch → no pid file"
     );
 }
+
+#[test]
+fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
+    // The recorded pid is only the dev server itself when every layer `exec`s
+    // through. An `up` that points at a *script* leaves the wrapper shell alive as
+    // a parent, so signalling the recorded pid alone killed the wrapper and left
+    // the real server running, reparented to init and still holding its port —
+    // one leaked process per `ws down`/`ws rm`.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    // Marker file, then a long-lived child: the same shape as a dev server started
+    // from a `.ws-hooks/` script.
+    std::fs::write(
+        f.path().join("runner.sh"),
+        "#!/bin/sh\necho $$ > \"$WS_WORKSPACE_ROOT\"/wrapper.pid\nsleep 40 &\necho $! > \"$WS_WORKSPACE_ROOT\"/child.pid\nwait\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = f.path().join("runner.sh");
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&p, perms).unwrap();
+    }
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}},
+            "scripts":{"up":"\"$WS_WORKSPACE_ROOT\"/runner.sh"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/foo"]);
+    f.run_ok(&["up", "feat/foo"]);
+
+    let child_pid_file = f.path().join("child.pid");
+    for _ in 0..40 {
+        if child_pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let child = std::fs::read_to_string(&child_pid_file)
+        .expect("the wrapper should have started a child")
+        .trim()
+        .to_string();
+    let alive = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    assert!(alive(&child), "the child should be running before down");
+
+    f.run_ok(&["down", "feat/foo"]);
+    // Give the TERM a moment to land.
+    for _ in 0..20 {
+        if !alive(&child) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !alive(&child),
+        "the real server behind the wrapper must be stopped, not orphaned to init"
+    );
+    let _ = f.run(&["rm", "feat/foo", "--force"]);
+}

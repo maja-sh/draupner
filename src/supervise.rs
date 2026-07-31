@@ -61,6 +61,34 @@ fn read_pidfile(pid: &str) -> String {
     format!("p=; want=; {{ IFS= read -r p; IFS= read -r want; }} < {pid} 2>/dev/null")
 }
 
+/// A shell snippet defining `ws_tree`, which prints `$1` followed by every
+/// descendant pid.
+///
+/// The recorded pid is not reliably the process that matters. `nohup env … sh -c
+/// <cmd>` only ends up *being* the dev server if every layer `exec`s through, and
+/// whether that happens depends on the shape of the command: an inline
+/// `… && exec vite` replaces the shell, while a path to a script leaves the
+/// wrapper alive as a parent. Signalling the recorded pid alone then kills the
+/// wrapper and reparents the real server to init, where it keeps holding its
+/// port — so each `ws down`/`ws rm` leaked another dev server and ports crept
+/// upward as allocation probed past the ones the strays still held.
+///
+/// A process-*group* kill would be the obvious answer and isn't available: job
+/// control needs a tty (`set -m`) and macOS ships no `setsid`. Walking `ps` is
+/// portable to both sites and costs one extra invocation.
+fn tree_fn() -> &'static str {
+    "ws_tree() {\n\
+     \x20 all=$1; frontier=$1\n\
+     \x20 while [ -n \"$frontier\" ]; do\n\
+     \x20   kids=$(ps -eo pid=,ppid= 2>/dev/null | awk -v w=\"$frontier\" \
+     'BEGIN{n=split(w,a,\" \");for(i=1;i<=n;i++)want[a[i]]=1} want[$2]{print $1}')\n\
+     \x20   [ -n \"$kids\" ] || break\n\
+     \x20   all=\"$all $kids\"; frontier=$kids\n\
+     \x20 done\n\
+     \x20 echo $all\n\
+     }"
+}
+
 /// Start `cmd` as a detached process named `name`, in `worktree`, with `env`.
 /// Idempotent: if it's already running, leave it (a watcher reloads on file
 /// change — no need to bounce a healthy server) and return `Ok(false)`; `Ok(true)`
@@ -110,14 +138,20 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     // Same `ps -o` idiom the identity check already relies on, so it works at both
     // sites.
     let script = format!(
-        "mkdir -p {dir} || exit 1\n\
+        "{tree}\n\
+         mkdir -p {dir} || exit 1\n\
          cd {wt} || exit 1\n\
          nohup env {env_prefix}sh -c {cmd} </dev/null >{log} 2>&1 &\n\
          p=$!\n\
          printf '%s\\n%s\\n' \"$p\" \"$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\" > {pid}\n\
          sleep 0.5\n\
-         st=$(ps -o stat= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
-         case \"${{st:-gone}}\" in Z*|gone) echo {marker}; tail -n 20 {log} ;; esac",
+         alive=\n\
+         for v in $(ws_tree \"$p\"); do\n\
+         \x20 st=$(ps -o stat= -p \"$v\" 2>/dev/null | tr -d ' ')\n\
+         \x20 case \"${{st:-gone}}\" in Z*|gone) ;; *) alive=1 ;; esac\n\
+         done\n\
+         [ -n \"$alive\" ] || {{ echo {marker}; tail -n 20 {log}; }}",
+        tree = tree_fn(),
         wt = shell_quote(worktree),
         cmd = shell_quote(cmd),
         marker = DIED_MARKER,
@@ -153,14 +187,24 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
     // Only signal when the pid is alive AND its start time matches what we recorded
     // — never a recycled pid belonging to an unrelated process. `KILL` after a short
     // `TERM` grace guarantees the process is gone before we drop the pid file.
+    // The whole tree, not just the recorded pid — see `tree_fn`. Descendants are
+    // collected *before* the first signal: killing the wrapper first would reparent
+    // the dev server to init and lose the link to it.
+    let tree = tree_fn();
     let script = format!(
-        "{read}\n\
+        "{tree}\n\
+         {read}\n\
          if [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null; then\n\
          \x20 got=$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
          \x20 if [ \"$got\" = \"$want\" ]; then\n\
-         \x20   kill -TERM \"$p\" 2>/dev/null\n\
-         \x20   for _ in 1 2 3 4 5 6; do kill -0 \"$p\" 2>/dev/null || break; sleep 0.5; done\n\
-         \x20   kill -KILL \"$p\" 2>/dev/null\n\
+         \x20   victims=$(ws_tree \"$p\")\n\
+         \x20   kill -TERM $victims 2>/dev/null\n\
+         \x20   for _ in 1 2 3 4 5 6; do\n\
+         \x20     alive=; for v in $victims; do kill -0 \"$v\" 2>/dev/null && alive=1; done\n\
+         \x20     [ -n \"$alive\" ] || break\n\
+         \x20     sleep 0.5\n\
+         \x20   done\n\
+         \x20   kill -KILL $victims 2>/dev/null\n\
          \x20 fi\n\
          fi\n\
          rm -f {pid}",
