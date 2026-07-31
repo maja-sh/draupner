@@ -44,6 +44,11 @@ pub fn proc_name(branch: &str, repo: &str) -> String {
 /// by accident isn't a realistic concern.
 const DIED_MARKER: &str = "__WS_HOST_DIED__";
 
+/// Emitted by `down` when the recorded pid is alive but its identity doesn't match
+/// — something is running under this name that ws can't confirm is its own, so it
+/// is left alone and said out loud rather than quietly forgotten.
+const STRANGER_MARKER: &str = "__WS_HOST_STRANGER__";
+
 /// The run dir and pid/log paths for `name`, as shell expressions evaluated at the
 /// site (`$HOME` resolves to the server's home for a remote workspace). The basename
 /// is `shell_quote`d: `name` derives from the branch and repo, which can carry
@@ -177,10 +182,19 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     Ok(true)
 }
 
-/// Stop a host process (and drop its pid file). A process that was never started,
-/// already gone, or whose pid was recycled (identity mismatch) is a safe no-op.
-/// Sends `TERM`, waits briefly, then `KILL`s — so on return the process is dead and
-/// a caller (teardown) won't remove the worktree from under a live process.
+/// Stop a host process and drop its pid file. A process that was never started or
+/// has already gone is a safe no-op. Sends `TERM`, waits briefly, then `KILL`s — so
+/// on return the process is dead and a caller (teardown) won't remove the worktree
+/// from under a live process.
+///
+/// A recorded pid that is alive but whose identity does not match is left running
+/// **and reported**. It used to be skipped silently while the pid file was removed
+/// anyway — discarding the only record of a live process ws had just declined to
+/// kill. The next `ws up` then found no pid file, concluded nothing was running,
+/// and started a second dev server beside the first; repeat, and the ports creep
+/// upward as allocation probes past the ones the strays still hold. Refusing to
+/// signal a stranger is right; forgetting it exists is what turned that caution
+/// into a leak.
 pub fn down(site: &Site, name: &str) -> Result<()> {
     let (_, pid, _) = paths(name);
     let read = read_pidfile(&pid);
@@ -205,17 +219,28 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
          \x20     sleep 0.5\n\
          \x20   done\n\
          \x20   kill -KILL $victims 2>/dev/null\n\
+         \x20   rm -f {pid}\n\
+         \x20 else\n\
+         \x20   echo {stranger}\n\
          \x20 fi\n\
-         fi\n\
-         rm -f {pid}",
+         else\n\
+         \x20 rm -f {pid}\n\
+         fi",
+        stranger = STRANGER_MARKER,
     );
-    let status = site
+    let out = site
         .shell(&script)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .output()
         .with_context(|| "stop host process")?;
+    let status = out.status;
+    if String::from_utf8_lossy(&out.stdout).contains(STRANGER_MARKER) {
+        crate::ui::note(&format!(
+            "{name}: a process is recorded but its identity doesn't match — left running. \
+             Check `~/.ws-run/{name}.pid` and stop it by hand if it's stale."
+        ));
+    }
     // The script itself always exits 0; a non-zero status is the transport failing
     // (e.g. ssh couldn't reach the server) — surface it so teardown reports it.
     if !status.success() {

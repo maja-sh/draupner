@@ -179,3 +179,45 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
     );
     let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
+
+#[test]
+fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
+    // The identity guard is right to refuse to signal a stranger, but `down` used
+    // to remove the pid file anyway — discarding the only record of a process it
+    // had just left running. The next `ws up` then saw no pid file, concluded
+    // nothing was running, and started a second dev server beside the first.
+    let f = host_fixture();
+    f.run_ok(&["new", "api", "feat/foo"]);
+    f.run_ok(&["up", "feat/foo"]);
+
+    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
+    let recorded = std::fs::read_to_string(&pid_file).expect("pid file after up");
+    let pid = recorded.lines().next().unwrap().trim().to_string();
+
+    // Same pid, wrong start-time identity — as a recycled pid would look.
+    std::fs::write(&pid_file, format!("{pid}\nNotTheRealStartTime\n")).unwrap();
+
+    let out = f.run(&["down", "feat/foo"]);
+    let err = stderr(&out);
+
+    let alive = |p: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", p])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    assert!(alive(&pid), "an unmatched process must be left running, not signalled");
+    assert!(
+        pid_file.exists(),
+        "the pid file must survive, or the process becomes untrackable and `up` starts a second one"
+    );
+    assert!(
+        err.contains("identity doesn't match"),
+        "leaving it running must be reported, not silent:\n{err}"
+    );
+
+    // Restore the real identity so teardown can actually stop it.
+    std::fs::write(&pid_file, recorded).unwrap();
+    stop(&f);
+}
