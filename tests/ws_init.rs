@@ -177,6 +177,28 @@ fn refresh_schema_refuses_outside_workspace() {
 }
 
 #[test]
+fn refresh_schema_works_from_a_subdirectory() {
+    // Every other op locates the workspace by walking up. This one demanded the
+    // cwd *be* the root, so it failed with "no .ws.json here" one directory in —
+    // somewhere `ws up`/`list`/`exec` all work fine.
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    ws.run_ok(&["init"]);
+    std::fs::write(ws.path().join(".ws.schema.json"), "STALE").unwrap();
+
+    let out = ws.run_in("api", &["init", "--refresh-schema"]);
+    assert!(out.status.success(), "should locate the workspace from a subdir:\n{}", stderr(&out));
+
+    let schema = std::fs::read_to_string(ws.path().join(".ws.schema.json")).unwrap();
+    assert_ne!(schema, "STALE", "the schema at the workspace root should be refreshed");
+    // And not scattered where the command happened to be run.
+    assert!(
+        !ws.path().join("api/.ws.schema.json").exists(),
+        "the schema belongs at the workspace root, not the cwd"
+    );
+}
+
+#[test]
 fn init_refuses_inside_an_enclosing_workspace() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     // A plain subdir of an existing workspace.
