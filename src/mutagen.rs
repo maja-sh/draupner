@@ -104,19 +104,26 @@ pub fn forward_terminate(session: &str) -> Result<()> {
 }
 
 /// Sync ignores for a worktree: the repo's configured `worktree_excludes` plus
-/// the per-host dep artifacts (`vendor/`, `node_modules/`) present on disk.
-/// Disk presence is the ground truth at both call sites — `ws new` creates the
-/// sync after deps land, `ws remote set` backfills an existing worktree — and
-/// deps are arch-specific: they belong installed on each side, not on the wire.
-/// The one home for "what stays off the sync"; a drifted copy would ship a
+/// the per-host dep artifacts (`vendor/`, `node_modules/`). Deps are
+/// arch-specific: they belong installed on each side, not on the wire. The one
+/// home for "what stays off the sync"; a drifted copy would ship a
 /// node_modules-scale tree over SSH.
 ///
-/// A dep dir that is git-TRACKED is committed source (Go-style vendoring), not
-/// a per-host artifact — it must reach the server, so it is never ignored.
+/// Tracking, not disk presence, decides. A dep dir that is git-TRACKED is
+/// committed source (Go-style vendoring), not a per-host artifact — it must
+/// reach the server, so it is never ignored. Everything else is per-host and is
+/// ignored whether or not it exists here yet.
+///
+/// Gating on local presence instead was a 200MB trap: the sync is two-way, so a
+/// worktree whose deps are installed at the *other* end (`composer install` in a
+/// remote `up`) would have had them dragged back over SSH — precisely the case
+/// on a fresh clone whose main checkout never ran an install, where there is no
+/// local `vendor/` for `ws new` to copy. Ignoring a path that does not exist
+/// costs nothing; ignoring one too late costs the whole tree.
 pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     let mut ignores = configured.to_vec();
     for dep in ["vendor", "node_modules"] {
-        if worktree.join(dep).exists() && !crate::git::is_tracked(worktree, dep) {
+        if !crate::git::is_tracked(worktree, dep) {
             ignores.push(format!("/{dep}"));
         }
     }
@@ -298,5 +305,63 @@ mod tests {
             beta_endpoint("srv", "workspace/feat-foo/api"),
             "srv:workspace/feat-foo/api"
         );
+    }
+
+    /// A git repo with `files` committed, so `is_tracked` has something real to
+    /// answer against — the whole point of these cases is what git says.
+    fn repo_with(files: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(tmp.path())
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        for f in files {
+            let p = tmp.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+        }
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        tmp
+    }
+
+    #[test]
+    fn untracked_deps_are_ignored_even_when_absent_locally() {
+        // The regression this guards: gating on local presence let a two-way sync
+        // drag a server-side `composer install` (~200MB) back to the client.
+        let repo = repo_with(&["README.md"]);
+        let ignores = sync_ignores(&[], repo.path());
+        assert!(ignores.contains(&"/vendor".to_string()));
+        assert!(ignores.contains(&"/node_modules".to_string()));
+    }
+
+    #[test]
+    fn tracked_vendor_is_committed_source_and_stays_on_the_wire() {
+        // Go-style vendoring: `vendor/` is in the index, so it is source, not a
+        // per-host artifact — the server needs it and the sync must carry it.
+        let repo = repo_with(&["vendor/pkg/lib.go"]);
+        let ignores = sync_ignores(&[], repo.path());
+        assert!(!ignores.contains(&"/vendor".to_string()));
+        // An untracked sibling is unaffected by the tracked one.
+        assert!(ignores.contains(&"/node_modules".to_string()));
+    }
+
+    #[test]
+    fn configured_excludes_come_through_alongside_the_deps() {
+        // `worktree_excludes` is the escape hatch for every other ecosystem's dep
+        // dir (`.venv`, `_build/deps`), so it must survive untouched.
+        let repo = repo_with(&["README.md"]);
+        let ignores = sync_ignores(&["/.venv".to_string()], repo.path());
+        assert_eq!(ignores[0], "/.venv");
+        assert!(ignores.contains(&"/vendor".to_string()));
     }
 }
