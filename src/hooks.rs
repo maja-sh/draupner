@@ -297,6 +297,7 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
 
 /// Run a resolved action for a read-only `status`-style event and capture its
 /// first non-empty stdout line, giving up after `timeout`. Used by `ws list`.
+#[allow(clippy::too_many_arguments)]
 pub fn capture_action(
     workspace_root: &Path,
     worktree_path: &Path,
