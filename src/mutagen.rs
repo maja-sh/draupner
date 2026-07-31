@@ -122,6 +122,16 @@ pub fn forward_terminate(session: &str) -> Result<()> {
 /// costs nothing; ignoring one too late costs the whole tree.
 pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     let mut ignores = configured.to_vec();
+    // A linked worktree's `.git` is a FILE holding `gitdir: <client path>`, not a
+    // directory — so mutagen's `--ignore-vcs`, which matches VCS *directories*,
+    // never catches it and the server receives a pointer into a filesystem that
+    // doesn't exist there (`/Users/...` on a Linux box). Git then aborts on any
+    // command run in that directory before doing any work, which breaks tools that
+    // merely shell out to it: `npm ci` resolving a git dependency dies on
+    // `ls-remote`, a call that works fine in a directory with no `.git` at all.
+    // Server worktrees are plain synced directories by design, so nothing there
+    // wants it.
+    ignores.push("/.git".to_string());
     for dep in ["vendor", "node_modules"] {
         if !crate::git::is_tracked(worktree, dep) {
             ignores.push(format!("/{dep}"));
@@ -139,9 +149,10 @@ fn beta_endpoint(connection: &str, remote_path: &str) -> String {
 
 /// Create a two-way sync between the local worktree (`local`) and the server
 /// (`<connection>:<remote_path>`). `ignores` keeps per-worktree artifacts
-/// (node_modules, vendor) off the wire; `--ignore-vcs` drops the worktree's
-/// `.git` pointer (meaningless on the server). Idempotent: an existing session
-/// of the same name is treated as success.
+/// (node_modules, vendor) off the wire, and includes the worktree's `.git`
+/// pointer — `--ignore-vcs` does NOT cover that, since it matches VCS
+/// directories and a linked worktree's `.git` is a file. Idempotent: an existing
+/// session of the same name is treated as success.
 /// Create the beta root's **parent** on the server.
 ///
 /// Mutagen creates the synchronization root itself but not the directories above
@@ -332,6 +343,15 @@ mod tests {
         run(&["add", "-A"]);
         run(&["commit", "-qm", "init"]);
         tmp
+    }
+
+    #[test]
+    fn the_worktree_git_pointer_never_reaches_the_server() {
+        // `--ignore-vcs` matches VCS *directories*; a linked worktree's `.git` is a
+        // file holding a client-side path, so it must be ignored explicitly or the
+        // server gets a gitdir pointer into a filesystem that isn't there.
+        let repo = repo_with(&["README.md"]);
+        assert!(sync_ignores(&[], repo.path()).contains(&"/.git".to_string()));
     }
 
     #[test]
