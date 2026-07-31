@@ -213,6 +213,13 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
         rec.contains("PATH=/harvested/bin:/usr/bin"),
         "harvested login PATH not passed to the detached host process:\n{rec}"
     );
+    // `WS_WORKSPACE_ROOT` is what a `.ws-hooks/…` script path anchors against, so it
+    // has to name the *server's* root. Handing back the client's pointed the script
+    // at a filesystem the server doesn't have.
+    assert!(
+        rec.contains("WS_WORKSPACE_ROOT=/home/test/ws"),
+        "WS_WORKSPACE_ROOT must be the server-side root for a detached host process:\n{rec}"
+    );
 }
 
 #[test]

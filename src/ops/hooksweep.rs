@@ -474,7 +474,11 @@ fn sweep_host(
     // The process's working dir at its execution site: the server-side synced dir
     // (absolute) for a remote workspace — flush first so the launched process sees
     // the rendered templates / latest code — else the local worktree.
-    let worktree = match cfg.remote.as_ref() {
+    // Both are the *execution site's* paths, and they must agree: `WS_WORKSPACE_ROOT`
+    // is what a `.ws-hooks/…` script path anchors against, so handing back the local
+    // root while the process runs on the server points it at a filesystem that isn't
+    // there (`/Users/…: not found` on a Linux box).
+    let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
             let base = site.abs_base(&r.worktree_base(root));
@@ -487,16 +491,22 @@ fn sweep_host(
                     return;
                 }
             }
-            crate::remote::worktree_path(&base, sanitized, repo)
+            (crate::remote::worktree_path(&base, sanitized, repo), base)
         }
-        None => wt.to_string_lossy().into_owned(),
+        None => (wt.to_string_lossy().into_owned(), root.to_string_lossy().into_owned()),
     };
 
     // The host process runs detached (not via the `Command`-based hook runner), so
     // apply the base `WS_*` contract here — otherwise the `up` script sees only the
     // injection env (`WS_PORT_*`/`WS_HOST_*`) and `$WS_BRANCH_SANITIZED` & friends
     // come out empty (e.g. `https://.api.<domain>`).
-    let mut proc_env = crate::hooks::base_env(root, &worktree, repo, sanitized, event);
+    //
+    // Third time this detached path has been caught missing something the hook
+    // dispatch in `remote::run_event` already does — after the base `WS_*` contract
+    // itself, and the harvested login PATH. Anything added to one belongs in the
+    // other; they are overdue for a shared owner.
+    let mut proc_env =
+        crate::hooks::base_env(std::path::Path::new(&site_root), &worktree, repo, sanitized, event);
     proc_env.extend(extra_env.iter().cloned());
     match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
