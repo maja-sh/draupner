@@ -65,7 +65,15 @@ want_443=0
 # answer address is the signal: loopback only makes sense when the workspaces
 # live here. It decides which commands the guidance below can honestly name —
 # on an offload box there is no local `ws` to invoke, by design.
-is_offload() { [ "$address" != "127.0.0.1" ]; }
+
+# No local-vs-offload predicate here on purpose. This script runs on the box that
+# hosts the stacks, and whether `ws` also runs on it is the operator's business,
+# not something to infer and act on. The previous version guessed from the DNS
+# answer (`address != 127.0.0.1`) and got it wrong for a real setup — `ws` running
+# locally on a box that also serves peers on the LAN takes an `--address` for
+# their benefit, and was then told `ws` doesn't run here. Every hint below is
+# phrased to hold either way; `ws remote check` reports on the server when a
+# `remote` block exists and on the local host otherwise, so it needs no branch.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -278,12 +286,8 @@ trust_ca() {
   say "Trust Caddy's root CA"
   if ! "$runtime" container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
     note "skip: the $CADDY_CONTAINER container isn't running yet."
-    if is_offload; then
-      note "      start it from the machine running \`ws\` (\`ws setup\` reaches this"
-      note "      box over SSH), then re-run this script."
-    else
-      note "      start it with \`ws setup\` (or \`ws up <branch>\`), then re-run."
-    fi
+    note "      start it from the machine running \`ws\` (\`ws setup\`, which reaches"
+    note "      this box over SSH when it's remote), then re-run this script."
     return 0
   fi
   local root
@@ -479,12 +483,8 @@ unprivileged_443() {
     sudo sysctl --system >/dev/null
     note "set net.ipv4.ip_unprivileged_port_start=443 ($SYSCTL_FILE)."
   fi
-  if is_offload; then
-    note "then, from the machine running \`ws\`: \`ws setup --port 443\` to move this"
-    note "box's Caddy onto :443 (it re-seeds)."
-  else
-    note "then: \`ws setup --port 443\` to move Caddy onto :443 (it re-seeds)."
-  fi
+  note "then, from the machine running \`ws\`: \`ws setup --port 443\` to move this"
+  note "box's Caddy onto :443 (it re-seeds)."
 }
 
 # ---------------------------------------------------------------------------
@@ -553,12 +553,8 @@ unprivileged_443
 enable_linger
 podman_socket
 
-if is_offload; then
-  # `ws` is deliberately NOT installed here — an offload box runs the stacks, the
-  # client drives them over SSH. Naming a `ws` command to run *on this machine*
-  # would be telling the operator to install the one thing this design avoids.
-  say "Done. This box is an offload server, so \`ws\` doesn't run here —"
-  say "re-check from the machine running \`ws\`: \`ws remote check\`."
-else
-  say "Done. Re-check readiness any time with \`ws setup\`."
-fi
+# Deliberately doesn't name a `ws` command to run *here*: this box hosts the
+# stacks, and on a dedicated one `ws` isn't installed — the client drives it over
+# SSH. `ws remote check` is the right call from wherever `ws` lives, reporting on
+# the server when a `remote` block exists and on the local host otherwise.
+say "Done. Re-check from the machine running \`ws\`: \`ws remote check\`."
