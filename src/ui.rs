@@ -404,27 +404,32 @@ pub fn note(text: &str) {
     }
 }
 
-/// A titled, column-aligned detail block: a dim title at the repo column and
-/// `key   value` rows inset under it.
+/// A titled, column-aligned detail block: a `tag`-led title in the repo column
+/// and `key   value` rows inset under it.
 ///
 /// For a set of related facts that would otherwise be N repetitive `note` lines
 /// — the per-service port forwards, where every line shared a prefix and the
 /// distinguishing part was two words wide. One line per fact is right; N
 /// unaligned sentences are not. Padding is applied to the raw key before
 /// styling, since ANSI escapes would otherwise be counted in the field width.
-pub fn table(title: &str, rows: &[(String, String)]) {
+///
+/// The `tag` uses the same padded repo column as `step`, because a sweep emits
+/// one block per repo and an untagged title left them indistinguishable — two
+/// identical `port forwards` headings, telling you nothing about which repo
+/// owned which ports, in output where every other line names its repo.
+pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
     if rows.is_empty() {
         return;
     }
     let w = key_width(rows);
     emit_around_spinner(|| {
         if tty() {
-            eprintln!("  {}", style(title).dim());
+            eprintln!("  {} {}", style(pad_tag(tag)).green().bold(), style(title).dim());
             for (k, v) in rows {
                 eprintln!("    {}  {}", style(pad_key(k, w)).dim(), style(v).dim().bold());
             }
         } else {
-            eprintln!("  {title}");
+            eprintln!("  {}  {title}", pad_tag(tag));
             for (k, v) in rows {
                 eprintln!("    {}  {}", pad_key(k, w), v);
             }
