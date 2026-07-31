@@ -427,6 +427,8 @@ local_resolver() {
   { echo "# Written by server-setup — dnsmasq must not read /etc/resolv.conf"
     echo "# for upstreams once that file points back here."
     echo "no-resolv"
+    # Unquoted on purpose: `$upstreams` is newline-separated and must split into
+    # one `server=` line per nameserver. Quoting it emits a single broken line.
     printf 'server=%s\n' $upstreams
   } | sudo tee "$up_conf" >/dev/null
   if ! sudo systemctl restart dnsmasq 2>/dev/null &&
@@ -443,7 +445,7 @@ local_resolver() {
   # a dead dnsmasq degrades to the previous behaviour instead of no DNS at all.
   { echo "# ws: dnsmasq first for *.${domain}; originals kept as fallback."
     echo "nameserver 127.0.0.1"
-    printf 'nameserver %s\n' $upstreams
+    printf 'nameserver %s\n' $upstreams   # unquoted: one line per server
   } | sudo tee /etc/resolv.conf >/dev/null
 
   local ok=1
