@@ -22,6 +22,7 @@ fn ssh_stub(f: &WorkspaceFixture) -> PathBuf {
         r#"printf '%s\n' "$@" >> "$ARGS_FILE"
 last="${!#}"
 case "$last" in
+  *__WS_PATH_PROBE__*) printf '%s\n%s\n' __WS_PATH_PROBE__ /harvested/bin:/usr/bin ;;
   *'printf %s'*) printf /home/test ;;
   *'ss -Hltn'*) echo free ;;
   *'kill -0'*) exit 3 ;;
@@ -204,6 +205,14 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
     assert!(rec.contains("ws-feat-foo-svc.pid"), "pid not recorded under ~/.ws-run:\n{rec}");
     assert!(rec.contains("WS_PORT_web="), "allocated port not injected:\n{rec}");
     assert!(rec.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{rec}");
+    // A host repo's toolchain comes from the user's shell. Without the harvested
+    // PATH a `#!/usr/bin/env node` shebang (vite, next, …) dies at launch, in the
+    // log, *after* the step has already reported green — so assert the supervisor
+    // carries it, not just the hook-dispatch path that happens to share the probe.
+    assert!(
+        rec.contains("PATH=/harvested/bin:/usr/bin"),
+        "harvested login PATH not passed to the detached host process:\n{rec}"
+    );
 }
 
 #[test]
