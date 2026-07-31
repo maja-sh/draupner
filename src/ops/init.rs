@@ -18,7 +18,19 @@ pub fn run(
     let cwd = std::env::current_dir()?;
 
     if refresh_schema {
-        return refresh_schema_only(&cwd);
+        // Resolve the workspace the way every other op does — by walking up — rather
+        // than demanding the cwd *be* the root. Scaffolding a new workspace is
+        // rightly cwd-bound; refreshing an existing one is the same "which workspace
+        // am I in" question `ws up`/`list`/`exec` already answer from any
+        // subdirectory, and answering it differently here is just a trap.
+        let root = crate::workspace::locate()
+            .map(|ws| ws.root)
+            .map_err(|_| super::preflight(format!(
+                "no `.ws.json` in {} or any parent — `ws init --refresh-schema` \
+                 only runs inside an initialized workspace.",
+                cwd.display()
+            )))?;
+        return refresh_schema_only(&root);
     }
 
     let remote_cfg = build_remote(&cwd, remote, remote_path)?;
@@ -142,14 +154,8 @@ fn init_local(
 fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", "--refresh-schema");
 
-    // Refuse to scatter an orphan schema in a non-workspace dir.
-    if !root.join(".ws.json").exists() {
-        bail!(
-            "no {} here — `ws init --refresh-schema` only runs inside an initialized workspace.",
-            root.join(".ws.json").display()
-        );
-    }
-
+    // `root` is already a located workspace (the caller walked up to find it), so
+    // the schema can't land in a non-workspace dir.
     let step = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
     crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
