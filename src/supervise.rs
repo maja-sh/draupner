@@ -65,11 +65,29 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         return Ok(false);
     }
     let (dir, pid, log) = paths(name);
+    // A `kind: host` repo's toolchain comes from the user's shell environment, and a
+    // detached process on the server inherits the non-interactive SSH env — where a
+    // version-manager `node` doesn't exist. So `#!/usr/bin/env node` shebangs (vite,
+    // next, every JS dev server) die at launch with `env: 'node': No such file`, in
+    // the log, after `ws` has already reported the step green. Same harvest the hook
+    // dispatch uses; this path builds its own command and would otherwise miss it —
+    // the same bypass that once cost host scripts their base `WS_*` contract.
+    //
+    // Emitted first so a repo declaring its own PATH in `env` still wins (`env`
+    // applies assignments left to right).
+    let harvested = match site {
+        Site::Remote { connection, .. } => crate::remote::login_path(connection),
+        Site::Local => None,
+    };
     // Env as an `env K=V …` prefix. The whole `K=V` token is `shell_quote`d (not
     // just the value): a declared env key from `.ws.json` is untrusted, and quoting
     // the token keeps `env` seeing exactly one argument, closing key injection.
-    let env_prefix: String =
-        env.iter().map(|(k, v)| format!("{} ", shell_quote(&format!("{k}={v}")))).collect();
+    let mut env_prefix = String::new();
+    if let Some(p) = harvested.filter(|_| !env.iter().any(|(k, _)| k == "PATH")) {
+        env_prefix.push_str(&format!("{} ", shell_quote(&format!("PATH={p}"))));
+    }
+    env_prefix
+        .extend(env.iter().map(|(k, v)| format!("{} ", shell_quote(&format!("{k}={v}")))));
     // `nohup … &` detaches (survives `ws` exiting and the terminal / SSH session
     // closing); stdio to the log so a remote `ssh` returns at once instead of
     // holding the channel open. `$!` is the launched process — `nohup`/`env`/`sh`
