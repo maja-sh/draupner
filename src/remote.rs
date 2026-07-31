@@ -355,8 +355,21 @@ pub fn push_ws_hooks(site: &Site, ws_root: &Path, base: &str) -> Result<()> {
         .spawn()
         .context("spawn tar for the .ws-hooks push")?;
     let archive = tar.stdout.take().expect("tar stdout was piped");
-    let remote =
-        format!("mkdir -p {b} && tar -C {b} --warning=no-unknown-keyword -xpf -", b = shell_quote(base));
+    // Restore the executable bit on anything with a shebang. `-xpf` preserves the
+    // mode faithfully, which is the problem: a hook rewritten on the client by an
+    // editor that drops +x lands here 644, and `sh -c '<path>'` fails with a bare
+    // `Permission denied` (exit 126) at hook time. The shebang is the file's own
+    // declaration that it is meant to be run, so it — not a blanket `chmod -R +x`
+    // — decides; a `.sql` seed or a sourced `lib/` fragment stays untouched. The
+    // pushed tree is a ws-managed copy, so repairing it asserts nothing about the
+    // user's own files. `exit 0` because the loop's last `grep` miss would
+    // otherwise fail the whole chain.
+    let remote = format!(
+        "mkdir -p {b} && tar -C {b} --warning=no-unknown-keyword -xpf - && \
+         find {b}/.ws-hooks -type f -exec sh -c \
+         'for f do head -c2 \"$f\" | grep -q \"^#!\" && chmod +x \"$f\"; done; exit 0' _ {{}} +",
+        b = shell_quote(base)
+    );
     let out = ssh_command(connection, &remote, false)
         .stdin(Stdio::from(archive))
         .output()
