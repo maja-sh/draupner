@@ -106,6 +106,31 @@ fn declared_env_mapping_is_substituted() {
 }
 
 #[test]
+fn workspace_context_is_substitutable_in_declared_env() {
+    // A project shouldn't have to learn ws's vocabulary to be driven by it. A
+    // tool that shells out to a container runtime reads its own var; mapping that
+    // var onto ws's answer belongs in `.ws.json`, not in the project's code.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{"runtime":"podman","repos":[{"name":"api",
+            "env":{"DOCKER_COMMAND":"${WS_RUNTIME}","MODE":"remote=${WS_REMOTE}"},
+            "scripts":{"up":"echo CMD=$DOCKER_COMMAND MODE=$MODE"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/foo"]);
+
+    let err = stderr(&f.run_ok(&["up", "feat/foo"]));
+    assert!(
+        err.contains("CMD=podman"),
+        "WS_RUNTIME must substitute into a declared env value:\n{err}"
+    );
+    assert!(
+        err.contains("MODE=remote=0"),
+        "WS_REMOTE must substitute too, and mid-string:\n{err}"
+    );
+}
+
+#[test]
 fn template_is_rendered_into_gitignored_dest() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");

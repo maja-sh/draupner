@@ -159,6 +159,15 @@ pub fn prepare(
     // come from the allocation recorded at `ws new`, so an unbuilt peer just leaves
     // the token literal (same as any unknown `${WS_*}`).
     let mut subst = vars.clone();
+    // The workspace context (`WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`) is
+    // substitutable too. Without it the only way to hand a project ws's answer for
+    // something is to teach the project about ws — a tool that shells out to a
+    // container runtime has to learn `WS_RUNTIME`, which puts ws's vocabulary in a
+    // codebase that should not have to know it exists. Declaring
+    // `"DOCKER_COMMAND": "${WS_RUNTIME}"` keeps that mapping in `.ws.json`, which
+    // is where the coupling belongs. No collision risk: these keys are fixed and
+    // distinct from the `WS_HOST_*`/`WS_PORT_*` above.
+    subst.extend(context.iter().cloned());
     for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
         subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
     }
