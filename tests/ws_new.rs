@@ -352,9 +352,12 @@ fn up_marker_fixture() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     // A host repo — its `up` is launched by ws itself, so this needs no runtime.
+    // It drops a marker and then *stays up*: a host `up` is a long-running dev
+    // server, and ws now fails one that exits on the spot (which is what a bare
+    // `touch` did — passing only because nothing checked the process survived).
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":9000}},
-            "scripts":{"up":"touch up-ran"}}]}"#,
+            "scripts":{"up":"touch up-ran && exec sleep 5"}}]}"#,
     );
     f
 }

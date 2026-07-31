@@ -39,6 +39,11 @@ pub fn proc_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
+/// Emitted by the launch script when the process is gone half a second later, and
+/// followed by the tail of its log. Distinct enough that a dev server printing it
+/// by accident isn't a realistic concern.
+const DIED_MARKER: &str = "__WS_HOST_DIED__";
+
 /// The run dir and pid/log paths for `name`, as shell expressions evaluated at the
 /// site (`$HOME` resolves to the server's home for a remote workspace). The basename
 /// is `shell_quote`d: `name` derives from the branch and repo, which can carry
@@ -92,14 +97,30 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     // closing); stdio to the log so a remote `ssh` returns at once instead of
     // holding the channel open. `$!` is the launched process — `nohup`/`env`/`sh`
     // all `exec`, preserving the pid. We record pid + start time as the identity.
+    // Settle, then confirm it's actually still there. Launching always "succeeds" —
+    // `nohup … &` returns a pid whether or not the command can run at all — so
+    // without this a process that dies on the spot is reported as started, and the
+    // only evidence is a log file the user has no reason to look at. Every real
+    // failure of this kind is instant: an unresolvable `#!/usr/bin/env node`
+    // shebang, a dev server whose first-run setup needs a tty it doesn't have.
+    //
+    // `kill -0` alone is not enough: the launching shell is the parent, so a process
+    // that has already exited is a zombie until reaped, and signalling a zombie
+    // succeeds. The process state answers properly — `Z` is dead, absent is dead.
+    // Same `ps -o` idiom the identity check already relies on, so it works at both
+    // sites.
     let script = format!(
         "mkdir -p {dir} || exit 1\n\
          cd {wt} || exit 1\n\
          nohup env {env_prefix}sh -c {cmd} </dev/null >{log} 2>&1 &\n\
          p=$!\n\
-         printf '%s\\n%s\\n' \"$p\" \"$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\" > {pid}",
+         printf '%s\\n%s\\n' \"$p\" \"$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\" > {pid}\n\
+         sleep 0.5\n\
+         st=$(ps -o stat= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
+         case \"${{st:-gone}}\" in Z*|gone) echo {marker}; tail -n 20 {log} ;; esac",
         wt = shell_quote(worktree),
         cmd = shell_quote(cmd),
+        marker = DIED_MARKER,
     );
     let out = site
         .shell(&script)
@@ -108,6 +129,16 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         .with_context(|| "spawn host process")?;
     if !out.status.success() {
         bail!("host process: {}", first_line(&String::from_utf8_lossy(&out.stderr)));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(tail) = stdout.split_once(DIED_MARKER).map(|(_, t)| t) {
+        // Put the log where the user is already looking. The reason a dev server
+        // refused to start is the whole content of this failure; making them go
+        // find `~/.ws-run/<name>.log` is what turned this into a long hunt.
+        for line in tail.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            crate::ui::hook_line(name, line, true);
+        }
+        bail!("exited immediately — see ~/.ws-run/{name}.log");
     }
     Ok(true)
 }
