@@ -11,6 +11,8 @@
 #   0. Prerequisites  → podman, a Compose provider, iproute2, mutagen, curl, sshd.
 #   1. Trust Caddy's internal root CA  → browsers stop warning on the TLS cert.
 #   2. Wildcard DNS  *.<domain> → <address>  → per-worktree hostnames resolve.
+#   2b. Local resolver  → this box resolves them too, which a `kind: host` repo
+#       needs to reach a routed container from a dev server running here.
 #   3. (opt-in) Rootless :443  → drop the `:8443` suffix from URLs.
 #   4. Linger  → `systemd --user` host-process units survive logout.
 #   5. Podman API socket  → what `podman compose` talks to.
@@ -361,6 +363,106 @@ bind-interfaces"
 }
 
 # ---------------------------------------------------------------------------
+# 2b. Make THIS machine resolve *.<domain> too
+# ---------------------------------------------------------------------------
+# Installing dnsmasq without wiring the resolver looks complete and isn't: the
+# box ends up running a correct DNS server that nothing queries.
+#
+# It went unnoticed because nothing here ever needed these names. Caddy matches
+# on the Host header and containers talk over the compose network, so the server
+# was never a client of its own routing. A `kind: host` repo changes that — a
+# dev server running here dials `<branch>.<svc>.<domain>` to reach a routed
+# container, and that name has to resolve locally first.
+#
+# The ordering is the entire risk, which is why this belongs in a script rather
+# than a printed instruction. dnsmasq takes its own upstreams from
+# /etc/resolv.conf by default, so pointing that file at dnsmasq *before* giving
+# it an explicit upstream makes it forward queries to itself and DNS stops
+# working for the whole machine. Capture the upstream first, switch, verify, and
+# restore on failure.
+local_resolver() {
+  say "Local resolver: resolve *.$domain on this machine"
+
+  if getent hosts "ws-probe.${domain}" >/dev/null 2>&1; then
+    note "already resolves here — nothing to do."
+    return 0
+  fi
+
+  # systemd-resolved can route a single domain, leaving every other lookup on
+  # the existing upstream. Narrowest blast radius available, so prefer it.
+  if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
+    local unit="/etc/systemd/resolved.conf.d/ws-${domain}.conf"
+    note "systemd-resolved detected → routing only '$domain' at dnsmasq."
+    sudo mkdir -p /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDNS=127.0.0.1\nDomains=~%s\n' "$domain" | sudo tee "$unit" >/dev/null
+    if sudo systemctl restart systemd-resolved 2>/dev/null; then
+      note "wrote $unit."
+    else
+      note "wrote $unit, but systemd-resolved FAILED to restart."
+      note "  check \`systemctl status systemd-resolved\`."
+    fi
+    getent hosts "ws-probe.${domain}" >/dev/null 2>&1 ||
+      note "still not resolving — check \`resolvectl status\`."
+    return 0
+  fi
+
+  # Plain /etc/resolv.conf. Whether an external name resolves *now* is the bar
+  # to clear afterwards — an offline box shouldn't fail this step for being
+  # offline, so only require what already worked.
+  local canary="deb.debian.org" external_ok=0
+  getent hosts "$canary" >/dev/null 2>&1 && external_ok=1
+
+  local upstreams
+  upstreams="$(awk '/^[[:space:]]*nameserver/ { print $2 }' /etc/resolv.conf | grep -v '^127\.' || true)"
+  if [ -z "$upstreams" ]; then
+    note "no non-loopback nameserver in /etc/resolv.conf — skipping."
+    note "  give dnsmasq an upstream by hand before pointing this box at it,"
+    note "  or it will forward queries to itself."
+    return 0
+  fi
+
+  # A separate file: `wildcard_dns` rewrites its own conf whole whenever it
+  # differs, which would drop these lines on the next run.
+  local up_conf="/etc/dnsmasq.d/ws-upstream.conf"
+  { echo "# Written by server-setup — dnsmasq must not read /etc/resolv.conf"
+    echo "# for upstreams once that file points back here."
+    echo "no-resolv"
+    printf 'server=%s\n' $upstreams
+  } | sudo tee "$up_conf" >/dev/null
+  if ! sudo systemctl restart dnsmasq 2>/dev/null &&
+     ! sudo service dnsmasq restart >/dev/null 2>&1; then
+    note "dnsmasq FAILED to restart — leaving the resolver untouched."
+    sudo rm -f "$up_conf"
+    return 0
+  fi
+
+  local backup="/etc/resolv.conf.ws-backup"
+  sudo cp /etc/resolv.conf "$backup"
+  # Keep the old servers as fallbacks. glibc only falls through on timeout, not
+  # on NXDOMAIN, so this can't leak `*.$domain` to the upstream — it only means
+  # a dead dnsmasq degrades to the previous behaviour instead of no DNS at all.
+  { echo "# ws: dnsmasq first for *.${domain}; originals kept as fallback."
+    echo "nameserver 127.0.0.1"
+    printf 'nameserver %s\n' $upstreams
+  } | sudo tee /etc/resolv.conf >/dev/null
+
+  local ok=1
+  getent hosts "ws-probe.${domain}" >/dev/null 2>&1 || ok=0
+  [ "$external_ok" = 0 ] || getent hosts "$canary" >/dev/null 2>&1 || ok=0
+  if [ "$ok" = 1 ]; then
+    note "resolver now consults dnsmasq (backup at $backup)."
+    if [ -f /etc/dhcp/dhclient.conf ] || pgrep -x dhclient >/dev/null 2>&1; then
+      note "warning: dhclient may rewrite /etc/resolv.conf on lease renewal."
+      note "  make it stick with: sudo chattr +i /etc/resolv.conf"
+    fi
+  else
+    sudo cp "$backup" /etc/resolv.conf
+    note "verification FAILED — restored the previous /etc/resolv.conf."
+    note "  dnsmasq keeps $up_conf; resolve *.${domain} by hand before retrying."
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # 3. (opt-in) Allow rootless bind to :443
 # ---------------------------------------------------------------------------
 unprivileged_443() {
@@ -444,6 +546,7 @@ podman_socket() {
 prerequisites
 trust_ca
 wildcard_dns
+local_resolver
 unprivileged_443
 enable_linger
 podman_socket
