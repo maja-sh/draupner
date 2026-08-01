@@ -52,6 +52,21 @@ fn stop(f: &WorkspaceFixture) {
     let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
 
+/// Runs its closure on drop — including while unwinding from a failed assertion.
+///
+/// A trailing `stop(&f)` only runs when every assertion above it passed, so a
+/// failing test leaks the process it supervised: it is reparented to init and
+/// keeps whatever it holds. The `sleep 40` fixtures self-limit, but the test that
+/// serves a real `python3 -m http.server` does not — one such orphan was found
+/// still LISTENing on 127.0.0.1:20000, the first port of ws's allocation range.
+struct Teardown<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for Teardown<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
 /// The pid `ws` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
     let contents = std::fs::read_to_string(pid_file(f)).expect("pid file after up");
@@ -244,6 +259,9 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
             "scripts":{"up":"exec python3 -m http.server \"$WS_PORT_web\" --bind 127.0.0.1"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
+    // Unlike the `sleep 40` fixtures, this one supervises a real HTTP server that
+    // never exits on its own — teardown has to survive a failing assertion.
+    let _teardown = Teardown(|| stop(&f));
 
     let out = f.run_ok(&["up", "feat/foo"]);
     let err = stderr(&out);
@@ -259,7 +277,6 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
         "`ws list` must confirm the served port:\n{}",
         stderr(&out)
     );
-    stop(&f);
 }
 
 #[test]
@@ -401,4 +418,34 @@ fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
     // Restore the real identity so teardown can actually stop it.
     std::fs::write(&pid_file, recorded).unwrap();
     stop(&f);
+}
+
+#[test]
+fn teardown_runs_when_an_assertion_fails_mid_test() {
+    // Teardown written as the last statement of a test only runs when everything
+    // above it passed — so the tests that supervise a process leaked it on exactly
+    // the runs where a human most needs the machine left in a sane state. `Teardown`
+    // is the guard that fixes that; this pins its behaviour on unwind.
+    let f = host_fixture();
+    f.run_ok(&["new", "api", "feat/foo"]);
+    f.run_ok(&["up", "feat/foo"]);
+    let pid = recorded_pid(&f);
+    assert!(alive(&pid), "precondition: the supervised process should be running");
+
+    let result: Result<(), _> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _teardown = Teardown(|| stop(&f));
+        panic!("stand-in for a failed assertion");
+    }));
+    assert!(result.is_err(), "precondition: the guarded block must have panicked");
+
+    for _ in 0..20 {
+        if !alive(&pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !alive(&pid),
+        "a failed assertion must still tear the worktree down — pid {pid} was orphaned to init"
+    );
 }

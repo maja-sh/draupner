@@ -78,7 +78,17 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         // configured `worktree_excludes`.
         let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
 
-        if repo_path.join("composer.json").is_file() && repo_path.join("vendor").is_dir() {
+        // Seeding `vendor/` from the main checkout only makes sense for a
+        // gitignored, per-host one. A repo that *commits* its vendor/ already has
+        // it in the fresh worktree (`git worktree add` checked it out), and
+        // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
+        // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
+        // exclude below stops git descending, and pushed over SSH on a remote
+        // workspace since a tracked vendor/ is source and isn't sync-ignored.
+        if repo_path.join("composer.json").is_file()
+            && repo_path.join("vendor").is_dir()
+            && !wt_path.join("vendor").exists()
+        {
             let step = crate::ui::step(repo_name, "vendor/ copied");
             if let Err(e) = copy_vendor(&repo_path, &wt_path) {
                 remove_worktree(&repo_path, &wt_path);

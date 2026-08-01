@@ -97,6 +97,74 @@ fn up_runs_the_script_on_the_server_over_ssh() {
     assert!(line.contains("WS_RUNTIME="), "missing WS_RUNTIME:\n{line}");
 }
 
+/// A workspace whose service name carries a dash — `redis-cache` is ordinary
+/// compose naming, and it makes `WS_PORT_redis-cache`, which is *not* a valid
+/// shell name. Declared here rather than derived so the test doesn't need a
+/// compose binary; the env key is byte-identical either way.
+fn dashed_service_ws() -> &'static str {
+    r#"{
+        "repos":[{"name":"api","services":{"redis-cache":{"port":6379}},
+                  "scripts":{"up":"echo starting","status":"docker compose ps"}}],
+        "remote":{"connection":"srv","workspace_path":"ws"}
+    }"#
+}
+
+#[test]
+fn a_dashed_service_name_keeps_the_up_script_runnable() {
+    // `WS_PORT_redis-cache=20001` as a bare assignment word isn't an assignment to
+    // the shell — it's the command. The whole remote script used to die with
+    // `WS_PORT_redis-cache=20001: not found` (exit 127, reported as `up script
+    // exited 127`) and the hook never ran, on a workspace that works locally.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(dashed_service_ws());
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    let args = f.path().join("up-ssh.txt");
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
+    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    let line = rec
+        .lines()
+        .find(|l| l.contains("sh -c 'echo starting'"))
+        .unwrap_or_else(|| panic!("up script not dispatched over ssh:\n{rec}"));
+    // The pairs go through `env`, which accepts any name — as the local path's
+    // `Command::env` does.
+    assert!(line.contains("exec env "), "env pairs not handed to `env`:\n{line}");
+    assert!(line.contains("WS_PORT_redis-cache="), "dashed port var not injected:\n{line}");
+}
+
+#[test]
+fn a_dashed_service_name_keeps_the_status_probe_runnable() {
+    // Same key, the `ws list` path. Here the breakage was silent: the exit 127 made
+    // `ssh_capture` return `None`, so the status column showed the missing-value
+    // dash with no error anywhere.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(dashed_service_ws());
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    let args = f.path().join("list-ssh.txt");
+    let out = f.run_with_env(&["list"], &remote_env(&ssh, &mg, &args));
+    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+
+    let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
+    let line = rec
+        .lines()
+        .find(|l| l.contains("timeout 5 sh -c 'docker compose ps'"))
+        .unwrap_or_else(|| panic!("status not run on the server:\n{rec}"));
+    assert!(line.contains("&& env "), "env pairs not handed to `env`:\n{line}");
+    assert!(line.contains("WS_PORT_redis-cache="), "dashed port var not injected:\n{line}");
+    // …and the server's answer still reaches the listing.
+    let shown = format!("{}{}", common::stdout(&out), stderr(&out));
+    assert!(shown.contains("running"), "status not surfaced in the listing:\n{shown}");
+}
+
 #[test]
 fn down_runs_the_script_on_the_server_over_ssh() {
     let f = WorkspaceFixture::empty();

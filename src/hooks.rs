@@ -328,9 +328,14 @@ pub fn capture_action(
     let mut cmd = match action {
         // A status probe is normally one command; a `Many` runs as a fail-fast
         // `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output is
-        // captured.
+        // captured. Go through `Script::joined` — not an open-coded join — so
+        // `.ws-hooks/…` is anchored to `$WS_WORKSPACE_ROOT` here too. This arm
+        // used to hand-roll the join, and since it runs with cwd = the worktree
+        // a `status` script naming a `.ws-hooks/` path exited 127; the non-zero
+        // exit is swallowed, so `ws list` just showed an empty status column
+        // while the identical config worked for `up` and on a remote workspace.
         Action::Script(s) => {
-            let joined = s.commands().join(" && ");
+            let joined = s.joined();
             script_command(
                 workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
             )
