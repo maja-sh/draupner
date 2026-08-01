@@ -194,8 +194,11 @@ pub struct ServiceConfig {
     pub http: Option<HttpDecl>,
     /// The container-internal (or host-process-bound) port for this service.
     pub port: u16,
-    /// Run this service once as shared infra instead of per-worktree. Default
-    /// false (isolated). Right for redis/ES; wrong for the SQL DB.
+    /// **Not yet implemented — accepted and currently ignored.** Intended to run
+    /// this service once as shared infra instead of per-worktree (right for
+    /// redis/ES; wrong for the SQL DB). Every service is per-worktree today; this
+    /// is documented here because the generated schema is what users read, and a
+    /// field that describes behaviour it doesn't have is worse than no field.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
     /// Also route *every* subdomain of this service's host to it, so a
