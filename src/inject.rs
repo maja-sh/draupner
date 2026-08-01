@@ -714,7 +714,6 @@ mod tests {
             scripts: Default::default(),
             env: Default::default(),
             templates: Vec::new(),
-            hooks: Default::default(),
             worktree_excludes: Vec::new(),
             copy: Vec::new(),
         }

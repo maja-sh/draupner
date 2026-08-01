@@ -6,13 +6,17 @@ use common::{stderr, WorkspaceFixture};
 // sends SIGINT to `ws` itself (`$PPID`), then sleeps briefly so the handler
 // thread flips the flag before the hook returns. The op should stop at the
 // *next* repo boundary and exit 130, leaving later repos untouched.
+//
+// The interrupting hooks are declared inline (`add_script`), not as script
+// files: `sh -c` forks around a lone script path, so `$PPID` there would be the
+// intermediate shell rather than `ws`.
 
 #[test]
 fn new_stops_at_repo_boundary_on_sigint() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
     // api's post-create hook interrupts ws. The sleep gives the ctrlc handler
     // time to set the flag before this repo's iteration finishes.
-    f.add_hook("api", "post-create", "kill -INT $PPID; sleep 0.4");
+    f.add_script("api", "post-create", "kill -INT $PPID; sleep 0.4");
 
     let out = f.run(&["new", "api,app", "feat/sig"]);
     assert_eq!(out.status.code(), Some(130), "expected exit 130 on SIGINT:\n{}", stderr(&out));
@@ -28,7 +32,7 @@ fn new_stops_at_repo_boundary_on_sigint() {
 #[test]
 fn up_sweep_stops_on_sigint() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    f.add_hook("api", "up", "kill -INT $PPID; sleep 0.4; echo API-UP-RAN");
+    f.add_script("api", "up", "kill -INT $PPID; sleep 0.4; echo API-UP-RAN");
     f.add_hook("app", "up", "echo APP-UP-RAN");
     f.run_ok(&["new", "api,app", "feat/sig"]);
 

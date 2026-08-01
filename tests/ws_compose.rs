@@ -232,8 +232,8 @@ fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
     // lifecycle for it, so the project must be namespaced all the same; otherwise
     // every worktree's stack is compose's default project `api` and they collide.
     f.write_ws_json(r#"{"domain":"myapp.test","runtime":"docker","repos":["api"]}"#);
-    // A hook file stands in for the default `docker compose up -d` (same
-    // resolution path, same env) so the test starts no containers.
+    // A declared `up` script stands in for the default `docker compose up -d`
+    // (same resolution path, same env) so the test starts no containers.
     f.add_hook("api", "up", "echo PROJ=[$COMPOSE_PROJECT_NAME]");
 
     f.run_ok(&["new", "api", "feat/a"]);

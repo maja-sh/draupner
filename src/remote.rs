@@ -761,7 +761,7 @@ pub fn run_event(
 }
 
 /// Run a repo's read-only `status` command on the server and return its first
-/// non-empty stdout line — the remote analogue of `hooks::capture_action`. Runs
+/// non-empty stdout line — the remote analogue of `hooks::capture_command`. Runs
 /// in the synced worktree with the `WS_*` contract + injected env, bounded by a
 /// server-side `timeout` so a wedged probe can't stall `ws list`. `None` on any
 /// failure (unreachable, non-zero, empty). `base` is the absolute server worktree

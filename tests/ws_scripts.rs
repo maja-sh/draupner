@@ -1,6 +1,7 @@
-//! Declarative `scripts` in `.ws.json` — the successor to `.ws-hooks/` files.
-//! Covers: single + multi-command `up`, run order, precedence over a legacy hook
-//! file, failure propagation, and the `post-create` path.
+//! Declarative `scripts` in `.ws.json` — the only lifecycle mechanism.
+//! Covers: single + multi-command `up`, run order, failure propagation, the
+//! `post-create` path, and the migration error for a workspace still carrying an
+//! executable `.ws-hooks/<repo>/<event>` file from the removed one.
 
 mod common;
 
@@ -39,20 +40,54 @@ fn declarative_up_script_multi_command_runs_in_order() {
     assert!(first < second, "commands should run in order:\n{err}");
 }
 
-#[test]
-fn script_takes_precedence_over_hook_file() {
-    // Both a declarative script AND a legacy `.ws-hooks/api/up` file exist.
-    let f = fixture_with_scripts(r#"{"up":"echo FROM-SCRIPT"}"#);
-    f.add_hook("api", "up", "echo FROM-HOOK-FILE");
-    f.run_ok(&["new", "api", "feat/prec"]);
+/// Write an executable `.ws-hooks/<repo>/<event>` — the layout the removed
+/// hook-file mechanism discovered by convention.
+fn write_legacy_hook_file(f: &WorkspaceFixture, repo: &str, event: &str) {
+    let dir = f.path().join(".ws-hooks").join(repo);
+    std::fs::create_dir_all(&dir).expect("create hook dir");
+    let path = dir.join(event);
+    std::fs::write(&path, "#!/usr/bin/env bash\necho FROM-HOOK-FILE\n").expect("write hook file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
 
-    let out = f.run_ok(&["up", "feat/prec"]);
+// Hook files discovered by convention are gone. Dropping one silently would turn
+// a working `up` into the compose default (or nothing), so the repo fails with
+// the `scripts` entry to paste and the two contract changes that come with it.
+#[test]
+fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    write_legacy_hook_file(&f, "api", "up");
+    f.run_ok(&["new", "api", "feat/legacy"]);
+
+    let out = f.run(&["up", "feat/legacy"]);
+    assert_eq!(out.status.code(), Some(1), "a leftover hook file must fail the repo");
     let err = stderr(&out);
-    assert!(err.contains("FROM-SCRIPT"), "script should win:\n{err}");
+    assert!(!err.contains("FROM-HOOK-FILE"), "the hook file must not run:\n{err}");
     assert!(
-        !err.contains("FROM-HOOK-FILE"),
-        "the hook file must not run when a script is declared:\n{err}"
+        err.contains(r#""scripts": {"up": ".ws-hooks/api/up"}"#),
+        "the error must name the exact JSON to paste:\n{err}"
     );
+    assert!(err.contains("$WS_WORKTREE"), "the error must name the new worktree var:\n{err}");
+}
+
+// ...and declaring it is the whole migration: the same file, now named under
+// `scripts`, runs again (with the new contract).
+#[test]
+fn declaring_a_hook_file_under_scripts_runs_it_again() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    write_legacy_hook_file(&f, "api", "up");
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/migrated"]);
+
+    let err = stderr(&f.run_ok(&["up", "feat/migrated"]));
+    assert!(err.contains("FROM-HOOK-FILE"), "the declared script should run:\n{err}");
 }
 
 #[test]
