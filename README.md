@@ -160,6 +160,11 @@ Every command takes `--help`.
   you edit locally.
 - **[server-setup/](server-setup/)** — the one-time privileged host setup.
 
+Changing `ws` rather than using it? **[ARCHITECTURE.md](ARCHITECTURE.md)** is the
+reading order for the code: where to start, `ws up` traced file by file, the
+concepts the modules assume you already hold, and the deliberate oddities not to
+"fix".
+
 ---
 
 ## Environment
