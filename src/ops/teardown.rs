@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use crate::config::WsConfig;
 use crate::git;
-use crate::hooks;
 use crate::inject;
 use crate::mutagen;
 use crate::ports;
@@ -44,15 +43,12 @@ pub fn remove_task(
         // Run the resource-teardown lifecycle where the stack lives. A host
         // process's lifecycle IS a detached ws-owned process, so teardown stops it
         // (at its site — local, or the server over SSH) instead of running
-        // hooks (the same exclusive split as `ws down`). A remote container runs
-        // its down/post-remove scripts on the server; a local container runs them
-        // as hooks here.
+        // hooks (the same exclusive split as `ws down`). Everything else runs its
+        // down/post-remove events at that same site, which the dispatcher handles.
         if cfg.is_host_repo(repo) {
             teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
-        } else if cfg.remote.is_some() {
-            teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
         } else {
-            teardown_local(cfg, root, wt, &sanitized, repo, &mut hook_failed);
+            teardown_scripts(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
         }
 
         // Remove this worktree's Caddy routes before `forget` drops the recorded
@@ -156,48 +152,17 @@ fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mu
     }
 }
 
-/// Run a local workspace's `down` + `post-remove` hooks here on the host.
-fn teardown_local(
-    cfg: &WsConfig,
-    root: &Path,
-    wt: &Path,
-    sanitized: &str,
-    repo: &str,
-    hook_failed: &mut bool,
-) {
-    // Read the existing allocation (never allocate) for the hook env.
-    let extra_env =
-        inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
-            .unwrap_or_default();
-
-    // Resource teardown hooks — best-effort. A failing hook is reported
-    // but doesn't stop removal (the user wants the worktree gone).
-    for event in ["down", "post-remove"] {
-        let cmd = match hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
-            Ok(Some(cmd)) => cmd,
-            Ok(None) => continue,
-            Err(e) => {
-                crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
-                *hook_failed = true;
-                continue;
-            }
-        };
-        let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &extra_env) {
-            Ok(()) => step.ok(),
-            Err(e) => {
-                step.fail(&format!("{e}"));
-                *hook_failed = true;
-            }
-        }
-    }
-}
-
-/// Run a remote workspace's `down` + `post-remove` scripts on the server
-/// (best-effort). Skips with a note when the server is unreachable — `ws rm` /
-/// `ws clean` must still drop the local worktree even when the server is gone.
+/// Run a worktree's `down` + `post-remove` events where its stack lives — here on
+/// the host for a local workspace, on the server over SSH for a remote one.
+/// Best-effort: a failing event is reported but doesn't stop removal (the user
+/// wants the worktree gone).
+///
+/// A `None` site means a remote workspace whose server is unreachable: skip with a
+/// note rather than fail, since `ws rm` / `ws clean` must still drop the local
+/// worktree when the server is gone. A local workspace always resolves a site, so
+/// that note can only be about the server.
 #[allow(clippy::too_many_arguments)]
-fn teardown_remote(
+fn teardown_scripts(
     cfg: &WsConfig,
     site: Option<&Site>,
     root: &Path,
@@ -207,22 +172,32 @@ fn teardown_remote(
     repo: &str,
     hook_failed: &mut bool,
 ) {
-    let Some(site @ Site::Remote { .. }) = site else {
+    let Some(site) = site else {
         crate::ui::skip(repo, "server unreachable — skipping remote down/post-remove");
         return;
     };
-    let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
+    let ctx = crate::lifecycle::Ctx { cfg, site, root, worktree: wt, branch, sanitized, repo };
+
+    // Read the existing allocation (never allocate) for the hook env.
     let extra_env =
-        inject::prepare(cfg, site, root, wt, sanitized, repo, inject::Phase::Inspect).unwrap_or_default();
+        inject::prepare(cfg, site, root, wt, sanitized, repo, inject::Phase::Inspect)
+            .unwrap_or_default();
+
     for event in ["down", "post-remove"] {
-        let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
-            continue;
+        let cmd = match ctx.command(event) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => continue,
+            Err(e) => {
+                crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
+                *hook_failed = true;
+                continue;
+            }
         };
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &extra_env) {
+        match ctx.run(event, &cmd, &extra_env) {
             Ok(()) => step.ok(),
             Err(e) => {
-                step.fail(&e.to_string());
+                step.fail(&format!("{e}"));
                 *hook_failed = true;
             }
         }

@@ -8,7 +8,6 @@
 use anyhow::Result;
 
 use crate::config;
-use crate::hooks;
 use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
@@ -205,7 +204,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         // The flush inside the up dispatch then carries that output to the server,
         // where `up` consumes it. A failed prepare fails the repo and skips its up:
         // no point bringing a stack up whose seed never staged.
-        if event == "up" && !run_prepare(&cfg, &ws.root, wt, &sanitized, repo, &mut result) {
+        if event == "up" && !run_prepare(&cfg, &ws.root, wt, branch, &sanitized, repo, &mut result) {
             continue;
         }
 
@@ -217,17 +216,16 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        // A remote workspace runs the container lifecycle on the server over SSH
-        // (in the synced worktree); the local path streams the hook/script here.
-        if site.is_remote() {
-            sweep_container_remote(
-                &cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result,
-            );
-            continue;
-        }
+        // The container lifecycle runs where the stack lives — streamed here for a
+        // local workspace, over SSH in the synced worktree for a remote one. One
+        // dispatcher answers that (`lifecycle::Ctx`), so everything below is the
+        // same code either way.
+        let ctx = crate::lifecycle::Ctx {
+            cfg: &cfg, site: &site, root: &ws.root, worktree: wt,
+            branch, sanitized: &sanitized, repo,
+        };
 
-        let cmd = match hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt))
-        {
+        let cmd = match ctx.command(event) {
             Ok(Some(cmd)) => cmd,
             Ok(None) => {
                 crate::ui::skip(repo, &format!("no {event} hook"));
@@ -241,17 +239,30 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             }
         };
 
+        // On a remote workspace's `up`, `prepare` derives services + writes the
+        // override by reading the worktree *on the server* — so ship our latest
+        // edits before that, else a just-edited compose file would derive stale.
+        // (The dispatch below flushes again, cheaply; `down`/Inspect doesn't derive
+        // but the flush is harmless. Local is a no-op.)
+        ctx.flush_to_server();
+
         let Some(extra_env) = result.inject_env(&cfg, &site, &ws.root, wt, &sanitized, repo, phase)
         else {
             continue;
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        let res = hooks::run_command(&ws.root, wt, repo, &sanitized, event, &cmd, &extra_env);
+        let res = ctx.run(event, &cmd, &extra_env);
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
         route_after_hook(&cfg, &site, &ws.root, &sanitized, repo, event, up_ok, &mut result);
+        // Forward this repo's raw-TCP ports (db, redis, …) to localhost, so a DB GUI
+        // or CLI on this machine reaches the server's containers unchanged. A no-op
+        // for a local workspace — the ports are already local.
+        if event == "down" || up_ok {
+            sync_forwards(&cfg, &ws.root, branch, &sanitized, repo, event);
+        }
     }
 
     Ok(result)
@@ -275,11 +286,17 @@ fn run_prepare(
     cfg: &config::WsConfig,
     root: &std::path::Path,
     wt: &std::path::Path,
+    branch: &str,
     sanitized: &str,
     repo: &str,
     result: &mut SweepResult,
 ) -> bool {
-    let cmd = match hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt)) {
+    // `Site::Local` is the whole point here — the same dispatcher every other
+    // event uses, told to stay on this machine.
+    let ctx = crate::lifecycle::Ctx {
+        cfg, site: &Site::Local, root, worktree: wt, branch, sanitized, repo,
+    };
+    let cmd = match ctx.command("prepare") {
         Ok(Some(cmd)) => cmd,
         Ok(None) => return true,
         Err(e) => {
@@ -292,7 +309,7 @@ fn run_prepare(
         inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
             .unwrap_or_default();
     let step = crate::ui::step(repo, "prepare hook");
-    match hooks::run_command(root, wt, repo, sanitized, "prepare", &cmd, &extra_env) {
+    match ctx.run("prepare", &cmd, &extra_env) {
         Ok(()) => {
             step.ok();
             true
@@ -302,54 +319,6 @@ fn run_prepare(
             result.failed.push(repo.to_string());
             false
         }
-    }
-}
-
-/// Handle one container repo on the server for a remote workspace: run its
-/// declarative `up`/`down` script over SSH (in the synced worktree, with the
-/// injected env), then sync Caddy routes on the server. Mirrors the local
-/// container path but the script and routing run where the stack lives.
-#[allow(clippy::too_many_arguments)]
-fn sweep_container_remote(
-    cfg: &config::WsConfig,
-    site: &Site,
-    root: &std::path::Path,
-    wt: &std::path::Path,
-    branch: &str,
-    sanitized: &str,
-    repo: &str,
-    event: &str,
-    phase: inject::Phase,
-    result: &mut SweepResult,
-) {
-    let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
-        crate::ui::skip(repo, &format!("no {event} script"));
-        result.skipped.push(repo.to_string());
-        return;
-    };
-
-    // On `up`, `prepare` derives services + writes the override by reading the
-    // worktree *on the server* — so push our latest edits first, else a just-
-    // edited compose file would derive stale. (`run_remote_event` flushes again
-    // before the script, cheaply; `down`/Inspect doesn't derive but the flush is
-    // harmless.) Best-effort: the session may not exist yet, or mutagen be absent.
-    let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-
-    let Some(extra_env) = result.inject_env(cfg, site, root, wt, sanitized, repo, phase) else {
-        return;
-    };
-
-    let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
-    let step = crate::ui::step(repo, &format!("{event} hook"));
-    let res = super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &extra_env);
-    let up_ok = res.is_ok();
-    result.record(repo, step, res);
-
-    route_after_hook(cfg, site, root, sanitized, repo, event, up_ok, result);
-    // Forward this repo's raw-TCP ports (db, redis, …) to localhost, so a DB GUI
-    // or CLI on this machine reaches the server's containers unchanged.
-    if event == "down" || up_ok {
-        sync_forwards(cfg, root, branch, sanitized, repo, event);
     }
 }
 
@@ -524,19 +493,17 @@ fn sweep_host(
     let site_root = site.root_at(cfg.remote.as_ref(), root);
     let worktree = site.worktree_at(cfg.remote.as_ref(), root, wt, sanitized, repo);
 
-    if cfg.remote.is_some() {
-        // Flush first, so the launched process sees the rendered templates / latest
-        // code rather than whatever the last sync happened to carry.
-        let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-        // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/
-        // .ws-hooks/…` resolves on the server (same lane the container path uses).
-        if event == "up" {
-            if let Err(e) = crate::remote::push_ws_hooks(site, root, &site_root) {
-                crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
-                result.failed.push(repo.to_string());
-                return;
-            }
-        }
+    // Flush so the launched process sees the rendered templates / latest code
+    // rather than whatever the last sync happened to carry, and ship `.ws-hooks/`
+    // so a host `up` referencing `$WS_WORKSPACE_ROOT/.ws-hooks/…` resolves on the
+    // server. Literally the same staging the dispatched lifecycle events get —
+    // borrowed from the dispatcher rather than spelled out again — and a no-op for
+    // a local workspace. (The root it returns is `site_root`, already in hand.)
+    let ctx = crate::lifecycle::Ctx { cfg, site, root, worktree: wt, branch, sanitized, repo };
+    if let Err(e) = ctx.push_to_server() {
+        crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
+        result.failed.push(repo.to_string());
+        return;
     }
 
     // The host process runs detached (not via the `Command`-based hook runner), so
@@ -544,10 +511,14 @@ fn sweep_host(
     // injection env (`WS_PORT_*`/`WS_HOST_*`) and `$WS_BRANCH_SANITIZED` & friends
     // come out empty (e.g. `https://.api.<domain>`).
     //
-    // Third time this detached path has been caught missing something the hook
-    // dispatch in `remote::run_event` already does — after the base `WS_*` contract
-    // itself, and the harvested login PATH. Anything added to one belongs in the
-    // other; they are overdue for a shared owner.
+    // Third time this detached path was caught missing something the dispatched
+    // lifecycle already did — after the base `WS_*` contract itself, and the
+    // harvested login PATH. Two of those three now have a single owner each: the
+    // staging above is `lifecycle::Ctx::push_to_server`, the PATH is
+    // `remote::harvested_path` (applied inside `supervise::up`). This env assembly
+    // is the piece still written twice, because a detached process isn't a
+    // dispatched command — anything added to `hooks::base_env`'s contract still has
+    // to reach both.
     let mut proc_env =
         crate::hooks::base_env(std::path::Path::new(&site_root), &worktree, repo, sanitized, event);
     proc_env.extend(extra_env.iter().cloned());
