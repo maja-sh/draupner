@@ -1,4 +1,5 @@
-//! Visual language for user-facing output. See `spec-output-formatting.md`.
+//! Visual language for user-facing output. This module IS the specification —
+//! the design notes it was built from live outside the repository.
 //!
 //! Op code never calls `println!`/`eprintln!` directly. Every op uses these
 //! helpers so tty detection, color palette, spinners, and non-tty fallback
