@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use crate::config;
 use crate::git;
-use crate::hooks;
 use crate::inject;
 use crate::ui::{ListGroup, ListRow};
 use crate::workspace;
@@ -52,55 +51,38 @@ pub fn run() -> Result<()> {
             })
             .flatten();
 
-        // The declared `status` script, run wherever the stack lives. Lazy: when
-        // ws already has bad news about a host process, that's the more important
-        // answer and this never runs.
-        let declared = || if !managed {
-            None
-        } else if let Some(r) = cfg.remote.as_ref() {
-            // Remote workspace: run the declared `status` script ON THE SERVER.
-            // Skip when the server is unreachable (`site` didn't resolve to
-            // `Remote`) — status of the remote stack isn't knowable from here.
-            match site.as_ref() {
-                Some(s @ crate::remote::Site::Remote { .. }) => {
-                    cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
-                        let extra_env = inject::prepare(
-                            &cfg, s, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
-                        )
-                        .unwrap_or_default();
-                        let base = s.abs_base(&r.worktree_base(&ws.root));
-                        crate::remote::capture_status(
-                            &r.connection, &base, &sanitized, repo, &extra_env, &cmd,
-                            STATUS_TIMEOUT.as_secs(),
-                        )
-                    })
-                }
-                _ => None,
+        // The declared `status` script, run wherever the stack lives — locally, or
+        // ON THE SERVER for a remote workspace, which the dispatcher decides.
+        // Skipped when there's no site: that only happens for a remote server we
+        // can't reach, and the status of a stack over there isn't knowable from
+        // here. Lazy: when ws already has bad news about a host process, that's the
+        // more important answer and this never runs.
+        let declared = || {
+            if !managed {
+                return None;
             }
-        } else {
-            // Local workspace: run the `status` hook/script locally (Inspect —
-            // no allocation/derive; the recorded ports come from `.ws-meta`).
+            let site = site.as_ref()?;
+            let ctx = crate::lifecycle::Ctx {
+                cfg: &cfg, site, root: &ws.root, worktree: &wt_path,
+                branch: branch.as_deref().unwrap_or(""), sanitized: &sanitized, repo,
+            };
             // `ws list` is read-only and must keep listing, so a repo still on the
             // removed hook-file mechanism gets the full migration text as a note
             // (the table renders after this loop) and a short status label —
             // never a silent blank, and never an aborted listing.
-            let cmd = match hooks::resolve(
-                &cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path),
-            ) {
+            let cmd = match ctx.command("status") {
                 Ok(cmd) => cmd?,
                 Err(e) => {
                     crate::ui::note(&format!("{repo}: {e}"));
                     return Some("hook file not migrated".to_string());
                 }
             };
+            // Inspect — no allocation/derive; the recorded ports come from `.ws-meta`.
             let extra_env = inject::prepare(
-                &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
-                inject::Phase::Inspect,
+                &cfg, site, &ws.root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
             )
             .unwrap_or_default();
-            hooks::capture_command(
-                &ws.root, &wt_path, repo, &sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
-            )
+            ctx.capture("status", &cmd, &extra_env, STATUS_TIMEOUT)
         };
 
         // ws's own record wins only when it has something wrong to report; a

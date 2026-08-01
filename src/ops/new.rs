@@ -4,7 +4,6 @@ use std::process::Command;
 
 use crate::config;
 use crate::git;
-use crate::hooks;
 use crate::inject;
 use crate::mutagen;
 use crate::remote;
@@ -130,7 +129,11 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
         // Post-create runs where the stack lives: over SSH on the server (in the
         // synced worktree) for a remote workspace, or locally.
-        run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
+        let ctx = crate::lifecycle::Ctx {
+            cfg: &cfg, site: &site, root: &ws.root, worktree: &wt_path,
+            branch, sanitized: &sanitized, repo: repo_name,
+        };
+        run_post_create(&ctx, &extra_env)?;
 
         wt_paths.push((repo_name.clone(), wt_path));
     }
@@ -156,42 +159,23 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 /// the synced worktree) for a remote workspace, or locally. A repo with nothing
 /// declared is a no-op. Failure is fatal for `new` (one-time setup that didn't
 /// complete).
-#[allow(clippy::too_many_arguments)]
-fn run_post_create(
-    cfg: &config::WsConfig,
-    site: &crate::remote::Site,
-    ws_root: &Path,
-    wt_path: &Path,
-    branch: &str,
-    sanitized: &str,
-    repo: &str,
-    extra_env: &[(String, String)],
-) -> Result<()> {
-    if site.is_remote() {
-        let Some(cmd) = cfg.script_command(repo, "post-create") else {
-            return Ok(());
-        };
-        let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
-        let step = crate::ui::step(repo, "Post-create hook");
-        // `run_remote_event` flushes the sync first so the just-rendered templates
-        // (and the initial sync) are on the server before post-create runs there.
-        match super::run_remote_event(site, r, ws_root, branch, sanitized, repo, "post-create", &cmd, extra_env) {
-            Ok(()) => {
-                step.ok();
-                Ok(())
-            }
-            Err(e) => {
-                step.fail(&e.to_string());
-                Err(e)
-            }
-        }
-    } else {
-        if let Some(cmd) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path))? {
-            let step = crate::ui::step(repo, "Post-create hook");
-            hooks::run_command(ws_root, wt_path, repo, sanitized, "post-create", &cmd, extra_env)?;
+///
+/// The remote dispatch flushes the sync first, so the just-rendered templates (and
+/// the initial sync) are on the server before post-create runs there.
+fn run_post_create(ctx: &crate::lifecycle::Ctx, extra_env: &[(String, String)]) -> Result<()> {
+    let Some(cmd) = ctx.command("post-create")? else {
+        return Ok(());
+    };
+    let step = crate::ui::step(ctx.repo, "Post-create hook");
+    match ctx.run("post-create", &cmd, extra_env) {
+        Ok(()) => {
             step.ok();
+            Ok(())
         }
-        Ok(())
+        Err(e) => {
+            step.fail(&format!("{e}"));
+            Err(e)
+        }
     }
 }
 

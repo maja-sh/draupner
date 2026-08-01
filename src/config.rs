@@ -279,9 +279,9 @@ impl Script {
     /// The commands as one fail-fast shell command (`cmd1 && cmd2`), with
     /// `.ws-hooks/…` references anchored to `$WS_WORKSPACE_ROOT` (see
     /// [`anchor_ws_hooks`]) so the same string resolves locally and on the
-    /// server. The single home for "what shell string does this script run",
-    /// shared by the local runner (`hooks::run_script`) and the remote dispatch
-    /// ([`WsConfig::command_for`]).
+    /// server. The single home for "what shell string does this script run" —
+    /// resolved once by [`crate::hooks::resolve`] and dispatched to either site
+    /// from there, so the anchoring can't differ between them.
     pub fn joined(&self) -> String {
         self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
     }
@@ -331,21 +331,11 @@ impl WsConfig {
 
     /// The declarative lifecycle command for `(repo, event)`, if any: the repo's
     /// `scripts[event]` joined into one fail-fast shell command (`cmd1 && cmd2`).
-    /// `None` for a bare-name repo, or one that declares no such event. The single
-    /// owner of "what shell command does this event run", shared by the host-repo
-    /// launch path and every remote-dispatch caller.
+    /// `None` for a bare-name repo, or one that declares no such event. The
+    /// declared rung of [`crate::hooks::resolve`]'s ladder, and what the host-repo
+    /// launch path reads directly (a supervised process takes no compose default).
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
         self.repo_config(repo).and_then(|rc| rc.scripts.get(event)).map(Script::joined)
-    }
-
-    /// The command for `event`: the declared `scripts` entry, else the container
-    /// default (see [`default_script`]) when `is_container`. The same answer
-    /// [`crate::hooks::resolve`] gives, minus the removed-hook-file migration
-    /// check — for the paths that never ran a hook file anyway (remote scripts
-    /// over SSH, host supervision).
-    pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
-        self.script_command(repo, event)
-            .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
     }
 
     /// Whether per-worktree HTTP routing is in play: a `domain` is configured.
