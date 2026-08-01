@@ -25,7 +25,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::compose;
 use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
@@ -588,6 +588,59 @@ fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>)
     git::add_worktree_excludes(worktree, &dests)
 }
 
+/// Refuse a template path that doesn't stay inside the worktree.
+///
+/// `src`/`dest` come from `.ws.json`, which isn't gitignored and so arrives with
+/// a clone: without this, an entry like
+/// `{"src":"payload","dest":"../../../../.ssh/authorized_keys"}` had `ws new` and
+/// every `ws up` write attacker-chosen bytes anywhere the user can write, with no
+/// `scripts` entry needed. An **absolute** `dest` is just as dangerous as `..`,
+/// because `Path::join` discards the base entirely when the joined component is
+/// absolute. The `is_tracked` check below is no defence — `git ls-files` exits
+/// non-zero for a path outside the repo, which reads as "not tracked", so
+/// escaping the worktree *disabled* the anti-clobber guard instead of tripping
+/// it. Same rule `copy` entries get (see `ops::new::seed_copies`), plus a
+/// resolved-prefix check so a committed symlink can't escape without a `..`.
+fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
+    let rel = Path::new(p);
+    if rel.is_absolute() {
+        bail!(
+            "template {field} `{p}` must be a path inside the worktree — \
+             an absolute path would write outside it"
+        );
+    }
+    if rel.components().any(|c| c == Component::ParentDir) {
+        bail!("template {field} `{p}` must not contain `..` — it would escape the worktree");
+    }
+
+    // Lexically clean, but a symlink on the way (`ln -s / esc`, dest `esc/etc/x`)
+    // still lands outside. Canonicalize the deepest ancestor that exists — a dest
+    // itself normally doesn't yet — and require it to stay under the worktree. An
+    // unresolvable worktree (nothing created yet) leaves the lexical checks above
+    // as the guard.
+    let Ok(root) = worktree.canonicalize() else { return Ok(()) };
+    let joined = worktree.join(rel);
+    let mut probe = joined.as_path();
+    loop {
+        match probe.canonicalize() {
+            Ok(real) => {
+                if !real.starts_with(&root) {
+                    bail!(
+                        "template {field} `{p}` resolves to {} — outside the worktree {}",
+                        real.display(),
+                        root.display()
+                    );
+                }
+                return Ok(());
+            }
+            Err(_) => match probe.parent() {
+                Some(parent) => probe = parent,
+                None => return Ok(()),
+            },
+        }
+    }
+}
+
 /// Render one template: read `src`, substitute, write `dest`. Refuses if `dest`
 /// is tracked (rendering would dirty a committed file). Paths are
 /// worktree-relative; keeping `dest` git-invisible is the caller's job.
@@ -597,6 +650,10 @@ fn render_one(
     dest: &str,
     vars: &BTreeMap<String, String>,
 ) -> Result<()> {
+    // Before anything touches the filesystem: both fields are attacker-controlled
+    // config, and both are joined onto the worktree below.
+    ensure_within_worktree(worktree, "src", src)?;
+    ensure_within_worktree(worktree, "dest", dest)?;
     if git::is_tracked(worktree, dest) {
         bail!(
             "template dest `{dest}` is tracked by git — rendering it would dirty the repo; \
@@ -977,6 +1034,40 @@ mod tests {
         let local = WsConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
         assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
+    }
+
+    #[test]
+    fn template_paths_must_stay_inside_the_worktree() {
+        // `templates` is attacker-controlled config (`.ws.json` ships with a
+        // clone), and both fields are joined onto the worktree. Every escape
+        // shape is refused; ordinary relative paths are not.
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(wt.join("deploy")).unwrap();
+
+        // Ordinary config keeps working: a plain name, a nested dest, a `./` prefix.
+        for ok in ["svc.conf", "deploy/nginx.conf", "./config/generated/svc.conf"] {
+            ensure_within_worktree(&wt, "dest", ok).unwrap_or_else(|e| panic!("`{ok}` refused: {e}"));
+        }
+
+        // Traversal, in the middle as well as at the front.
+        let err = ensure_within_worktree(&wt, "dest", "../../../pwned.txt").unwrap_err().to_string();
+        assert!(err.contains("must not contain `..`"), "{err}");
+        assert!(ensure_within_worktree(&wt, "src", "deploy/../../escape").is_err());
+
+        // Absolute: `Path::join` would drop the worktree entirely.
+        let err = ensure_within_worktree(&wt, "dest", "/etc/cron.d/pwn").unwrap_err().to_string();
+        assert!(err.contains("must be a path inside the worktree"), "{err}");
+
+        // Lexically clean but symlinked out — a committed `esc -> /` needs no `..`.
+        #[cfg(unix)]
+        {
+            let outside = tmp.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, wt.join("esc")).unwrap();
+            let err = ensure_within_worktree(&wt, "dest", "esc/pwned.txt").unwrap_err().to_string();
+            assert!(err.contains("outside the worktree"), "{err}");
+        }
     }
 
     #[test]
