@@ -217,12 +217,12 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     for (name, path) in crate::workspace::list_child_dirs(root) {
         let Some(name) = name else {
             // Non-UTF-8 dir names would round-trip through `.ws.json` lossily
-            // and break later worktree lookups. Skip with a warn instead of
+            // and break later worktree lookups. Skip with a note instead of
             // silently corrupting the config.
-            tracing::warn!(
-                path = %path.display(),
-                "skipping non-UTF-8 directory name in workspace scan"
-            );
+            crate::ui::note(&format!(
+                "skipping non-UTF-8 directory name: {}",
+                path.display()
+            ));
             continue;
         };
         if name.starts_with('.') {
