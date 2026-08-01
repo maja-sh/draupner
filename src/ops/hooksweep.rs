@@ -551,7 +551,10 @@ fn sweep_host(
                 // Dying *after* the launch check is a failed `up`, not a green one
                 // with a caveat — there is nothing running left to talk to.
                 Some(crate::supervise::Health::Crashed) => {
-                    step.fail(&format!("exited after launch — see ~/.ws-run/{name}.log"));
+                    step.fail(&format!(
+                        "exited after launch — see {}",
+                        crate::supervise::log_hint(&name)
+                    ));
                 }
                 // Alive but nothing on the port yet is genuinely ambiguous — a
                 // `cargo watch` compiles for a minute before it listens — so it
@@ -561,7 +564,8 @@ fn sweep_host(
                     crate::ui::note(&format!(
                         "{repo}: nothing is listening on the port ws allocated yet. If it's still \
                          starting this resolves itself — `ws list` will say. Otherwise check \
-                         `~/.ws-run/{name}.log`."
+                         `{log}`.",
+                        log = crate::supervise::log_hint(&name),
                     ));
                 }
                 // A stranger on the port is not ambiguous: whatever just started

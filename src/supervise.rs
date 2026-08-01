@@ -35,10 +35,10 @@ use crate::remote::{shell_quote, Site};
 use crate::workspace;
 
 /// The per-worktree process name — the PID/log-file basename,
-/// `ws-<sanitized-branch>-<repo>`. Mirrors the mutagen session naming so the whole
-/// per-worktree namespace is consistent and greppable.
+/// `ws-<sanitized-branch>-<repo>`. The same [`workspace::ws_name`] the mutagen
+/// session uses, so the whole per-worktree namespace is consistent and greppable.
 pub fn proc_name(branch: &str, repo: &str) -> String {
-    format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
+    workspace::ws_name(branch, repo)
 }
 
 /// Emitted by the launch script when the process is gone half a second later, and
@@ -51,15 +51,30 @@ const DIED_MARKER: &str = "__WS_HOST_DIED__";
 /// is left alone and said out loud rather than quietly forgotten.
 const STRANGER_MARKER: &str = "__WS_HOST_STRANGER__";
 
-/// The run dir and pid/log paths for `name`, as shell expressions evaluated at the
+/// The run dir, as a shell expression evaluated at the site (`$HOME` resolves to the
+/// server's home for a remote workspace).
+const RUN_DIR: &str = "\"$HOME/.ws-run\"";
+
+/// The `name.ext` path under the run dir, as a shell expression evaluated at the
 /// site (`$HOME` resolves to the server's home for a remote workspace). The basename
 /// is `shell_quote`d: `name` derives from the branch and repo, which can carry
 /// hostile characters from a cloned `.ws.json`, and a bare `{name}` inside a
 /// double-quoted path would still expand `$(…)`.
-fn paths(name: &str) -> (String, String, String) {
-    let pid = format!("\"$HOME/.ws-run/\"{}", shell_quote(&format!("{name}.pid")));
-    let log = format!("\"$HOME/.ws-run/\"{}", shell_quote(&format!("{name}.log")));
-    ("\"$HOME/.ws-run\"".to_string(), pid, log)
+fn run_path(name: &str, ext: &str) -> String {
+    format!("\"$HOME/.ws-run/\"{}", shell_quote(&format!("{name}.{ext}")))
+}
+
+/// The same `name.ext` file as [`run_path`], spelled the way a user would type it
+/// (`~/.ws-run/<name>.<ext>`) for a message that sends them to look at it. Ops
+/// point at these files too, so the layout stays owned here — a moved run dir
+/// would otherwise leave several messages naming a directory that's gone.
+fn run_hint(name: &str, ext: &str) -> String {
+    format!("~/.ws-run/{name}.{ext}")
+}
+
+/// Where a host process's output lands, for a message telling the user to look.
+pub fn log_hint(name: &str) -> String {
+    run_hint(name, "log")
 }
 
 /// A shell snippet that reads the pid file into `$p` (pid) and `$want` (identity),
@@ -104,7 +119,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     if is_active(site, name) {
         return Ok(false);
     }
-    let (dir, pid, log) = paths(name);
+    let (dir, pid, log) = (RUN_DIR, run_path(name, "pid"), run_path(name, "log"));
     // A `kind: host` repo's toolchain comes from the user's shell environment, and a
     // detached process on the server inherits the non-interactive SSH env — where a
     // version-manager `node` doesn't exist. So `#!/usr/bin/env node` shebangs (vite,
@@ -169,7 +184,8 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         .output()
         .with_context(|| "spawn host process")?;
     if !out.status.success() {
-        bail!("host process: {}", first_line(&String::from_utf8_lossy(&out.stderr)));
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("host process: {}", crate::ui::first_nonempty_line(&err).unwrap_or("failed"));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     if let Some(tail) = stdout.split_once(DIED_MARKER).map(|(_, t)| t) {
@@ -179,7 +195,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         for line in tail.lines().map(str::trim).filter(|l| !l.is_empty()) {
             crate::ui::hook_line(name, line, true);
         }
-        bail!("exited immediately — see ~/.ws-run/{name}.log");
+        bail!("exited immediately — see {}", log_hint(name));
     }
     Ok(true)
 }
@@ -198,7 +214,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
 /// signal a stranger is right; forgetting it exists is what turned that caution
 /// into a leak.
 pub fn down(site: &Site, name: &str) -> Result<()> {
-    let (_, pid, _) = paths(name);
+    let pid = run_path(name, "pid");
     let read = read_pidfile(&pid);
     // Only signal when the pid is alive AND its start time matches what we recorded
     // — never a recycled pid belonging to an unrelated process. `KILL` after a short
@@ -240,7 +256,8 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
     if String::from_utf8_lossy(&out.stdout).contains(STRANGER_MARKER) {
         crate::ui::note(&format!(
             "{name}: a process is recorded but its identity doesn't match — left running. \
-             Check `~/.ws-run/{name}.pid` and stop it by hand if it's stale."
+             Check `{pid_file}` and stop it by hand if it's stale.",
+            pid_file = run_hint(name, "pid"),
         ));
     }
     // The script itself always exits 0; a non-zero status is the transport failing
@@ -256,7 +273,7 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
 /// recycled pid isn't mistaken for ours). Over a flaky remote link the SSH call
 /// fails and this returns `false` (same best-effort posture as the rest of teardown).
 pub fn is_active(site: &Site, name: &str) -> bool {
-    let (_, pid, _) = paths(name);
+    let pid = run_path(name, "pid");
     let read = read_pidfile(&pid);
     let script = format!(
         "{read}\n\
@@ -373,7 +390,7 @@ fn owner_fn() -> &'static str {
 /// One round trip: liveness, identity, and every port verdict come back together,
 /// which matters because a remote workspace pays SSH for each one.
 pub fn health(site: &Site, name: &str, ports: &[u16]) -> Option<Health> {
-    let (_, pid, _) = paths(name);
+    let pid = run_path(name, "pid");
     let read = read_pidfile(&pid);
     // The port list is `u16`s we formatted ourselves — no config value reaches
     // the script here. An empty list omits the loop entirely (`for x in ; do` is
@@ -479,10 +496,6 @@ fn parse_health(out: &str) -> Option<Health> {
     Some(Health::Serving(served))
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,7 +510,7 @@ mod tests {
     fn paths_quote_a_hostile_name() {
         // A name carrying a command substitution must be single-quoted so it can't
         // execute when the path expression is evaluated by the shell.
-        let (_, pid, _) = paths("ws-feat-x$(touch owned)-api");
+        let pid = run_path("ws-feat-x$(touch owned)-api", "pid");
         assert!(pid.contains("'ws-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
         assert!(pid.starts_with("\"$HOME/.ws-run/\""), "home must still expand: {pid}");
     }

@@ -96,10 +96,11 @@ fn init_local(
         )));
     }
 
-    if root.join(".ws.json").exists() {
+    let cfg_path = root.join(".ws.json");
+    if cfg_path.exists() {
         bail!(
             "{} already exists. Remove it (or use `--refresh-schema` to regenerate the JSON Schema).",
-            root.join(".ws.json").display()
+            cfg_path.display()
         );
     }
 
@@ -112,7 +113,6 @@ fn init_local(
     let repos = detect_repos(root)?;
 
     let remote_note = remote.as_ref().map(|r| r.connection.clone());
-    let step_config = crate::ui::step("cfg", ".ws.json");
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
         domain,
@@ -122,14 +122,8 @@ fn init_local(
         remote,
         repos: repos.iter().map(|r| scaffold_repo(root, r, &runtime)).collect(),
     };
-    let cfg_path = root.join(".ws.json");
-    crate::config::write_json_pretty(&cfg_path, &cfg)?;
-    step_config.ok();
-
-    let step_schema = crate::ui::step("cfg", ".ws.schema.json");
-    let schema = schemars::schema_for!(WsConfig);
-    crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
-    step_schema.ok();
+    super::write_ws_json(root, &cfg)?;
+    write_schema(root)?;
 
     let step_hooks = crate::ui::step("hks", ".ws-hooks/ templates");
     write_hook_templates(&root.join(".ws-hooks"), &repos)?;
@@ -156,11 +150,19 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
 
     // `root` is already a located workspace (the caller walked up to find it), so
     // the schema can't land in a non-workspace dir.
+    write_schema(root)?;
+    crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
+    Ok(())
+}
+
+/// Generate `<root>/.ws.schema.json` from the live `WsConfig`, step UI included,
+/// so `ws init` and `ws init --refresh-schema` can't drift on the filename or
+/// the step label.
+fn write_schema(root: &Path) -> Result<()> {
     let step = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
     crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
     step.ok();
-    crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
     Ok(())
 }
 

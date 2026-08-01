@@ -621,7 +621,7 @@ fn linux_client_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
                     "couldn't tell which resolver this machine uses, so the wildcard isn't \
                      offered as a step — wire one of these by hand:",
                 );
-                crate::ui::command_block(&linux_client_commands(report, domain));
+                crate::ui::command_block(&linux_client_commands(domain, &report.address));
             }
         }
     }
@@ -677,15 +677,19 @@ fn dns_step_linux(domain: &str, address: &str) -> Option<Step> {
         };
         return Some(Step {
             what: format!("resolve `*.{domain}` → {address} (dnsmasq drop-in){caveat}"),
-            commands: vec![
-                format!(
-                    "echo 'address=/{domain}/{address}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"
-                ),
-                "sudo systemctl restart dnsmasq".to_string(),
-            ],
+            commands: dnsmasq_dropin_commands(domain, address),
         });
     }
     None
+}
+
+/// The dnsmasq drop-in recipe, shared by the runnable step and the printed
+/// fallback so the path, file name, and restart unit only exist in one place.
+fn dnsmasq_dropin_commands(domain: &str, address: &str) -> Vec<String> {
+    vec![
+        format!("echo 'address=/{domain}/{address}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"),
+        "sudo systemctl restart dnsmasq".to_string(),
+    ]
 }
 
 /// Whether the system's configured resolver is on loopback — i.e. queries reach a
@@ -770,24 +774,21 @@ fn which(bin: &str) -> Option<()> {
         .map(|_| ())
 }
 
-/// The resolver half of the client guidance as plain text — the fallback when the
-/// resolver can't be identified, and what `guide_linux_gaps` prints for a
-/// non-interactive read. Pure, so it's testable without a network.
-fn linux_client_commands(report: &Report, domain: &str) -> Vec<String> {
-    if report.dns.is_ok() {
-        return Vec::new();
-    }
+/// The resolver half of the client guidance as plain text — the fallback
+/// [`linux_client_steps`] prints when the resolver can't be identified, showing
+/// both forms rather than guessing. Pure, so it's testable without a network.
+fn linux_client_commands(domain: &str, address: &str) -> Vec<String> {
     // One line per entry: `command_block` indents each element, so an embedded
     // newline would render flush-left and break the block's alignment.
-    let addr = &report.address;
-    vec![
-        "# wildcard DNS — dnsmasq:".to_string(),
-        format!("echo 'address=/{domain}/{addr}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"),
-        "sudo systemctl restart dnsmasq".to_string(),
+    let mut cmds = vec!["# wildcard DNS — dnsmasq:".to_string()];
+    cmds.extend(dnsmasq_dropin_commands(domain, address));
+    cmds.extend([
         "# …or systemd-resolved, routing just this domain:".to_string(),
-        format!("sudo resolvectl dns    <iface> {addr}"),
+        // Padded to align the two `<iface>` columns inside `command_block`.
+        format!("sudo resolvectl dns    <iface> {address}"),
         format!("sudo resolvectl domain <iface> '~{domain}'"),
-    ]
+    ]);
+    cmds
 }
 
 /// The `:port` suffix a browser URL carries, empty for the standard `:443`.
@@ -859,14 +860,7 @@ mod tests {
         // `server-setup/debian.sh` — that provisions a machine to *run* stacks
         // (podman, compose, mutagen, the podman socket) to fix a DNS entry.
         // Asserted on the command text because that's what the user acts on.
-        let report = Report {
-            port: 8443,
-            address: "100.64.1.2".to_string(),
-            dns: crate::caddy::Dns::Unresolved,
-            ca_ok: true, // skip the CA branch: it would try to reach a Caddy
-            port_ok: true,
-        };
-        let cmds = linux_client_commands(&report, "myapp.test");
+        let cmds = linux_client_commands("myapp.test", "100.64.1.2");
         let joined = cmds.join("\n");
         assert!(!joined.contains("server-setup"), "client guidance named the server script: {joined}");
         assert!(!joined.contains("podman"), "{joined}");

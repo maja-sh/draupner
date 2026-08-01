@@ -114,8 +114,7 @@ pub fn prepare(
         if phase.derives() {
             effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
         } else {
-            let recorded = ports::services(root, branch_sanitized, repo);
-            let s = if recorded.is_empty() { rc.services.clone() } else { recorded };
+            let s = recorded_or_declared(root, branch_sanitized, repo, rc);
             let names = s.keys().cloned().collect();
             (s, names)
         };
@@ -126,22 +125,7 @@ pub fn prepare(
     // server that publishes it. `WS_HOST_*` needs no port — the routed hostname is
     // location-transparent.
     let host = rc.is_host();
-    let port_map = if phase.allocates() {
-        // A container only needs a host port for its raw-TCP services — HTTP
-        // ones are dialed on the container network. An explicit host repo
-        // allocates one for EVERY service: N host processes on a single machine
-        // can't share a port the way N isolated containers can, so even an HTTP
-        // host service needs its own port to bind (Caddy then routes the host to
-        // `host.containers.internal:<port>`).
-        let needs: Vec<String> = services
-            .iter()
-            .filter(|(_, s)| host || !s.is_http())
-            .map(|(n, _)| n.clone())
-            .collect();
-        ports::resolve(site, root, branch_sanitized, repo, &needs)?
-    } else {
-        ports::load(root, branch_sanitized, repo)
-    };
+    let port_map = port_map(site, root, branch_sanitized, repo, &services, host, phase)?;
 
     // Record the effective service set at `up` so the read-only phases above can
     // reconstruct hosts/ports for auto-derived services.
@@ -179,8 +163,7 @@ pub fn prepare(
     // Declared `env` mappings with their `${WS_*}` tokens substituted. Fed both
     // into the script env and (for a container) the override's `environment:`.
     let declared = declared_env(rc, &subst);
-    let mut env: Vec<(String, String)> =
-        vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut env: Vec<(String, String)> = vars.into_iter().collect();
     env.extend(declared.iter().cloned());
 
     // Container repos get the generated compose override + project namespacing
@@ -203,6 +186,48 @@ pub fn prepare(
     }
     env.extend(context);
     Ok(env)
+}
+
+/// The service set to reason about on a read-only path: prefer the effective set
+/// recorded at the last `up` — it covers services that were auto-derived from
+/// compose and never declared — falling back to the declared block for a worktree
+/// that predates the record.
+fn recorded_or_declared(
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+    rc: &RepoConfig,
+) -> BTreeMap<String, ServiceConfig> {
+    let recorded = ports::services(root, branch_sanitized, repo);
+    if recorded.is_empty() { rc.services.clone() } else { recorded }
+}
+
+/// The host-port map for a repo's services: allocate the ones that need a port on
+/// an allocating phase, else read back whatever was recorded.
+///
+/// A container only needs a host port for its raw-TCP services — HTTP ones are
+/// dialed on the container network. An explicit host repo allocates one for EVERY
+/// service: N host processes on a single machine can't share a port the way N
+/// isolated containers can, so even an HTTP host service needs its own port to
+/// bind (Caddy then routes the host to `host.containers.internal:<port>`).
+fn port_map(
+    site: &Site,
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    host: bool,
+    phase: Phase,
+) -> Result<BTreeMap<String, u16>> {
+    if !phase.allocates() {
+        return Ok(ports::load(root, branch_sanitized, repo));
+    }
+    let needs: Vec<String> = services
+        .iter()
+        .filter(|(_, s)| host || !s.is_http())
+        .map(|(n, _)| n.clone())
+        .collect();
+    ports::resolve(site, root, branch_sanitized, repo, &needs)
 }
 
 /// The workspace-context env pairs (`WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`)
@@ -343,10 +368,7 @@ pub fn routes(
     let (Some(rc), Some(domain)) = (cfg.repo_config(repo), cfg.domain.as_deref()) else {
         return Vec::new();
     };
-    // Prefer the set recorded at `up` (covers auto-derived services); fall back
-    // to the declared block for a worktree that predates the record.
-    let recorded = ports::services(root, branch_sanitized, repo);
-    let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
+    let services = recorded_or_declared(root, branch_sanitized, repo, rc);
     // Only the branch actually taken pays its lookup: a host repo loads the port
     // map (upstream is its allocated port); a container repo computes the project
     // name (upstream is the project-qualified container name).
@@ -430,14 +452,6 @@ fn effective_services(
     Ok((rc.services.clone(), rc.services.keys().cloned().collect()))
 }
 
-/// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*
-/// service set and the current allocation policy — never the raw `.ws-meta` map,
-/// which can retain a stale port for a service that was since removed or flipped
-/// to HTTP. HTTP services yield a hostname (only when a top-level `domain` is
-/// set). `WS_PORT` is emitted only when the service is one `ws` currently
-/// allocates a port for (`host` repo → every service; container → raw-TCP only),
-/// so a host HTTP service gets both while a container HTTP service never gets a
-/// (possibly stale) port.
 /// The per-worktree hostname for an HTTP service: `<branch>.<subdomain>.<domain>`.
 /// Shared by the `WS_HOST_*` env var and the Caddy route match so the two can't
 /// drift.
@@ -454,6 +468,14 @@ fn dns_label(s: &str) -> String {
     s.replace('.', "-")
 }
 
+/// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*
+/// service set and the current allocation policy — never the raw `.ws-meta` map,
+/// which can retain a stale port for a service that was since removed or flipped
+/// to HTTP. HTTP services yield a hostname (only when a top-level `domain` is
+/// set). `WS_PORT` is emitted only when the service is one `ws` currently
+/// allocates a port for (`host` repo → every service; container → raw-TCP only),
+/// so a host HTTP service gets both while a container HTTP service never gets a
+/// (possibly stale) port.
 fn ws_vars(
     services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
@@ -491,10 +513,7 @@ fn peer_vars(
     phase: Phase,
 ) -> Result<BTreeMap<String, String>> {
     let Some(rc) = cfg.repo_config(peer) else { return Ok(BTreeMap::new()) };
-    // Prefer the service set recorded at the peer's last `up` (covers auto-derived
-    // container services); fall back to its declared block for a fresh worktree.
-    let recorded = ports::services(root, branch_sanitized, peer);
-    let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
+    let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 
     // On an allocating phase (`up`/`new`/`exec`) **pre-allocate** the peer's
@@ -506,16 +525,7 @@ fn peer_vars(
     // reservation whose peer was never created. Read/teardown phases stay
     // read-only (`load`) — they must never allocate. `WS_HOST_*` needs no port and
     // resolved without this already; this is purely for `WS_PORT_*`.
-    let port_map = if phase.allocates() {
-        let needs: Vec<String> = services
-            .iter()
-            .filter(|(_, s)| peer_host || !s.is_http())
-            .map(|(n, _)| n.clone())
-            .collect();
-        ports::resolve(site, root, branch_sanitized, peer, &needs)?
-    } else {
-        ports::load(root, branch_sanitized, peer)
-    };
+    let port_map = port_map(site, root, branch_sanitized, peer, &services, peer_host, phase)?;
     Ok(ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, peer_host)
         .into_iter()
         .filter_map(|(k, v)| {

@@ -121,12 +121,24 @@ pub fn base_env(
     ]
 }
 
-/// Apply the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env` mappings) on top of the base `WS_*` contract. Shared by script and
-/// file commands so both mechanisms see the same routing context.
-fn apply_extra(cmd: &mut Command, extra_env: &[(String, String)]) {
-    for (k, v) in extra_env {
-        cmd.env(k, v);
+/// Apply the whole env contract to `c`: the base `WS_*` set (see [`base_env`]),
+/// then the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
+/// `env` mappings) on top. Shared by script and file commands so both mechanisms
+/// see the same routing context — and applied as one call, since a declared `env`
+/// key only overrides a base `WS_*` key because `extra_env` is applied last.
+fn apply_env(
+    c: &mut Command,
+    workspace_root: &Path,
+    worktree_path: &Path,
+    repo: &str,
+    branch_sanitized: &str,
+    event: &str,
+    extra_env: &[(String, String)],
+) {
+    let base =
+        base_env(workspace_root, &worktree_path.to_string_lossy(), repo, branch_sanitized, event);
+    for (k, v) in base.iter().chain(extra_env) {
+        c.env(k, v);
     }
 }
 
@@ -144,9 +156,7 @@ fn script_command(
 ) -> Command {
     let mut c = Command::new("sh");
     c.arg("-c").arg(cmd).current_dir(worktree_path);
-    let base = base_env(workspace_root, &worktree_path.to_string_lossy(), repo, branch_sanitized, event);
-    apply_extra(&mut c, &base);
-    apply_extra(&mut c, extra_env);
+    apply_env(&mut c, workspace_root, worktree_path, repo, branch_sanitized, event, extra_env);
     c
 }
 
@@ -164,9 +174,7 @@ fn file_command(
 ) -> Command {
     let mut c = Command::new(workspace_root.join(hook_rel));
     c.arg(worktree_path).current_dir(workspace_root);
-    let base = base_env(workspace_root, &worktree_path.to_string_lossy(), repo, branch_sanitized, event);
-    apply_extra(&mut c, &base);
-    apply_extra(&mut c, extra_env);
+    apply_env(&mut c, workspace_root, worktree_path, repo, branch_sanitized, event, extra_env);
     c
 }
 
@@ -211,14 +219,28 @@ fn run_script(
 ) -> Result<()> {
     // Anchor `.ws-hooks/…` references to `$WS_WORKSPACE_ROOT` — same as the remote
     // path's `command_for` — so a config names `.ws-hooks/up.sh` and it resolves
-    // whether the hook runs here or on the server.
-    let joined = script
-        .commands()
-        .iter()
-        .map(|c| crate::config::anchor_ws_hooks(c))
-        .collect::<Vec<_>>()
-        .join(" && ");
+    // whether the hook runs here or on the server. `Script::joined` is the single
+    // home for that rule.
+    let joined = script.joined();
     run_one(workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env)
+}
+
+/// Spawn `cmd` with piped stdio, stream its output under `tag`, and fail on a
+/// non-zero exit reported as "`{what}` exited N". The single home for the
+/// child-lifecycle plumbing shared by the script and file runners.
+fn spawn_streamed(
+    mut cmd: Command,
+    tag: &str,
+    spawn_ctx: impl FnOnce() -> String,
+    what: &str,
+) -> Result<()> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().with_context(spawn_ctx)?;
+    let status = stream_and_wait(child, tag)?;
+    if !status.success() {
+        bail!("{what} exited {}", status.code().unwrap_or(-1));
+    }
+    Ok(())
 }
 
 /// Run one already-joined shell command in the worktree, streaming its output.
@@ -233,16 +255,15 @@ fn run_one(
     cmd: &str,
     extra_env: &[(String, String)],
 ) -> Result<()> {
-    let mut c = script_command(
+    let c = script_command(
         workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
     );
-    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = c.spawn().with_context(|| format!("spawn `sh -c` for {event} script"))?;
-    let status = stream_and_wait(child, &format!("{repo}-{event}"))?;
-    if !status.success() {
-        bail!("{event} script exited {}", status.code().unwrap_or(-1));
-    }
-    Ok(())
+    spawn_streamed(
+        c,
+        &format!("{repo}-{event}"),
+        || format!("spawn `sh -c` for {event} script"),
+        &format!("{event} script"),
+    )
 }
 
 /// Run a legacy hook file: executed directly (honoring its shebang) with the
@@ -260,19 +281,15 @@ fn run(
         bail!("hook path must be relative to the workspace root: {hook_rel}");
     }
     let tag = format!("{repo}-{event}");
-    let mut cmd = file_command(
+    let cmd = file_command(
         workspace_root, hook_rel, worktree_path, repo, branch_sanitized, event, extra_env,
     );
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawn {}", workspace_root.join(hook_rel).display()))?;
-
-    let status = stream_and_wait(child, &tag)?;
-    if !status.success() {
-        bail!("{hook_rel} exited {}", status.code().unwrap_or(-1));
-    }
-    Ok(())
+    spawn_streamed(
+        cmd,
+        &tag,
+        || format!("spawn {}", workspace_root.join(hook_rel).display()),
+        hook_rel,
+    )
 }
 
 /// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
@@ -351,7 +368,7 @@ fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
                 if !status.success() {
                     return None;
                 }
-                return first_nonempty_line(&text);
+                return ui::first_nonempty_line(&text).map(String::from);
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -366,15 +383,12 @@ fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
     }
 }
 
-fn first_nonempty_line(s: &str) -> Option<String> {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
-}
-
-/// Stream lines from `r` to `ui::hook_line`, capped at `MAX_LINE` bytes per
-/// line. Overlong lines are truncated (tail discarded up to the next newline).
+/// Read lines from `r`, capped at `MAX_LINE` bytes per line, calling `f` for
+/// each. Overlong lines are truncated (tail discarded up to the next newline).
 /// Invalid UTF-8 is replaced with U+FFFD via `from_utf8_lossy` — never drops
-/// following lines.
-fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
+/// following lines. Split from `pipe` so the tests exercise this loop rather
+/// than a copy of it.
+fn for_each_line<R: Read>(r: R, mut f: impl FnMut(&str)) {
     let mut reader = BufReader::new(r);
     let mut buf = Vec::with_capacity(1024);
     loop {
@@ -391,8 +405,14 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
         }
         let end = if buf.last() == Some(&b'\n') { buf.len() - 1 } else { buf.len() };
         let line = String::from_utf8_lossy(&buf[..end]);
-        ui::hook_line(tag, &line, stderr);
+        f(&line);
     }
+}
+
+/// Stream lines from `r` to `ui::hook_line` so hook output lands with the
+/// correct gutter/indent.
+fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
+    for_each_line(r, |line| ui::hook_line(tag, line, stderr));
 }
 
 #[cfg(test)]
@@ -400,27 +420,11 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Mirror the read loop in `pipe()` so we can assert what the ui layer
+    /// Drive the real read loop `pipe()` uses so we can assert what the ui layer
     /// would see, without depending on eprintln capture.
     fn read_lines(input: &[u8]) -> Vec<String> {
-        let cursor = Cursor::new(input);
-        let mut reader = BufReader::new(cursor);
-        let mut buf = Vec::with_capacity(1024);
         let mut lines: Vec<String> = Vec::new();
-        loop {
-            buf.clear();
-            let n = match reader.by_ref().take(MAX_LINE as u64).read_until(b'\n', &mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            if n == MAX_LINE && buf.last() != Some(&b'\n') {
-                let mut discard = Vec::new();
-                let _ = reader.read_until(b'\n', &mut discard);
-            }
-            let end = if buf.last() == Some(&b'\n') { buf.len() - 1 } else { buf.len() };
-            lines.push(String::from_utf8_lossy(&buf[..end]).into_owned());
-        }
+        for_each_line(Cursor::new(input), |l| lines.push(l.to_string()));
         lines
     }
 

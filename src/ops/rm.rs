@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::path::Path;
-use std::process::Command;
 
 use crate::config;
 use crate::git;
@@ -57,16 +56,5 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
 /// Commits present locally but not on the tracked upstream. Empty when there's
 /// no upstream configured (can't be "unpushed" against nothing) or on error.
 fn unpushed_commits(wt: &Path) -> Vec<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["log", "@{u}..HEAD", "--oneline"])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
+    git::stdout_lines(git::git(wt).args(["log", "@{u}..HEAD", "--oneline"]))
 }

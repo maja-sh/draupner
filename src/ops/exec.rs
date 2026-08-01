@@ -36,8 +36,7 @@ pub fn run(
     // the cwd, i.e. you're standing inside the worktree.
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    let root_canon = ws.root.canonicalize().unwrap_or_else(|_| ws.root.clone());
-    let worktrees_root = root_canon.join(".worktrees");
+    let worktrees_root = workspace::worktrees_root(&ws.root);
 
     let (task, repo_from_cwd) = match branch {
         Some(b) => (workspace::sanitize_branch(b), None),

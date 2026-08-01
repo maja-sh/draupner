@@ -14,7 +14,7 @@
 //! only ever rewritten with consent.
 
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use crate::config::{self, RemoteConfig};
@@ -76,9 +76,7 @@ pub fn set(
         cfg.domain = domain;
     }
 
-    let step = crate::ui::step("cfg", ".ws.json");
-    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
-    step.ok();
+    super::write_ws_json(&ws.root, &cfg)?;
 
     // Backfill sync for the worktrees that predate the switch. Config is
     // already written, so a partial failure here is recoverable by rerunning
@@ -198,7 +196,7 @@ pub fn unset(force: bool) -> Result<()> {
     // git doesn't know may still have a live session pointing at the server,
     // including one an older, laxer `set` created. Narrowing this to git would
     // strand exactly those.
-    for (task, repo, _wt) in all_worktrees(&ws.root) {
+    for (task, repo) in all_worktrees(&ws.root) {
         super::bail_if_interrupted()?;
         let session = mutagen::session_name(&task, &repo);
         let step = crate::ui::step(&format!("{task}/{repo}"), "Sync terminated");
@@ -216,9 +214,7 @@ pub fn unset(force: bool) -> Result<()> {
         }
     }
 
-    let step = crate::ui::step("cfg", ".ws.json");
-    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
-    step.ok();
+    super::write_ws_json(&ws.root, &cfg)?;
 
     crate::ui::summary_ok(&["workspace is local again".to_string()]);
     // Only reachable via `--force`. Server-side state (stacks, Caddy routes, the
@@ -538,16 +534,16 @@ fn compose_liveness(
     }
 }
 
-/// Every existing worktree as `(task, repo, path)`, composed from the two
-/// canonical `workspace` walkers so the ".worktrees layout" rules (symlink and
-/// non-UTF-8 handling) stay in one place. Task-dir names are already-sanitized
-/// branches; `all_worktrees_for` re-sanitizes idempotently.
-fn all_worktrees(root: &std::path::Path) -> Vec<(String, String, PathBuf)> {
+/// Every existing worktree as `(task, repo)`, composed from the two canonical
+/// `workspace` walkers so the ".worktrees layout" rules (symlink and non-UTF-8
+/// handling) stay in one place. Task-dir names are already-sanitized branches;
+/// `all_worktrees_for` re-sanitizes idempotently.
+fn all_worktrees(root: &std::path::Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for task_dir in workspace::all_task_dirs(root) {
         let Some(task) = task_dir.file_name().and_then(|n| n.to_str()) else { continue };
-        for (repo, wt) in workspace::all_worktrees_for(root, task) {
-            out.push((task.to_string(), repo, wt));
+        for (repo, _wt) in workspace::all_worktrees_for(root, task) {
+            out.push((task.to_string(), repo));
         }
     }
     out

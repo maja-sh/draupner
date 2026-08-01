@@ -37,6 +37,16 @@ fn mutagen_noop(f: &WorkspaceFixture) -> PathBuf {
     f.stub("fake-mutagen", "exit 0")
 }
 
+/// The env every remote-offload run needs: stubbed ssh + mutagen, and where the
+/// ssh stub should record its argv.
+fn remote_env<'a>(ssh: &'a Path, mg: &'a Path, args: &'a Path) -> [(&'a str, &'a str); 3] {
+    [
+        ("WS_SSH", ssh.to_str().unwrap()),
+        ("WS_MUTAGEN", mg.to_str().unwrap()),
+        ("ARGS_FILE", args.to_str().unwrap()),
+    ]
+}
+
 fn remote_container_ws() -> &'static str {
     // No `domain` ⇒ routing off, so `up` needs no Caddy — this isolates the
     // script-dispatch + port-allocation path. `mysql` is raw-TCP (gets a WS_PORT).
@@ -50,14 +60,8 @@ fn remote_container_ws() -> &'static str {
 /// Create the worktree (remote, so it resolves HOME + records the mysql port),
 /// returning the fixture so a following `up`/`down` reuses the recorded allocation.
 fn new_remote(f: &WorkspaceFixture, repo: &str, ssh: &Path, mg: &Path) {
-    let out = f.run_with_env(
-        &["new", repo, "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", f.path().join("new-ssh.txt").to_str().unwrap()),
-        ],
-    );
+    let args = f.path().join("new-ssh.txt");
+    let out = f.run_with_env(&["new", repo, "feat/foo"], &remote_env(ssh, mg, &args));
     assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
 }
 
@@ -71,14 +75,7 @@ fn up_runs_the_script_on_the_server_over_ssh() {
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
@@ -110,14 +107,7 @@ fn down_runs_the_script_on_the_server_over_ssh() {
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("down-ssh.txt");
-    let out = f.run_with_env(
-        &["down", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["down", "feat/foo"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws down failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
@@ -146,14 +136,7 @@ fn list_runs_status_on_the_server_for_a_remote_workspace() {
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("list-ssh.txt");
-    let out = f.run_with_env(
-        &["list"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["list"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
@@ -186,14 +169,7 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
     new_remote(&f, "svc", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
@@ -256,14 +232,7 @@ esac"#,
     new_remote(&f, "svc", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let err = stderr(&out);
     assert!(!out.status.success(), "a dead host process must fail `ws up`:\n{err}");
@@ -291,14 +260,7 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
 
     // prepare wrote into the LOCAL worktree — it ran on this machine, not over ssh.
@@ -326,14 +288,7 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(
-        &["up", "feat/foo"],
-        &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
-            ("ARGS_FILE", args.to_str().unwrap()),
-        ],
-    );
+    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
     assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
 
     // The push is `ssh <conn> 'mkdir -p <base> && tar -C <base> -xpf -'`.

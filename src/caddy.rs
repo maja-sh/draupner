@@ -33,7 +33,7 @@
 //! Residual: because a published port must bind the container's
 //! routable interface, a tenant on `ws-net` could in principle reach `caddy:2019` —
 //! acceptable for a local dev tool (tenants are your own stacks); a dedicated
-//! admin network is the hardening follow-up. See `boot_config`/`admin_args`.
+//! admin network is the hardening follow-up. See `boot_config`/`admin_url`.
 //!
 //! Seams: `WS_CADDY_ADMIN` (when set, `ws` talks to that admin URL and treats
 //! Caddy + `ws-net` as externally managed — BYO / test stub) and the runtime
@@ -83,15 +83,16 @@ const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// CRUD for worktree services never touches it.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
 
-/// The curl args to reach the admin API for `path`: the host-loopback-published
-/// TCP admin (default), or the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam).
-/// For a remote site the admin is published on the *server's* loopback and `curl`
-/// itself runs there (see [`curl`]), so `127.0.0.1` resolves server-side.
-fn admin_args(_site: &Site, path: &str) -> Vec<String> {
+/// The admin API URL for `path`: the host-loopback-published TCP admin (default),
+/// or the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam).
+/// No `Site` is needed: for a remote site the admin is published on the *server's*
+/// loopback and `curl` itself runs there (see [`curl`]), so `127.0.0.1` resolves
+/// server-side.
+fn admin_url(path: &str) -> String {
     if let Ok(url) = std::env::var("WS_CADDY_ADMIN") {
-        vec![format!("{}{}", url.trim_end_matches('/'), path)]
+        format!("{}{}", url.trim_end_matches('/'), path)
     } else {
-        vec![format!("http://127.0.0.1:{}{path}", admin_port())]
+        format!("http://127.0.0.1:{}{path}", admin_port())
     }
 }
 
@@ -105,25 +106,33 @@ pub fn externally_managed() -> bool {
     std::env::var_os("WS_CADDY_ADMIN").is_some()
 }
 
+/// A machine-wide port `ws` persists: the `env` seam wins, else
+/// `~/.config/ws/<file>`, else `default`. A `0` (or unparseable) value is ignored
+/// *at each layer* — publishing/listening on port 0 is never usable, so a
+/// truncated file or a bad env value can't seed a broken Caddy (and a `0` in the
+/// env still lets the persisted file have its say).
+fn persisted_port(env: &str, file: &str, default: u16) -> u16 {
+    let nonzero = |p: u16| (p != 0).then_some(p);
+    std::env::var(env)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .and_then(nonzero)
+        .or_else(|| {
+            std::fs::read_to_string(config_dir().join(file))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .and_then(nonzero)
+        })
+        .unwrap_or(default)
+}
+
 /// The HTTPS port Caddy publishes and serves on. `WS_HTTPS_PORT` (test seam)
 /// wins, else the persisted opt-in in `~/.config/ws/https_port` (written by
 /// `ws setup --port`), else the non-privileged default. A change here only takes
 /// effect once `ensure_running` re-seeds — `--resume` otherwise pins the old
 /// port from the autosave.
 pub fn https_port() -> u16 {
-    // A `0` (or unparseable) value would publish/listen on port 0 — never usable.
-    // Ignore it and fall through to the default, so a truncated file / bad env
-    // can't seed a broken Caddy.
-    if let Some(p) = std::env::var("WS_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
-        if p != 0 {
-            return p;
-        }
-    }
-    std::fs::read_to_string(config_dir().join("https_port"))
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .filter(|&p| p != 0)
-        .unwrap_or(DEFAULT_HTTPS_PORT)
+    persisted_port("WS_HTTPS_PORT", "https_port", DEFAULT_HTTPS_PORT)
 }
 
 /// The address Caddy publishes its HTTPS port on. Local is always loopback;
@@ -188,16 +197,7 @@ pub fn set_https_port(port: u16) -> Result<()> {
 /// dials this, so it must be stable across runs — hence persisted, never picked
 /// fresh per invocation.
 pub fn admin_port() -> u16 {
-    if let Some(p) = std::env::var("WS_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
-        if p != 0 {
-            return p;
-        }
-    }
-    std::fs::read_to_string(config_dir().join("admin_port"))
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .filter(|&p| p != 0)
-        .unwrap_or(DEFAULT_ADMIN_PORT)
+    persisted_port("WS_CADDY_ADMIN_PORT", "admin_port", DEFAULT_ADMIN_PORT)
 }
 
 /// Persist the opt-in admin port so every later `ws` run dials the same one.
@@ -386,8 +386,8 @@ fn preflight_ports(site: &Site) -> Result<()> {
 /// config (`.../servers/ws/listen` = `[":8443"]`). `None` when the admin can't be
 /// reached or the shape is unexpected — callers treat that as "don't touch it".
 fn served_port(site: &Site) -> Option<u16> {
-    let out = curl(site, &admin_args(site, &format!("/config/apps/http/servers/{SERVER}/listen"))).ok()?;
-    if !out.ok || !(200..300).contains(&out.code) {
+    let out = curl(site, &[], &format!("/config/apps/http/servers/{SERVER}/listen")).ok()?;
+    if !out.succeeded() {
         return None;
     }
     parse_listen_port(&out.body)
@@ -559,7 +559,7 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
         Ok(o) if o.status.success() => None,
         Ok(o) => {
             let err = String::from_utf8_lossy(&o.stderr);
-            Some(err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed").to_string())
+            Some(crate::ui::first_nonempty_line(&err).unwrap_or("failed").to_string())
         }
         Err(e) => Some(e.to_string()),
     }
@@ -571,9 +571,7 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
 /// within the budget (a started-but-wedged Caddy, so routing can't proceed).
 fn wait_admin_ready(site: &Site) -> Result<()> {
     for _ in 0..50 {
-        let mut args = vec!["-o".to_string(), "/dev/null".to_string()];
-        args.extend(admin_args(site, "/config/"));
-        if curl(site, &args).map(|o| o.ok).unwrap_or(false) {
+        if curl(site, &["-o", "/dev/null"], "/config/").map(|o| o.ok).unwrap_or(false) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -672,8 +670,8 @@ pub fn is_running(site: &Site, runtime: &str) -> bool {
 /// setup step that trusts it in the system store. Caddy exposes it at
 /// `/pki/ca/local` as `{ "root_certificate": "<PEM>", … }`.
 pub fn root_ca_pem(site: &Site) -> Result<String> {
-    let out = curl(site, &admin_args(site, "/pki/ca/local"))?;
-    if !out.ok || !(200..300).contains(&out.code) {
+    let out = curl(site, &[], "/pki/ca/local")?;
+    if !out.succeeded() {
         bail!("fetch Caddy root CA: HTTP {} {}", out.code, out.body.trim());
     }
     let v: serde_json::Value =
@@ -849,13 +847,12 @@ fn route(id: &str, hostname: &str, upstream: &str, wildcard: bool) -> serde_json
 pub fn route_up(site: &Site, spec: &RouteSpec) -> Result<()> {
     delete_id(site, &spec.id); // ignore-absent
     let body = route(&spec.id, &spec.hostname, &spec.upstream, spec.wildcard).to_string();
-    let mut args = vec![
-        "-X".to_string(), "PUT".to_string(),
-        "-H".to_string(), "Content-Type: application/json".to_string(),
-        "-d".to_string(), body,
-    ];
-    args.extend(admin_args(site, &format!("/config/apps/http/servers/{SERVER}/routes/0")));
-    check(&curl(site, &args)?, || format!("add route {}", spec.id))
+    let out = curl(
+        site,
+        &["-X", "PUT", "-H", "Content-Type: application/json", "-d", &body],
+        &format!("/config/apps/http/servers/{SERVER}/routes/0"),
+    )?;
+    check(&out, || format!("add route {}", spec.id))
 }
 
 /// Remove a worktree service's route. A missing route, or an unreachable Caddy,
@@ -866,20 +863,21 @@ pub fn route_down(site: &Site, id: &str) {
 
 fn delete_id(site: &Site, id: &str) {
     // Best-effort: a 404 (no such route yet) is expected on first up / double down.
-    let mut args = vec!["-X".to_string(), "DELETE".to_string()];
-    args.extend(admin_args(site, &format!("/id/{id}/")));
-    let _ = curl(site, &args);
+    let _ = curl(site, &["-X", "DELETE"], &format!("/id/{id}/"));
 }
 
-/// Run `curl` against the admin API at `site`, capturing the response and HTTP
-/// status. Under an externally-managed Caddy (`WS_CADDY_ADMIN`, a BYO/test admin
-/// URL) the request always runs **locally** regardless of `site` — that URL is a
-/// host endpoint, not the server's admin port.
-fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
+/// Run `curl` against the admin API at `site` for `path`, with any caller flags in
+/// `extra`, capturing the response and HTTP status. Under an externally-managed
+/// Caddy (`WS_CADDY_ADMIN`, a BYO/test admin URL) the request always runs
+/// **locally** regardless of `site` — that URL is a host endpoint, not the
+/// server's admin port.
+fn curl(site: &Site, extra: &[&str], path: &str) -> Result<CurlOut> {
     let local = Site::Local;
     let effective = if externally_managed() { &local } else { site };
+    let url = admin_url(path);
     let mut argv: Vec<&str> = vec!["curl", "-sS", "-m", "10", "-w", "\n%{http_code}"];
-    argv.extend(args.iter().map(String::as_str));
+    argv.extend(extra.iter().copied());
+    argv.push(&url);
     let out = effective
         .command(&argv)
         .output()
@@ -901,8 +899,15 @@ struct CurlOut {
     stderr: String,
 }
 
+impl CurlOut {
+    /// The admin API answered, with a 2xx.
+    fn succeeded(&self) -> bool {
+        self.ok && (200..300).contains(&self.code)
+    }
+}
+
 fn check(out: &CurlOut, what: impl FnOnce() -> String) -> Result<()> {
-    if out.ok && (200..300).contains(&out.code) {
+    if out.succeeded() {
         return Ok(());
     }
     let detail = if !out.body.is_empty() { &out.body } else { &out.stderr };
@@ -1152,12 +1157,11 @@ mod tests {
     }
 
     #[test]
-    fn admin_args_hit_the_loopback_admin_port() {
-        // Reads `admin_port()` twice (inside `admin_args` and in the expectation),
+    fn admin_url_hits_the_loopback_admin_port() {
+        // Reads `admin_port()` twice (inside `admin_url` and in the expectation),
         // so it must hold the env guard — else a concurrent `WS_CADDY_ADMIN_PORT`
         // mutation between the two reads makes them disagree.
         let _g = env_guard();
-        let args = admin_args(&Site::Local, "/config/");
-        assert_eq!(args, vec![format!("http://127.0.0.1:{}/config/", admin_port())]);
+        assert_eq!(admin_url("/config/"), format!("http://127.0.0.1:{}/config/", admin_port()));
     }
 }
