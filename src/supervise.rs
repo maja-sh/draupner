@@ -4,8 +4,8 @@
 //! A host repo's `up` is a long-running dev server (`vite`, `cargo watch -x run`,
 //! `php artisan serve`). Running it via `sh -c` and waiting would block `ws up`
 //! forever, so instead `ws` starts it **detached** — `nohup … &`, stdio to a log,
-//! its PID recorded — and returns. `down` kills it; `ws list` checks liveness with
-//! `kill -0`.
+//! its PID recorded — and returns. `down` kills it; [`health`] reports what it is
+//! actually doing, which is what `ws list` shows and `ws up` checks after launch.
 //!
 //! Everything runs through the [`Site`] abstraction, so a **remote** workspace
 //! supervises the process **on the server** over SSH, right beside its containers —
@@ -24,7 +24,9 @@
 //! `vite`, `bun` — tear down with their parent).
 //!
 //! Trade vs a service manager: no crash-restart, and the process dies on
-//! logout/reboot (you `ws up` again). Fine for a dev server you start deliberately.
+//! logout/reboot (you `ws up` again). Fine for a dev server you start deliberately
+//! — and [`health`] at least makes a crash *visible*, which is the half of
+//! supervision that was actually missing.
 
 use anyhow::{bail, Context, Result};
 use std::process::Stdio;
@@ -272,6 +274,211 @@ pub fn is_active(site: &Site, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What a supervised host process is actually *doing*, as opposed to what `ws`
+/// reported when it launched it.
+///
+/// [`up`], [`down`] and [`is_active`] all answer the same question: is a process
+/// with our recorded identity alive. That is the *action* ws took, not the
+/// *effect* it implied. A dev server can be perfectly alive while serving a port
+/// ws never allocated (vite silently increments past a port it finds busy), and
+/// the port ws did allocate can be held by an orphan from an earlier run. Both
+/// read as healthy to a pid check, and both surface somewhere unrelated — an
+/// empty port, a 502, a stale server answering — which is what makes them
+/// expensive to chase.
+///
+/// So this asks the harder question: is the port ws allocated being listened on
+/// *by this process tree*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Health {
+    /// No pid file — never started, or stopped cleanly by `ws down`.
+    NotStarted,
+    /// A pid was recorded but nothing matching it is running: it exited without
+    /// a `ws down`. The state a user has no way to see today.
+    Crashed,
+    /// Alive, and its own process tree holds every port ws allocated.
+    Serving(Vec<u16>),
+    /// Alive, but nothing is listening on these allocated ports — still starting
+    /// up, or bound somewhere ws didn't ask for.
+    Silent(Vec<u16>),
+    /// Alive, but these allocated ports are held by a process *outside* its tree
+    /// — an orphan from an earlier run, so the real server has moved elsewhere.
+    Squatted(Vec<u16>),
+    /// Alive; the ports couldn't be attributed (no `ss` or `lsof` at the site, or
+    /// nothing was allocated to check). Liveness only — what ws knew before.
+    Running,
+}
+
+impl Health {
+    /// Whether this is the state a caller should be happy with. Both variants
+    /// mean "alive with nothing to report"; the rest all warrant saying something.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Health::Serving(_) | Health::Running)
+    }
+
+    /// A short run-state phrase for `ws list`'s status column and `ws up`'s step.
+    pub fn label(&self) -> String {
+        let list = |ports: &[u16]| {
+            ports.iter().map(|p| format!(":{p}")).collect::<Vec<_>>().join(", ")
+        };
+        match self {
+            Health::NotStarted => "not started".to_string(),
+            Health::Crashed => "crashed".to_string(),
+            Health::Serving(p) => format!("running {}", list(p)),
+            Health::Silent(p) => format!("running, nothing on {}", list(p)),
+            Health::Squatted(p) => format!("running, {} held by another process", list(p)),
+            Health::Running => "running".to_string(),
+        }
+    }
+}
+
+/// A shell snippet defining `ws_owner`, which prints who is listening on port
+/// `$1`: `ours` (a pid in the tree `$2`), `other`, `none`, or `unknown`.
+///
+/// Attribution, not just occupancy, is the whole point: "something is listening
+/// on :20001" is true both when the dev server bound it and when the orphan that
+/// pushed the dev server onto another port did. Only the pid distinguishes them.
+///
+/// `ss` (Linux) and `lsof` (macOS) are the two portable ways to get that pid, and
+/// both report it for sockets owned by the querying user — which the supervised
+/// process always is. Neither present ⇒ `unknown`, so the caller degrades to plain
+/// liveness rather than inventing a verdict. A socket that *is* listening but
+/// whose owner we can't see reads as `other`: it isn't ours as far as we can tell,
+/// which is the safe direction — it says "look at this", not "all good".
+fn owner_fn() -> &'static str {
+    "ws_owner() {\n\
+     \x20 if command -v ss >/dev/null 2>&1; then\n\
+     \x20   found=$(ss -Hltnp 2>/dev/null | awk -v p=\"$1\" '$4 ~ (\"[.:]\" p \"$\")')\n\
+     \x20   [ -n \"$found\" ] || { echo none; return; }\n\
+     \x20   pids=$(echo \"$found\" | tr ',' '\\n' | sed -n 's/^pid=\\([0-9][0-9]*\\).*/\\1/p')\n\
+     \x20 elif command -v lsof >/dev/null 2>&1; then\n\
+     \x20   pids=$(lsof -nP -iTCP:\"$1\" -sTCP:LISTEN -t 2>/dev/null)\n\
+     \x20   [ -n \"$pids\" ] || { echo none; return; }\n\
+     \x20 else\n\
+     \x20   echo unknown; return\n\
+     \x20 fi\n\
+     \x20 [ -n \"$pids\" ] || { echo other; return; }\n\
+     \x20 for q in $pids; do\n\
+     \x20   for t in $2; do\n\
+     \x20     [ \"$q\" = \"$t\" ] && { echo ours; return; }\n\
+     \x20   done\n\
+     \x20 done\n\
+     \x20 echo other\n\
+     }"
+}
+
+/// Probe what the host process named `name` is really doing, given the ports ws
+/// allocated for it. `None` when the site couldn't be reached or answered
+/// something unrecognisable — an unknown state, never a green one.
+///
+/// One round trip: liveness, identity, and every port verdict come back together,
+/// which matters because a remote workspace pays SSH for each one.
+pub fn health(site: &Site, name: &str, ports: &[u16]) -> Option<Health> {
+    let (_, pid, _) = paths(name);
+    let read = read_pidfile(&pid);
+    // The port list is `u16`s we formatted ourselves — no config value reaches
+    // the script here. An empty list omits the loop entirely (`for x in ; do` is
+    // a syntax error) and the verdict falls back to plain liveness.
+    let probe = if ports.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "t=$(ws_tree \"$p\")\n\
+             for port in {}; do echo \"port $port $(ws_owner \"$port\" \"$t\")\"; done",
+            ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ")
+        )
+    };
+    let script = format!(
+        "{tree}\n\
+         {owner}\n\
+         {read}\n\
+         [ -n \"$p\" ] || {{ echo nopid; exit 0; }}\n\
+         kill -0 \"$p\" 2>/dev/null || {{ echo dead; exit 0; }}\n\
+         got=$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
+         [ \"$got\" = \"$want\" ] || {{ echo dead; exit 0; }}\n\
+         echo alive\n\
+         {probe}",
+        tree = tree_fn(),
+        owner = owner_fn(),
+    );
+    let out = site
+        .shell(&script)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_health(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Like [`health`], but gives a just-launched process a moment to bind before
+/// judging it. Returns as soon as it's serving.
+///
+/// A dev server does not listen the instant it is spawned — vite takes a beat,
+/// `cargo watch` compiles first — so a single immediate probe would report half
+/// the healthy launches as silent. Waiting a little and *still* reporting the
+/// unconfirmed case (rather than blocking until it binds) keeps a slow starter
+/// from stalling `ws up` behind a compile.
+pub fn health_settled(
+    site: &Site,
+    name: &str,
+    ports: &[u16],
+    wait: std::time::Duration,
+) -> Option<Health> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let got = health(site, name, ports);
+        // Anything but "alive, not listening yet" is already final: a crash won't
+        // un-crash, and a squatter won't release the port by itself.
+        if !matches!(got, Some(Health::Silent(_))) || std::time::Instant::now() >= deadline {
+            return got;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+}
+
+/// Turn the probe script's output into a verdict. `None` for output that doesn't
+/// parse — the caller reports "unknown", never a default.
+fn parse_health(out: &str) -> Option<Health> {
+    let (mut alive, mut unattributed) = (false, false);
+    let (mut served, mut silent, mut squatted) = (Vec::new(), Vec::new(), Vec::new());
+    for line in out.lines().map(str::trim) {
+        match line {
+            "nopid" => return Some(Health::NotStarted),
+            "dead" => return Some(Health::Crashed),
+            "alive" => alive = true,
+            _ => {
+                let Some(rest) = line.strip_prefix("port ") else { continue };
+                let mut fields = rest.split_whitespace();
+                let (Some(port), Some(verdict)) = (fields.next(), fields.next()) else { continue };
+                let Ok(port) = port.parse::<u16>() else { continue };
+                match verdict {
+                    "ours" => served.push(port),
+                    "none" => silent.push(port),
+                    "other" => squatted.push(port),
+                    _ => unattributed = true,
+                }
+            }
+        }
+    }
+    if !alive {
+        return None;
+    }
+    // Most actionable first: a port held by a stranger explains a server that
+    // "started" but can't be reached, which a merely-silent port does not.
+    if !squatted.is_empty() {
+        return Some(Health::Squatted(squatted));
+    }
+    if !silent.is_empty() {
+        return Some(Health::Silent(silent));
+    }
+    if unattributed || served.is_empty() {
+        return Some(Health::Running);
+    }
+    Some(Health::Serving(served))
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed")
 }
@@ -293,5 +500,66 @@ mod tests {
         let (_, pid, _) = paths("ws-feat-x$(touch owned)-api");
         assert!(pid.contains("'ws-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
         assert!(pid.starts_with("\"$HOME/.ws-run/\""), "home must still expand: {pid}");
+    }
+
+    #[test]
+    fn health_reads_every_state_the_probe_can_report() {
+        assert_eq!(parse_health("nopid\n"), Some(Health::NotStarted));
+        assert_eq!(parse_health("dead\n"), Some(Health::Crashed));
+        assert_eq!(parse_health("alive\nport 20000 ours\n"), Some(Health::Serving(vec![20000])));
+        assert_eq!(parse_health("alive\nport 20000 none\n"), Some(Health::Silent(vec![20000])));
+        assert_eq!(parse_health("alive\nport 20000 other\n"), Some(Health::Squatted(vec![20000])));
+        // Neither `ss` nor `lsof` at the site: liveness only, never a green verdict
+        // invented from a probe that couldn't run.
+        assert_eq!(parse_health("alive\nport 20000 unknown\n"), Some(Health::Running));
+        // Alive with nothing allocated to check.
+        assert_eq!(parse_health("alive\n"), Some(Health::Running));
+    }
+
+    #[test]
+    fn health_is_unknown_rather_than_healthy_when_the_probe_says_nothing() {
+        // A site that answered with output we don't recognise must not read as
+        // running — the caller shows "unknown", which is the honest answer.
+        assert_eq!(parse_health(""), None);
+        assert_eq!(parse_health("bash: ss: command not found\n"), None);
+    }
+
+    #[test]
+    fn a_squatted_port_outranks_a_merely_silent_one() {
+        // Both are wrong, but a stranger holding the port explains *why* the server
+        // is unreachable, so it's the finding worth surfacing.
+        assert_eq!(
+            parse_health("alive\nport 20000 none\nport 20001 other\n"),
+            Some(Health::Squatted(vec![20001]))
+        );
+    }
+
+    #[test]
+    fn health_labels_say_what_to_do_about_it() {
+        assert_eq!(Health::Serving(vec![20000]).label(), "running :20000");
+        assert_eq!(Health::Silent(vec![20000]).label(), "running, nothing on :20000");
+        assert_eq!(
+            Health::Squatted(vec![20000]).label(),
+            "running, :20000 held by another process"
+        );
+        assert!(Health::Serving(vec![20000]).is_ok());
+        assert!(Health::Running.is_ok());
+        assert!(!Health::Crashed.is_ok());
+        assert!(!Health::Silent(vec![1]).is_ok());
+    }
+
+    #[test]
+    fn the_probe_script_runs_and_reports_a_process_that_was_never_started() {
+        // Exercises the real script (shell syntax included, which no amount of
+        // parser testing would catch) against a name that has no pid file.
+        assert_eq!(
+            health(&Site::Local, "ws-no-such-worktree-probe-test", &[]),
+            Some(Health::NotStarted)
+        );
+        // Same, with a port list — the branch that emits the `for` loop.
+        assert_eq!(
+            health(&Site::Local, "ws-no-such-worktree-probe-test", &[20000]),
+            Some(Health::NotStarted)
+        );
     }
 }
