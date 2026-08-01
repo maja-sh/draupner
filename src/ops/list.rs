@@ -47,8 +47,7 @@ pub fn run() -> Result<()> {
             .then(|| {
                 let site = site.as_ref()?;
                 let name = crate::supervise::proc_name(branch.as_deref().unwrap_or(""), repo);
-                let ports: Vec<u16> =
-                    crate::ports::load(&ws.root, &sanitized, repo).into_values().collect();
+                let ports = host_probe_ports(&cfg, site, &ws.root, &wt_path, &sanitized, repo);
                 crate::supervise::health(site, &name, &ports)
             })
             .flatten();
@@ -141,6 +140,36 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// The ports to hold a host process to: exactly the `WS_PORT_*` the current
+/// injection would hand it, which is what `ws up` probes.
+///
+/// Deliberately *not* the raw `.ws-meta` port map: `ports::resolve` only ever
+/// adds keys, so a service removed or renamed in `.ws.json` leaves its
+/// allocation behind forever. Probing that stale port reported "running, nothing
+/// on :<port>" — and, because a not-ok health short-circuits the declared
+/// `status` script below, suppressed the repo's real status too — for a process
+/// that was serving everything it had been asked to. `up` and `list` disagreed
+/// about the same worktree.
+///
+/// `Phase::Inspect` allocates nothing and renders nothing; it reads back the
+/// recorded service set (falling back to the declared one) and the ports already
+/// held for it.
+fn host_probe_ports(
+    cfg: &config::WsConfig,
+    site: &crate::remote::Site,
+    root: &std::path::Path,
+    worktree: &std::path::Path,
+    sanitized: &str,
+    repo: &str,
+) -> Vec<u16> {
+    inject::prepare(cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("WS_PORT_"))
+        .filter_map(|(_, v)| v.parse().ok())
+        .collect()
+}
+
 /// Pick a group's display label. When every row shares the same branch, show
 /// the (unsanitized) branch name; otherwise fall back to the task-dir key.
 fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
@@ -151,4 +180,39 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
         }
     }
     key.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `.ws-meta` state a removed service leaves behind: its port is still in
+    /// `ports` (nothing prunes that map short of teardown) while `services` was
+    /// rewritten to the current set by the last `up`.
+    #[test]
+    fn host_probe_ports_ignores_a_port_left_by_a_removed_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join(".ws.json"),
+            r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}}}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ws-meta")).unwrap();
+        std::fs::write(
+            root.join(".ws-meta/feat-x-api.json"),
+            r#"{"ports":{"gone":20001,"web":20002},"services":{"web":{"port":8080}}}"#,
+        )
+        .unwrap();
+
+        let cfg = config::load(root).unwrap();
+        let wt = root.join(".worktrees/feat-x/api");
+        let ports = host_probe_ports(&cfg, &crate::remote::Site::Local, root, &wt, "feat-x", "api");
+        assert_eq!(
+            ports,
+            vec![20002],
+            "only the current service set's ports may be probed — :20001 belongs to a \
+             service that no longer exists"
+        );
+    }
 }

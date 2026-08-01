@@ -175,6 +175,37 @@ fn down_and_post_remove_hooks_run_in_order() {
 }
 
 #[test]
+fn unregistered_dir_in_task_dir_is_reported_not_torn_down() {
+    // A directory under the task dir is not a worktree: it can be a hand-made
+    // copy, or what an interrupted removal left behind (`ws clean` documents
+    // both). Enumerating the task dir from the filesystem made `ws rm` treat one
+    // as a repo — running teardown inside it and then failing `git worktree
+    // remove` there, which aborted the whole op with some repos already gone and
+    // left the branch permanently unremovable.
+    let f = WorkspaceFixture::with_repos(&["api", "app"]);
+    f.run_ok(&["new", "api,app", "feat/stray"]);
+
+    let stray = f.path().join(".worktrees/feat-stray/api-backup");
+    std::fs::create_dir_all(stray.join("src")).unwrap();
+
+    let out = f.run(&["rm", "feat/stray"]);
+    assert!(
+        out.status.success(),
+        "an unregistered dir must not fail the removal:\n{}",
+        stderr(&out)
+    );
+
+    let err = stderr(&out);
+    assert!(!f.path().join(".worktrees/feat-stray/api").exists(), "api not removed:\n{err}");
+    assert!(!f.path().join(".worktrees/feat-stray/app").exists(), "app not removed:\n{err}");
+    assert!(stray.is_dir(), "the unregistered dir must be left in place");
+    assert!(
+        err.contains("not registered with git"),
+        "the leftover must be named, not silently ignored:\n{err}"
+    );
+}
+
+#[test]
 fn leftover_file_in_task_dir_does_not_fail() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/leftover"]);

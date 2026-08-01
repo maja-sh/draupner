@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::git;
@@ -9,15 +9,64 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    let worktrees = workspace::all_worktrees_for(&ws.root, branch);
+    // Enumerate from git — the shared `workspace::worktrees` view `ws list` and
+    // `ws clean` use — rather than scanning the task dir. A directory under
+    // `.worktrees/<task>/` need not be a worktree at all: it can be a hand-made
+    // copy or the residue of an interrupted removal. Teardown used to run the
+    // whole lifecycle inside one of those and then fail `git worktree remove` on
+    // it (there is no `<root>/<name>` main checkout to run git from), which
+    // aborted the loop part-way — some repos torn down, the rest left behind —
+    // and made the branch permanently unremovable until the stray dir was
+    // deleted by hand.
+    //
+    // A registration whose directory is gone is excluded too: `git worktree
+    // remove` fails on those, and before this enumeration change they were
+    // simply invisible here (that's `git worktree prune`'s job, not `ws rm`'s).
+    let known = workspace::worktrees(&ws.root, &cfg);
+    let task = workspace::sanitize_branch(branch);
+    let worktrees: Vec<(String, PathBuf)> = known
+        .iter()
+        .filter(|w| w.task.as_deref() == Some(task.as_str()) && w.path.is_dir())
+        .map(|w| (w.repo.clone(), w.path.clone()))
+        .collect();
+
+    // The unregistered dirs in *this* task's dir. Reported, never acted on —
+    // the same contract `ws clean` states for them.
+    let task_dir = workspace::task_dir(&ws.root, branch);
+    let leftovers: Vec<String> = workspace::orphan_dirs(&ws.root, &known)
+        .into_iter()
+        .filter(|p| p.starts_with(&task_dir))
+        .map(|p| p.display().to_string())
+        .collect();
 
     if worktrees.is_empty() {
-        return Err(super::preflight(format!(
-            "no worktrees for {branch}; nothing to remove"
-        )));
+        let mut msg = format!("no worktrees for {branch}; nothing to remove");
+        if !leftovers.is_empty() {
+            msg.push_str(&format!(
+                " ({} director{} under {} {} not registered with git — `ws clean` lists them)",
+                leftovers.len(),
+                if leftovers.len() == 1 { "y" } else { "ies" },
+                task_dir.display(),
+                if leftovers.len() == 1 { "is" } else { "are" },
+            ));
+        }
+        return Err(super::preflight(msg));
     }
 
     crate::ui::header("ws-rm", branch);
+
+    if !leftovers.is_empty() {
+        crate::ui::note(&format!(
+            "{} director{} under {} {} not registered with git — left in place; \
+             remove by hand once you've checked {}:",
+            leftovers.len(),
+            if leftovers.len() == 1 { "y" } else { "ies" },
+            task_dir.display(),
+            if leftovers.len() == 1 { "is" } else { "are" },
+            if leftovers.len() == 1 { "it" } else { "them" },
+        ));
+        crate::ui::command_block(&leftovers);
+    }
 
     // Safety scan — surface dirty / unpushed state. Blocks teardown unless
     // `--force`. With `--force`, warnings still print (we're overriding them).

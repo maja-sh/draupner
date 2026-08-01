@@ -90,11 +90,22 @@ pub fn is_tracked(wt: &Path, rel: &str) -> bool {
     succeeds(git(wt).args(["ls-files", "--error-unmatch", rel]))
 }
 
-/// Append `entries` to the worktree's git exclude file (`info/exclude`),
-/// idempotently. Resolves the real exclude path via `git rev-parse --git-path`
-/// so it works through a linked worktree's `.git` gitdir pointer. Best-effort on
-/// lookup — a missing exclude path just skips silently. This is how `ws` keeps
-/// the artifacts it drops (symlinked deps, rendered templates) out of git.
+/// Append `entries` to the git exclude file (`info/exclude`) that applies to
+/// `wt`, idempotently. Resolves the real exclude path via `git rev-parse
+/// --git-path` so it works through a linked worktree's `.git` gitdir pointer.
+/// Best-effort on lookup — a missing exclude path just skips silently. This is
+/// how `ws` keeps the artifacts it drops (symlinked deps, rendered templates)
+/// out of git.
+///
+/// **Scope is the whole repo, not one worktree.** `info/` is in git's common
+/// list (only `info/sparse-checkout` is per-worktree), so `--git-path
+/// info/exclude` from a linked worktree resolves to the *main* checkout's
+/// `.git/info/exclude` — entries written for a worktree also hide matching
+/// untracked files in main and in every sibling worktree, and nothing prunes
+/// them on `ws rm`. Genuine per-worktree excludes would mean enabling the
+/// `extensions.worktreeConfig` repo format extension and pointing a per-worktree
+/// `core.excludesFile` at our own file, which would also override the user's
+/// global excludes file inside ws worktrees — not something to turn on silently.
 pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -162,7 +173,16 @@ pub fn ref_exists(path: &Path, refspec: &str) -> bool {
 /// (or a stray `refs/main`) can't shadow the branch — short-name `rev-parse`
 /// would resolve the tag first and branch new work off the wrong commit.
 pub fn default_ref(path: &Path) -> Option<String> {
-    if let Some(head) = symbolic_origin_head(path) {
+    // `origin/HEAD` is only usable if it still *resolves*. When upstream renames
+    // its default branch, a `git fetch --prune` deletes `refs/remotes/origin/master`
+    // but leaves the `origin/HEAD` symref pointing at it; `symbolic-ref` doesn't
+    // dereference, so it keeps reporting the dead branch. Handing that to
+    // `git worktree add` failed the whole op ("not a valid object name") for a
+    // repo whose ladder below resolves `origin/main` fine — so probe, then fall
+    // through instead of trusting the symref.
+    if let Some(head) =
+        symbolic_origin_head(path).filter(|h| ref_exists(path, &format!("refs/remotes/{h}")))
+    {
         return Some(head);
     }
     [

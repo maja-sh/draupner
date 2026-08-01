@@ -78,6 +78,36 @@ fn missing_status_hook_does_not_crash() {
 }
 
 #[test]
+fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
+    // A declared `status` script runs with cwd = the worktree, but `.ws-hooks/`
+    // lives at the workspace root. Regression: `capture_action` used to join the
+    // script's commands without anchoring, so this exited 127 and `ws list`
+    // showed an empty status column — while the same value worked for `up`
+    // (which anchors) and on a remote workspace.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    let hook = f.path().join(".ws-hooks").join("api-status.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho 'stack up   https://anchored:8441'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","scripts":{"status":".ws-hooks/api-status.sh"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/anchored"]);
+
+    let out = f.run_ok(&["list"]);
+    let err = stderr(&out);
+    assert!(
+        err.contains("stack up") && err.contains("https://anchored:8441"),
+        "expected the `.ws-hooks/`-relative status script's output in:\n{err}"
+    );
+}
+
+#[test]
 fn status_hook_output_is_shown() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "status", "echo 'stack up   https://example:8440'");
