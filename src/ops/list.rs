@@ -46,7 +46,7 @@ pub fn run() -> Result<()> {
         let declared = || if !managed {
             None
         } else if let Some(r) = cfg.remote.as_ref() {
-            // Runs on the server; a legacy `.ws-hooks` file on the host can't reach the remote stack.
+            // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
             match site.as_ref() {
                 Some(s @ crate::remote::Site::Remote { .. }) => {
                     cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
@@ -64,18 +64,24 @@ pub fn run() -> Result<()> {
                 _ => None,
             }
         } else {
-            // Inspect phase must stay — no allocation or derivation from a status probe.
-            hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
-                let extra_env = inject::prepare(
-                    &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
-                    inject::Phase::Inspect,
-                )
-                .unwrap_or_default();
-                hooks::capture_action(
-                    &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
-                    &extra_env,
-                )
-            })
+            // Local status; Inspect phase — no allocation or derivation from a status probe. `ws list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
+            let cmd = match hooks::resolve(
+                &cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path),
+            ) {
+                Ok(cmd) => cmd?,
+                Err(e) => {
+                    crate::ui::note(&format!("{repo}: {e}"));
+                    return Some("hook file not migrated".to_string());
+                }
+            };
+            let extra_env = inject::prepare(
+                &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
+                inject::Phase::Inspect,
+            )
+            .unwrap_or_default();
+            hooks::capture_command(
+                &ws.root, &wt_path, repo, &sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
+            )
         };
 
         // ws's crash beats the script; a healthy process defers to the script for detail.
