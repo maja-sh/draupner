@@ -322,6 +322,41 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
 }
 
+/// Whether `runtime` is safe to hand to the process spawner as a program name.
+///
+/// `.ws.json` isn't gitignored, so this value arrives with a clone, and it is
+/// executed directly — `Site::command` / the compose calls pass it as `argv[0]`,
+/// and Rust runs any program string containing `/` as a path **relative to the
+/// process cwd**, i.e. the very workspace the hostile config came in. A clone
+/// carrying `{"runtime": ".ws-hooks/helper"}` plus a committed, executable
+/// `.ws-hooks/helper` would run it on the first `ws setup` / `ws remote check`,
+/// before any prompt. `shell_quote` is no defence: the value *is* the program,
+/// not a shell word.
+///
+/// So: a bare program name, resolved through `PATH` (`podman`, `docker`,
+/// `nerdctl`, `podman-remote`, …), or an absolute path to a binary. Deliberately
+/// not an allow-list of two names — people do run other runtimes — the point is
+/// only that a cloned config can't name a program inside the clone.
+fn runtime_looks_safe(runtime: &str) -> bool {
+    // Whitespace/control chars can't appear in a real program name, and rejecting
+    // them keeps a hostile value from smuggling escape sequences into output.
+    if runtime.is_empty()
+        || runtime.starts_with('-')
+        || runtime.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let Some(path) = runtime.strip_prefix('/') else {
+        return !runtime.contains('/'); // bare name → PATH resolves it
+    };
+    // An absolute path is trusted, but `/proc/self/cwd/...` is an absolute path
+    // that resolves straight back into the clone, and `..` climbs anywhere, so
+    // neither counts as one.
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.first() != Some(&"proc")
+        && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
+}
+
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
     let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
@@ -347,6 +382,17 @@ pub fn load(root: &Path) -> Result<WsConfig> {
                 ),
                 Ok(_) => {}
             }
+        }
+    }
+    // Same choke point, same reason as `remote.connection`: the value comes from
+    // a possibly-cloned `.ws.json` and is executed. See `runtime_looks_safe`.
+    if let Some(rt) = cfg.runtime.as_deref() {
+        if !runtime_looks_safe(rt) {
+            anyhow::bail!(
+                "refusing an unsafe runtime `{rt}` in .ws.json — the container runtime must \
+                 be a bare program name (`podman`, `docker`) or an absolute path to one; a \
+                 relative path would run a program out of the repo this config arrived in"
+            );
         }
     }
     Ok(cfg)
@@ -617,6 +663,47 @@ mod tests {
         }
         // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `ws` command.
         assert!(ensure_available("git").is_ok());
+    }
+
+    #[test]
+    fn load_refuses_a_runtime_that_isnt_a_program_name() {
+        // The value is executed as `argv[0]`, and a cloned `.ws.json` can name a
+        // program *inside the clone* — `.ws-hooks/helper` next to a committed,
+        // executable helper runs on the first `ws setup`, before any prompt.
+        for bad in [
+            ".ws-hooks/setup-helper",
+            "./payload",
+            "../evil/podman",
+            "sub/dir/podman",
+            "/proc/self/cwd/.ws-hooks/setup-helper",
+            "/usr/bin/../../tmp/payload",
+            "-oProxyCommand=x",
+            "podman --remote",
+            "",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(dir.path(), &format!(r#"{{"runtime":"{bad}","repos":[]}}"#));
+            let err = match load(dir.path()) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected runtime {bad:?} to be refused"),
+            };
+            assert!(err.contains("unsafe runtime"), "expected {bad:?} refused, got: {err}");
+        }
+    }
+
+    #[test]
+    fn load_accepts_any_bare_or_absolute_runtime() {
+        // Not an allow-list of two names: a bare name is PATH-resolved and an
+        // absolute path is a deliberate choice the user made on their own machine.
+        for good in ["podman", "docker", "nerdctl", "podman-remote", "/usr/local/bin/podman"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(dir.path(), &format!(r#"{{"runtime":"{good}","repos":["api"]}}"#));
+            let cfg = match load(dir.path()) {
+                Ok(c) => c,
+                Err(e) => panic!("expected runtime {good:?} accepted: {e}"),
+            };
+            assert_eq!(cfg.runtime(), good);
+        }
     }
 
     #[test]
