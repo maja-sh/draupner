@@ -1,13 +1,32 @@
 mod common;
 
 use common::{stderr, WorkspaceFixture};
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
 // `ws remote set` / `ws remote unset` — flipping a workspace local↔remote
 // after init. The mutagen/ssh binaries are stubbed (`WS_MUTAGEN`/`WS_SSH`), so
 // these assert the exact sync lifecycle `ws` drives, not real syncing.
 
-fn recorded(args_file: &std::path::Path) -> String {
+fn recorded(args_file: &Path) -> String {
     std::fs::read_to_string(args_file).unwrap_or_default()
+}
+
+/// Run `ws <argv>` with ssh stubbed reachable and `WS_MUTAGEN` pointed at
+/// `mutagen` (usually an arg recorder). Returns the output and the file the stub
+/// records its argv to.
+fn run_with_stubs(ws: &WorkspaceFixture, argv: &[&str], mutagen: &Path) -> (Output, PathBuf) {
+    let ok = ws.stub("ok", "exit 0");
+    let args_file = ws.path().join("mutagen-args");
+    let out = ws.run_with_env(
+        argv,
+        &[
+            ("WS_SSH", ok.to_str().unwrap()),
+            ("WS_MUTAGEN", mutagen.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    (out, args_file)
 }
 
 #[test]
@@ -15,18 +34,8 @@ fn remote_set_writes_the_block_and_backfills_sync_for_existing_worktrees() {
     let ws = WorkspaceFixture::with_repos(&["api", "web"]);
     ws.run_ok(&["new", "api,web", "feat/x"]);
 
-    let ok = ws.stub("ok", "exit 0");
-    let rec = ws.arg_recorder("mutagen-rec");
-    let args_file = ws.path().join("mutagen-args");
-
-    let out = ws.run_with_env(
-        &["remote", "set", "srv"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) =
+        run_with_stubs(&ws, &["remote", "set", "srv"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "remote set failed:\n{}", stderr(&out));
 
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
@@ -55,18 +64,8 @@ fn remote_set_ignores_dep_artifacts_present_in_the_worktree() {
     // must stay off the wire, same as `ws new` would have arranged.
     std::fs::create_dir_all(ws.path().join(".worktrees/feat-x/api/vendor")).unwrap();
 
-    let ok = ws.stub("ok", "exit 0");
-    let rec = ws.arg_recorder("mutagen-rec");
-    let args_file = ws.path().join("mutagen-args");
-
-    let out = ws.run_with_env(
-        &["remote", "set", "srv"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) =
+        run_with_stubs(&ws, &["remote", "set", "srv"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
         recorded(&args_file).contains("--ignore=/vendor"),
@@ -86,18 +85,8 @@ fn remote_set_never_ignores_a_git_tracked_vendor_dir() {
     ws.git("api", &["commit", "-q", "-m", "vendor deps"]);
     ws.run_ok(&["new", "api", "feat/x"]);
 
-    let ok = ws.stub("ok", "exit 0");
-    let rec = ws.arg_recorder("mutagen-rec");
-    let args_file = ws.path().join("mutagen-args");
-
-    let out = ws.run_with_env(
-        &["remote", "set", "srv"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) =
+        run_with_stubs(&ws, &["remote", "set", "srv"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = recorded(&args_file);
     assert!(calls.contains("create"), "sync still created:\n{calls}");
@@ -112,7 +101,6 @@ fn remote_set_fails_the_worktree_when_a_stale_session_wont_terminate() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
 
-    let ok = ws.stub("ok", "exit 0");
     // Records every call; fails `sync terminate` with an error that is NOT one
     // of the "already gone" patterns (a real daemon failure).
     let rec = ws.stub(
@@ -120,16 +108,8 @@ fn remote_set_fails_the_worktree_when_a_stale_session_wont_terminate() {
         "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\n\
          if [ \"$2\" = terminate ]; then echo 'daemon connection lost' >&2; exit 1; fi",
     );
-    let args_file = ws.path().join("mutagen-args");
 
-    let out = ws.run_with_env(
-        &["remote", "set", "srv"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) = run_with_stubs(&ws, &["remote", "set", "srv"], &rec);
     // A create after a failed terminate would no-op on the name collision and
     // report success while the session syncs to the wrong endpoint — so the
     // worktree must FAIL and the create must not run.
@@ -161,18 +141,8 @@ fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
         r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
     );
 
-    let ok = ws.stub("ok", "exit 0");
-    let rec = ws.arg_recorder("mutagen-rec");
-    let args_file = ws.path().join("mutagen-args");
-
-    let out = ws.run_with_env(
-        &["remote", "set", "new-host"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) =
+        run_with_stubs(&ws, &["remote", "set", "new-host"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
 
     // The old-endpoint session dies before the new one is created — `sync
@@ -205,18 +175,8 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     std::fs::create_dir_all(ws.path().join(".ws-meta")).unwrap();
     std::fs::write(ws.path().join(".ws-meta/feat-x-api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
 
-    let ok = ws.stub("ok", "exit 0");
-    let rec = ws.arg_recorder("mutagen-rec");
-    let args_file = ws.path().join("mutagen-args");
-
-    let out = ws.run_with_env(
-        &["remote", "set", "new-host"],
-        &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
-            ("ARGS_FILE", args_file.to_str().unwrap()),
-        ],
-    );
+    let (out, args_file) =
+        run_with_stubs(&ws, &["remote", "set", "new-host"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
 
     // The recorder writes one argv per line, so this is the exact

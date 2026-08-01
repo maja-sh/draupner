@@ -246,6 +246,12 @@ fn ca_step_macos(pem_path: &str) -> Step {
 /// Single-quote a string for safe interpolation into an `sh -c` command line
 /// (embedded single quotes become `'\''`). Used for filesystem paths that aren't
 /// otherwise validated.
+///
+/// Deliberately *always* wraps, which is the one way it differs from
+/// [`crate::remote::shell_quote`] — that one passes safe tokens (an ordinary path
+/// among them) through bare. These lines are shown to the user for consent before
+/// being run under `sudo`, so quoting the path uniformly keeps the argument
+/// boundary unambiguous no matter what the path turns out to be.
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -553,7 +559,7 @@ fn dns_step_linux(domain: &str, address: &str) -> Option<Step> {
             ],
         });
     }
-    if which("dnsmasq").is_some() {
+    if which("dnsmasq") {
         // Configuring dnsmasq only resolves anything if the system actually asks
         // dnsmasq. A non-loopback `nameserver` means it doesn't — the drop-in
         // would be written, dnsmasq restarted, and lookups would still go
@@ -602,9 +608,9 @@ fn system_resolver_is_local() -> bool {
 /// Trust a PEM in the system store, matching the detected trust-store tool
 /// (Debian/Ubuntu vs RHEL/Fedora/Arch). `None` when neither is present.
 fn ca_step_linux(pem_path: &str) -> Option<Step> {
-    let (dir, update) = if which("update-ca-certificates").is_some() {
+    let (dir, update) = if which("update-ca-certificates") {
         ("/usr/local/share/ca-certificates", "update-ca-certificates")
-    } else if which("update-ca-trust").is_some() {
+    } else if which("update-ca-trust") {
         ("/etc/pki/ca-trust/source/anchors", "update-ca-trust")
     } else {
         return None;
@@ -654,16 +660,15 @@ fn parse_route_iface(text: &str) -> Option<String> {
 /// `command -v` therefore reports them missing on the exact systems that have
 /// them, which would silently downgrade a runnable step into a printed hint.
 /// `server-setup/debian.sh` hit this first and documents the same fix.
-fn which(bin: &str) -> Option<()> {
+fn which(bin: &str) -> bool {
     Command::new("sh")
         .arg("-c")
         .arg(format!("PATH=\"$PATH:/usr/sbin:/sbin\" command -v {bin}"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .ok()
-        .filter(|s| s.success())
-        .map(|_| ())
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The resolver half of the client guidance as plain text — the fallback
@@ -818,6 +823,14 @@ mod tests {
         assert_eq!(sh_quote("/t;rm -rf/x"), "'/t;rm -rf/x'");
         // An embedded single quote is escaped, not a break-out.
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn which_answers_yes_or_no_for_a_binary() {
+        // `sh` is what `which` itself shells out to, so it is present by
+        // construction; the absent case must be a clean `false`, not a panic.
+        assert!(which("sh"));
+        assert!(!which("ws-no-such-binary-exists-here"));
     }
 
     #[test]

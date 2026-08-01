@@ -87,7 +87,12 @@ pub fn server_script(workspace_path: &str) -> String {
         "podman info >/dev/null 2>&1 && echo podman:ok || echo podman:fail".to_string(),
         // `-f name=` is an unanchored substring match, so anchor it (`^…$`) —
         // else a stray `ws-caddy-old` would make a stopped ws-caddy read as up.
-        "podman ps -q -f name='^ws-caddy$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail".to_string(),
+        // The name comes from `caddy` so renaming the container can't leave this
+        // probe silently checking the old one.
+        format!(
+            "podman ps -q -f name='^{}$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail",
+            crate::caddy::CADDY_CONTAINER
+        ),
         format!("test -d {wp} && test -w {wp} && echo workspace:ok || echo workspace:fail"),
     ]
     .join("; ")
@@ -141,6 +146,15 @@ mod tests {
     fn server_script_quotes_the_workspace_path() {
         let s = server_script("weird dir; rm -rf");
         assert!(s.contains("'weird dir; rm -rf'"), "workspace path must be shell-quoted: {s}");
+    }
+
+    #[test]
+    fn server_script_probes_the_container_caddy_actually_names() {
+        let s = server_script("workspace");
+        assert!(
+            s.contains(&format!("-f name='^{}$'", crate::caddy::CADDY_CONTAINER)),
+            "caddy probe must use caddy::CADDY_CONTAINER, anchored: {s}"
+        );
     }
 
     #[test]

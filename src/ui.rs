@@ -18,10 +18,13 @@ fn tty() -> bool {
     *TTY.get_or_init(|| Term::stderr().features().colors_supported())
 }
 
-/// The spinner currently animating, if any. A streamed line (`hook_line`) printed
-/// with a plain `eprintln!` collides with the spinner's steady-tick redraw on the
-/// same terminal row; emitting it *through* the spinner (`suspend`) makes indicatif
-/// clear its line first, so the log lands cleanly above the still-spinning step.
+/// The spinner currently animating, if any. Any line printed with a plain
+/// `eprintln!` collides with the spinner's steady-tick redraw on the same terminal
+/// row; emitting it *through* the spinner (`suspend`) makes indicatif clear its
+/// line first, so the line lands cleanly above the still-spinning step. Every
+/// line-emitting helper that can run under a live step goes through
+/// `emit_around_spinner` — spinner-safety is not a per-helper accident a caller
+/// has to know about.
 static ACTIVE_SPINNER: Mutex<Option<ProgressBar>> = Mutex::new(None);
 
 fn set_active_spinner(pb: Option<ProgressBar>) {
@@ -68,7 +71,7 @@ pub fn step(tag: &str, label: &str) -> Step {
         );
         pb.set_prefix(format!("{}", style(pad_tag(tag)).green().bold()));
         pb.set_message(label.to_string());
-        // Register it so `hook_line` streamed under this step suspends it.
+        // Register it so lines emitted under this step suspend it.
         set_active_spinner(Some(pb.clone()));
         Some(pb)
     } else {
@@ -102,58 +105,78 @@ impl Step {
     }
 
     pub fn ok(mut self) {
-        self.finished = true;
-        self.finish_ok_inner(None);
+        self.emit_ok(None);
     }
 
     pub fn ok_with(mut self, suffix: &str) {
-        self.finished = true;
-        self.finish_ok_inner(Some(suffix.to_string()));
+        self.emit_ok(Some(suffix));
     }
 
     pub fn fail(mut self, reason: &str) {
-        self.finished = true;
-        self.clear_spinner();
-        if tty() {
-            eprintln!(
-                "  {} {} {} — {}",
-                style(pad_tag(&self.tag)).green().bold(),
-                style("✗").red().bold(),
-                self.label,
-                style(reason).red(),
-            );
-        } else {
-            eprintln!("  {}  FAIL  {} — {}", pad_tag(&self.tag), self.label, reason);
-        }
+        self.emit_fail(Some(reason));
     }
 
-    fn finish_ok_inner(&mut self, suffix: Option<String>) {
-        let elapsed = self.start.elapsed();
+    fn emit_ok(&mut self, suffix: Option<&str>) {
+        self.finished = true;
+        // Read the clock before clearing the spinner so the reported timing is
+        // the step's, not the step's plus the terminal repaint.
+        let timing = format_timing(self.start.elapsed());
         self.clear_spinner();
-        let timing = format_timing(elapsed);
-        if tty() {
-            let mut line = format!(
+        eprintln!("{}", self.ok_line(suffix, &timing));
+    }
+
+    /// The failure line, shared by the explicit `fail` and the aborted-step `Drop`
+    /// so a `?` short-circuit can't render differently from a reported failure.
+    /// `reason` is the only difference between the two.
+    fn emit_fail(&mut self, reason: Option<&str>) {
+        self.finished = true;
+        self.clear_spinner();
+        eprintln!("{}", self.fail_line(reason));
+    }
+
+    fn ok_line(&self, suffix: Option<&str>, timing: &str) -> String {
+        let mut line = if tty() {
+            format!(
                 "  {} {} {}",
                 style(pad_tag(&self.tag)).green().bold(),
                 style("✓").green(),
                 self.label,
-            );
-            if let Some(s) = suffix {
-                line.push(' ');
-                line.push_str(&s);
-            }
+            )
+        } else {
+            format!("  {}  ok  {}", pad_tag(&self.tag), self.label)
+        };
+        if let Some(s) = suffix {
+            line.push(' ');
+            line.push_str(s);
+        }
+        if tty() {
             line.push(' ');
             line.push_str(&style(format!("({timing})")).dim().to_string());
-            eprintln!("{line}");
         } else {
-            let mut line = format!("  {}  ok  {}", pad_tag(&self.tag), self.label);
-            if let Some(s) = suffix {
-                line.push(' ');
-                line.push_str(&s);
-            }
             line.push_str(&format!(" [{timing}]"));
-            eprintln!("{line}");
         }
+        line
+    }
+
+    fn fail_line(&self, reason: Option<&str>) -> String {
+        let mut line = if tty() {
+            format!(
+                "  {} {} {}",
+                style(pad_tag(&self.tag)).green().bold(),
+                style("✗").red().bold(),
+                self.label,
+            )
+        } else {
+            format!("  {}  FAIL  {}", pad_tag(&self.tag), self.label)
+        };
+        if let Some(r) = reason {
+            if tty() {
+                line.push_str(&format!(" — {}", style(r).red()));
+            } else {
+                line.push_str(&format!(" — {r}"));
+            }
+        }
+        line
     }
 }
 
@@ -162,20 +185,11 @@ impl Drop for Step {
         if self.finished {
             return;
         }
-        self.clear_spinner();
         // Step dropped without a terminal call — usually a `?` upstream. Emit
         // an aborted line so the user isn't left with a silent gap between
-        // the header and the propagated error.
-        if tty() {
-            eprintln!(
-                "  {} {} {}",
-                style(pad_tag(&self.tag)).green().bold(),
-                style("✗").red().bold(),
-                self.label,
-            );
-        } else {
-            eprintln!("  {}  FAIL  {}", pad_tag(&self.tag), self.label);
-        }
+        // the header and the propagated error. Same line as `fail`, minus the
+        // reason: there isn't one to report here.
+        self.emit_fail(None);
     }
 }
 
@@ -201,16 +215,18 @@ pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
 /// worktree but no hook for this event). Not a failure — just visible enough
 /// that the user knows nothing ran for that repo.
 pub fn skip(tag: &str, reason: &str) {
-    if tty() {
-        eprintln!(
-            "  {} {} {}",
-            style(pad_tag(tag)).green().bold(),
-            style("·").dim(),
-            style(reason).dim(),
-        );
-    } else {
-        eprintln!("  {}  skip  {}", pad_tag(tag), reason);
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!(
+                "  {} {} {}",
+                style(pad_tag(tag)).green().bold(),
+                style("·").dim(),
+                style(reason).dim(),
+            );
+        } else {
+            eprintln!("  {}  skip  {}", pad_tag(tag), reason);
+        }
+    });
 }
 
 pub fn summary_ok(lines: &[String]) {
@@ -227,18 +243,20 @@ pub fn summary_ok(lines: &[String]) {
 /// Up-front warning block — a `⚠` title followed by indented detail lines.
 /// Used by `ws rm` to surface dirty / unpushed state before teardown.
 pub fn warn(title: &str, items: &[String]) {
-    if tty() {
-        eprintln!("  {} {}", style("⚠").yellow().bold(), style(title).yellow());
-    } else {
-        eprintln!("  warn: {title}");
-    }
-    for item in items {
+    emit_around_spinner(|| {
         if tty() {
-            eprintln!("        {}", style(item).dim());
+            eprintln!("  {} {}", style("⚠").yellow().bold(), style(title).yellow());
         } else {
-            eprintln!("        {item}");
+            eprintln!("  warn: {title}");
         }
-    }
+        for item in items {
+            if tty() {
+                eprintln!("        {}", style(item).dim());
+            } else {
+                eprintln!("        {item}");
+            }
+        }
+    });
 }
 
 pub fn summary_fail(reason: &str) {
@@ -282,12 +300,7 @@ pub fn list_empty() {
 /// Render the `ws list` table: task groups separated by blank lines, each with
 /// aligned repo / dirty / status columns.
 pub fn list_table(groups: &[ListGroup]) {
-    let repo_w = groups
-        .iter()
-        .flat_map(|g| g.rows.iter())
-        .map(|r| r.repo.len())
-        .max()
-        .unwrap_or(0);
+    let repo_w = col_width(groups.iter().flat_map(|g| g.rows.iter()).map(|r| r.repo.as_str()));
 
     // Only show the status column when something actually reports one —
     // otherwise every row is a bare dash, which reads as noise.
@@ -310,7 +323,7 @@ pub fn list_table(groups: &[ListGroup]) {
             eprintln!("  {}{sep}{}", group.task, group.path);
         }
         for row in &group.rows {
-            let repo = format!("{:<width$}", row.repo, width = repo_w);
+            let repo = pad_key(&row.repo, repo_w);
             let dirty_txt = if row.dirty { "dirty" } else { "clean" };
             if tty() {
                 let dirty = if row.dirty {
@@ -397,11 +410,13 @@ pub fn value(text: &str) {
 /// leaving a long one flush against the edge while everything around it was
 /// inset.
 pub fn note(text: &str) {
-    if tty() {
-        eprintln!("  {}", style(text).dim());
-    } else {
-        eprintln!("  {text}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("  {}", style(text).dim());
+        } else {
+            eprintln!("  {text}");
+        }
+    });
 }
 
 /// A titled, column-aligned detail block: a `tag`-led title in the repo column
@@ -437,15 +452,22 @@ pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
     });
 }
 
-/// Width of a table's key column: the widest key, counted in `chars` so a
-/// multi-byte service name doesn't over-pad.
-fn key_width(rows: &[(String, String)]) -> usize {
-    rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0)
+/// Width of a left-aligned column: the widest entry, counted in `chars` so a
+/// multi-byte name doesn't over-pad. Byte length would over-count a non-ASCII
+/// name and leave every other row in the column short, since the `{:<w$}` fill
+/// `pad_key` uses counts chars.
+fn col_width<'a>(items: impl Iterator<Item = &'a str>) -> usize {
+    items.map(|s| s.chars().count()).max().unwrap_or(0)
 }
 
-/// Pad a key to the column width. Applied to the raw string, never a styled
-/// one — `style()` emits ANSI escapes that a width specifier would count as
-/// visible characters, so every coloured row would pad short by the escape
+/// Width of a table's key column.
+fn key_width(rows: &[(String, String)]) -> usize {
+    col_width(rows.iter().map(|(k, _)| k.as_str()))
+}
+
+/// Pad a column entry to the column width. Applied to the raw string, never a
+/// styled one — `style()` emits ANSI escapes that a width specifier would count
+/// as visible characters, so every coloured row would pad short by the escape
 /// length and the value column would ragged out.
 fn pad_key(k: &str, w: usize) -> String {
     format!("{k:<w$}")
@@ -612,6 +634,54 @@ mod tests {
     #[test]
     fn strip_control_keeps_normal_text_and_tabs() {
         assert_eq!(strip_control("hello\tworld\n"), "hello\tworld\n");
+    }
+
+    /// A `Step` that never animated and is already marked finished, so `Drop`
+    /// stays quiet while a test inspects its rendered lines.
+    fn quiet_step(tag: &str, label: &str) -> Step {
+        Step {
+            tag: tag.to_string(),
+            label: label.to_string(),
+            start: Instant::now(),
+            spinner: None,
+            finished: true,
+        }
+    }
+
+    #[test]
+    fn aborted_step_renders_the_failure_line_minus_the_reason() {
+        // `fail` and the `Drop` abort path share one builder precisely so these
+        // can't drift; the reason suffix must be the only difference.
+        let s = quiet_step("api", "up");
+        let aborted = s.fail_line(None);
+        let reported = s.fail_line(Some("exit 1"));
+        assert!(
+            reported.starts_with(&aborted),
+            "reported failure must extend the aborted line, got {reported:?} vs {aborted:?}"
+        );
+        assert!(reported.contains("exit 1"));
+        assert!(!aborted.contains('—'), "no dangling separator without a reason");
+    }
+
+    #[test]
+    fn ok_suffix_is_inserted_before_the_timing() {
+        let s = quiet_step("api", "up");
+        let bare = s.ok_line(None, "0.4s");
+        let with_suffix = s.ok_line(Some("2 repos"), "0.4s");
+        assert!(with_suffix.contains("2 repos"));
+        // Removing the suffix reproduces the plain line exactly — the suffix
+        // goes between label and timing, never after the timing.
+        assert_eq!(with_suffix.replacen(" 2 repos", "", 1), bare);
+    }
+
+    #[test]
+    fn column_width_counts_chars_not_bytes() {
+        // `æøå` is 6 bytes but 3 columns wide; a byte-derived width would pad
+        // every other entry three spaces too far and ragged the next column.
+        let w = col_width(["api", "æøå"].into_iter());
+        assert_eq!(w, 3);
+        assert_eq!(pad_key("api", w), "api");
+        assert_eq!(pad_key("æøå", w), "æøå");
     }
 
     #[test]
