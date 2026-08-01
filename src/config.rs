@@ -174,6 +174,11 @@ impl Script {
             Script::Many(v) => v,
         }
     }
+
+    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.ws-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
+    pub fn joined(&self) -> String {
+        self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
+    }
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]

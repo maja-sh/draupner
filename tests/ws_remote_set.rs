@@ -197,6 +197,46 @@ fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
 }
 
 #[test]
+fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    ws.write_ws_json(
+        r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
+    );
+    // A previous `ws up` against old-host allocated a port and left a forward
+    // session for it. The forward's endpoint is fixed at create time but its name
+    // isn't host-keyed, so re-pointing must terminate it — otherwise the next `ws
+    // up` no-ops on the name collision and `localhost:20000` still reaches
+    // old-host while the port-forwards table claims the new one.
+    std::fs::create_dir_all(ws.path().join(".ws-meta")).unwrap();
+    std::fs::write(ws.path().join(".ws-meta/feat-x-api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
+
+    let ok = ws.stub("ok", "exit 0");
+    let rec = ws.arg_recorder("mutagen-rec");
+    let args_file = ws.path().join("mutagen-args");
+
+    let out = ws.run_with_env(
+        &["remote", "set", "new-host"],
+        &[
+            ("WS_SSH", ok.to_str().unwrap()),
+            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // The recorder writes one argv per line, so this is the exact
+    // `mutagen forward terminate ws-fwd-feat-x-api-20000` invocation.
+    let calls = recorded(&args_file);
+    assert!(
+        calls.contains("forward\nterminate\nws-fwd-feat-x-api-20000"),
+        "the old host's forward must be terminated on a re-point:\n{calls}"
+    );
+    // The sync backfill still runs alongside it.
+    assert!(calls.contains("create"), "sync still recreated:\n{calls}");
+}
+
+#[test]
 fn remote_set_writes_domain_and_preserves_extended_repo_config() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.write_ws_json(

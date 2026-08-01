@@ -388,16 +388,44 @@ pub fn shell_quote(s: &str) -> String {
     }
 }
 
+/// POSIX shell *name* (`[A-Za-z_][A-Za-z0-9_]*`) — anything else is a command word, not an assignment.
+fn is_shell_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && bytes.all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+}
+
+struct EnvPrefix {
+    words: String,
+    /// `env` is a command, not a builtin, so `exec` must come before it (`exec env K=V cmd`).
+    via_env: bool,
+}
+
+/// A key like `WS_PORT_redis-cache` (from a dashed service) isn't a shell name, so bare `K=V` becomes the command word — remote script exits 127 while local works fine (`Command::env` accepts any name). Hand such pairs to `env` with each `K=V` shell-quoted, same shape `supervise::up` already uses. Also closes an injection: a key with `;` in bare form ran attacker code on the server.
+fn env_prefix(env: &[(&str, &str)]) -> EnvPrefix {
+    let via_env = env.iter().any(|(k, _)| !is_shell_name(k));
+    let mut words = if via_env { String::from("env ") } else { String::new() };
+    for (k, v) in env {
+        if via_env {
+            words.push_str(&format!("{} ", shell_quote(&format!("{k}={v}"))));
+        } else {
+            words.push_str(&format!("{k}={} ", shell_quote(v)));
+        }
+    }
+    EnvPrefix { words, via_env }
+}
+
 /// `cd && …` short-circuits so a missing worktree surfaces as non-zero, not a silent no-op.
 pub fn remote_script(dir: &str, env: &[(&str, &str)], command: &[String]) -> String {
-    let mut s = format!("cd {} && ", shell_quote(dir));
-    for (k, v) in env {
-        s.push_str(&format!("{k}={} ", shell_quote(v)));
-    }
-    s.push_str("exec ");
+    let prefix = env_prefix(env);
     let quoted: Vec<String> = command.iter().map(|a| shell_quote(a)).collect();
-    s.push_str(&quoted.join(" "));
-    s
+    let cmd = quoted.join(" ");
+    let dir = shell_quote(dir);
+    if prefix.via_env {
+        format!("cd {dir} && exec {}{cmd}", prefix.words)
+    } else {
+        format!("cd {dir} && {}exec {cmd}", prefix.words)
+    }
 }
 
 /// Remote analogue of [`crate::hooks`]; `WS_WORKSPACE_ROOT` is the synced-worktrees base
@@ -460,11 +488,17 @@ pub fn capture_status(
     ];
     env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
-    let mut script = format!("cd {} && ", shell_quote(&dir));
-    for (k, v) in &env {
-        script.push_str(&format!("{k}={} ", shell_quote(v)));
-    }
-    script.push_str(&format!("timeout {timeout_secs} sh -c {}", shell_quote(command)));
+    // Same env-word rule as `remote_script` (see `env_prefix`): a key that isn't a
+    // shell name — `WS_PORT_redis-cache` from a dashed compose service — would be
+    // run as a command instead of set, and the failure is silent here, since
+    // `ssh_capture` turns the non-zero exit into `None` and `ws list` just shows a
+    // dash forever.
+    let script = format!(
+        "cd {} && {}timeout {timeout_secs} sh -c {}",
+        shell_quote(&dir),
+        env_prefix(&env).words,
+        shell_quote(command)
+    );
 
     let out = ssh_capture(connection, &script)?;
     out.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
@@ -597,6 +631,45 @@ mod tests {
         let cmd = vec!["echo".to_string(), "hello world".to_string()];
         let s = remote_script("/w/t/r", &[], &cmd);
         assert_eq!(s, "cd /w/t/r && exec echo 'hello world'");
+    }
+
+    #[test]
+    fn remote_script_routes_a_non_name_env_key_through_env() {
+        // `WS_PORT_<svc>` carries the compose service name verbatim, so an ordinary
+        // `redis-cache` service gives `WS_PORT_redis-cache` — not a shell name. As a
+        // bare assignment word the server shell runs it as a *command*, so the whole
+        // script died with `WS_PORT_redis-cache=20001: not found` (exit 127) and the
+        // hook never ran, on a workspace that works locally.
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()];
+        let s = remote_script(
+            "/w/t/api",
+            &[("WS_REPO", "api"), ("WS_PORT_redis-cache", "20001")],
+            &cmd,
+        );
+        assert_eq!(
+            s,
+            "cd /w/t/api && exec env WS_REPO=api WS_PORT_redis-cache=20001 sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
+    fn remote_script_quotes_a_hostile_env_key() {
+        // A declared `env` key from `.ws.json` is untrusted (the file rides along in
+        // a clone). Unquoted, its `;` ended the assignment prefix and ran the rest as
+        // its own command — which also escapes the `cd`-failure short-circuit.
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()];
+        let s = remote_script("/w/t/api", &[("X; touch /tmp/ws-pwned; Y", "1")], &cmd);
+        assert_eq!(s, "cd /w/t/api && exec env 'X; touch /tmp/ws-pwned; Y=1' sh -c 'echo hi'");
+    }
+
+    #[test]
+    fn shell_name_check_matches_the_shell() {
+        assert!(is_shell_name("WS_REPO"));
+        assert!(is_shell_name("_x9"));
+        assert!(!is_shell_name(""));
+        assert!(!is_shell_name("9lives")); // can't start with a digit
+        assert!(!is_shell_name("WS_PORT_redis-cache"));
+        assert!(!is_shell_name("X; touch /tmp/ws-pwned; Y"));
     }
 
     #[test]

@@ -209,6 +209,49 @@ fn container_override_deconflicts_raw_tcp_ports() {
 }
 
 #[test]
+fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(
+        f.path().join("api/docker-compose.yml"),
+        "services:\n  db:\n    image: mysql:8\n    ports: [\"3306:3306\"]\n",
+    )
+    .unwrap();
+    f.git("api", &["add", "docker-compose.yml"]);
+    f.git("api", &["commit", "-q", "-m", "add compose"]);
+
+    // A *bare-name* entry — what `ws init` writes when the derive finds no
+    // port-bearing service or the runtime is missing at init time. `ws` still
+    // infers a container repo from the compose file and runs the compose
+    // lifecycle for it, so the project must be namespaced all the same; otherwise
+    // every worktree's stack is compose's default project `api` and they collide.
+    f.write_ws_json(r#"{"domain":"myapp.test","runtime":"docker","repos":["api"]}"#);
+    // A hook file stands in for the default `docker compose up -d` (same
+    // resolution path, same env) so the test starts no containers.
+    f.add_hook("api", "up", "echo PROJ=[$COMPOSE_PROJECT_NAME]");
+
+    f.run_ok(&["new", "api", "feat/a"]);
+    f.run_ok(&["new", "api", "feat/b"]);
+    let err_a = stderr(&f.run_ok(&["up", "feat/a"]));
+    let err_b = stderr(&f.run_ok(&["up", "feat/b"]));
+
+    assert!(err_a.contains("PROJ=[feat-a-api]"), "bare-name project not namespaced:\n{err_a}");
+    assert!(err_b.contains("PROJ=[feat-b-api]"), "bare-name project not namespaced:\n{err_b}");
+
+    // And the derived raw-TCP service is reissued on a distinct host port per
+    // worktree, so the two stacks don't fight over 3306 either.
+    let a = override_port(&read_override(&f, "feat-a-api"));
+    let b = override_port(&read_override(&f, "feat-b-api"));
+    assert!((20000..40000).contains(&a), "db host port out of range ({a})");
+    assert_ne!(a, b, "parallel worktrees must reissue db on distinct host ports");
+}
+
+#[test]
 fn container_override_injects_declared_env() {
     if !compose_available() {
         eprintln!("skipping: `docker compose` not available");
