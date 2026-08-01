@@ -245,7 +245,6 @@ impl WorkspaceFixture {
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(cwd)
-            .env_remove("RUST_LOG")
             // XDG_CONFIG_HOME from the dev shell would bypass the HOME redirect below and write into the developer's real `~/.config/ws`.
             .env_remove("XDG_CONFIG_HOME")
             .env("HOME", self.path())
