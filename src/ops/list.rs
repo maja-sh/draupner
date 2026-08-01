@@ -37,7 +37,26 @@ pub fn run() -> Result<()> {
         let dirty = git::is_dirty(&wt_path);
 
         let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
-        let status = if !managed {
+
+        // A `kind: host` repo's process is supervised by ws itself, so ws can answer
+        // for it without asking the repo — and it is the only one that *can* say
+        // "this crashed": a `status` script describes a server it assumes is
+        // running, and reports nothing at all once the process is gone. That state
+        // was invisible until now.
+        let host_health = (managed && cfg.is_host_repo(repo))
+            .then(|| {
+                let site = site.as_ref()?;
+                let name = crate::supervise::proc_name(branch.as_deref().unwrap_or(""), repo);
+                let ports: Vec<u16> =
+                    crate::ports::load(&ws.root, &sanitized, repo).into_values().collect();
+                crate::supervise::health(site, &name, &ports)
+            })
+            .flatten();
+
+        // The declared `status` script, run wherever the stack lives. Lazy: when
+        // ws already has bad news about a host process, that's the more important
+        // answer and this never runs.
+        let declared = || if !managed {
             None
         } else if let Some(r) = cfg.remote.as_ref() {
             // Remote workspace: run the declared `status` script ON THE SERVER
@@ -74,6 +93,14 @@ pub fn run() -> Result<()> {
                     &extra_env,
                 )
             })
+        };
+
+        // ws's own record wins only when it has something wrong to report; a
+        // healthy process still lets a declared script say more than "running".
+        let status = match host_health {
+            Some(h) if !h.is_ok() => Some(h.label()),
+            Some(h) => declared().or_else(|| Some(h.label())),
+            None => declared(),
         };
 
         let note = if managed {

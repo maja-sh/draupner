@@ -13,6 +13,13 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
+/// How long a freshly launched host process gets to bind the port ws allocated
+/// before `ws up` reports that it hasn't. Long enough for an interpreted dev
+/// server (vite, `artisan serve`) to be listening, short enough that a compiled
+/// one — which will take far longer than any bearable wait — doesn't hold up the
+/// op. Missing the window costs a qualified line, not a failure.
+const BIND_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Outcome of a sweep, for the caller to render its own summary from.
 pub struct SweepResult {
     /// Repos whose hook ran and exited 0.
@@ -521,10 +528,62 @@ fn sweep_host(
                 .collect();
             ports.sort();
             let step = crate::ui::step(repo, label);
-            if ports.is_empty() {
-                step.ok();
-            } else {
-                step.ok_with(&ports.join(", "));
+
+            // The post-condition. `supervise::up` proves a process was launched and
+            // survived half a second; it does not prove the thing that launch was
+            // *for* — that the port ws allocated is now being served by it. Those
+            // came apart repeatedly: a server that bound a different port after
+            // finding this one busy, an orphan from an earlier run still holding it.
+            // Both left `start web:20001` on screen and the failure surfacing much
+            // later somewhere else.
+            let allocated: Vec<u16> = extra_env
+                .iter()
+                .filter(|(k, _)| k.starts_with("WS_PORT_"))
+                .filter_map(|(_, v)| v.parse().ok())
+                .collect();
+            let health = crate::supervise::health_settled(site, &name, &allocated, BIND_GRACE);
+            let crashed = health == Some(crate::supervise::Health::Crashed);
+
+            match &health {
+                // Dying *after* the launch check is a failed `up`, not a green one
+                // with a caveat — there is nothing running left to talk to.
+                Some(crate::supervise::Health::Crashed) => {
+                    step.fail(&format!("exited after launch — see ~/.ws-run/{name}.log"));
+                }
+                // Alive but nothing on the port yet is genuinely ambiguous — a
+                // `cargo watch` compiles for a minute before it listens — so it
+                // qualifies the claim rather than failing the repo.
+                Some(crate::supervise::Health::Silent(_)) => {
+                    step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
+                    crate::ui::note(&format!(
+                        "{repo}: nothing is listening on the port ws allocated yet. If it's still \
+                         starting this resolves itself — `ws list` will say. Otherwise check \
+                         `~/.ws-run/{name}.log`."
+                    ));
+                }
+                // A stranger on the port is not ambiguous: whatever just started
+                // cannot have it, so the server is either dead or somewhere else.
+                Some(crate::supervise::Health::Squatted(p)) => {
+                    step.ok_with(&format!("{} — port held by another process", ports.join(", ")));
+                    crate::ui::warn(
+                        &format!("{repo}: another process already holds the allocated port"),
+                        &p.iter()
+                            .map(|port| {
+                                format!(
+                                    ":{port} is held by something outside this process — a dev \
+                                     server that finds it busy will quietly move to another port"
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                _ if ports.is_empty() => step.ok(),
+                _ => step.ok_with(&ports.join(", ")),
+            }
+
+            if crashed {
+                result.failed.push(repo.to_string());
+                return;
             }
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
