@@ -117,6 +117,32 @@ fn a_repo_with_no_recorded_ports_emits_no_sub_rows() {
 }
 
 #[test]
+fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
+    // Regression: `capture_action` joined the script's commands without anchoring `.ws-hooks/`, so a status script naming a shared hook exited 127 under cwd = worktree, and `ws list` silently showed a blank status column while `up` (which anchors) worked.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    let hook = f.path().join(".ws-hooks").join("api-status.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho 'stack up   https://anchored:8441'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","scripts":{"status":".ws-hooks/api-status.sh"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/anchored"]);
+
+    let out = f.run_ok(&["list"]);
+    let err = stderr(&out);
+    assert!(
+        err.contains("stack up") && err.contains("https://anchored:8441"),
+        "expected the `.ws-hooks/`-relative status script's output in:\n{err}"
+    );
+}
+
+#[test]
 fn status_hook_output_is_shown() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "status", "echo 'stack up   https://example:8440'");
