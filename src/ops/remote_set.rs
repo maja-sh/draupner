@@ -98,6 +98,22 @@ pub fn set(
         let repo = wt.repo;
         let session = mutagen::session_name(&task, &repo);
 
+        // Drop the port forwards before rebuilding the sync — `set` also
+        // re-points an *already-remote* workspace, and a forward outlives that
+        // flip: its endpoint (`<connection>:tcp:localhost:<port>`) is baked in at
+        // create time while its name (`ws-fwd-<branch>-<repo>-<port>`) carries no
+        // host. So a forward a previous `ws up` made against the old server stays
+        // live, and the next `ws up` re-creates it under the same name — which
+        // `forward_create` reports as idempotent success — printing
+        // `svc → localhost:<port>` while the socket still tunnels to the old host.
+        // Terminating here makes the next `up` build them against the new
+        // connection. Keyed off the still-present port record, mirroring `unset`;
+        // a no-op when the workspace had no forwards.
+        let sanitized = workspace::sanitize_branch(&task);
+        for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
+            let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
+        }
+
         // Recreate every session from a clean slate. An existing one may point
         // anywhere — an older endpoint (and the rewritten config can no longer
         // tell), a survivor of a failed unset — and `create` masks a name
@@ -206,8 +222,8 @@ pub fn unset(force: bool) -> Result<()> {
         }
         // Drop the port forwards too, before the config flip makes every future
         // path skip them (they're all guarded on `cfg.remote.is_some()`). Keyed
-        // off the still-present port record. (`set` needs no mirror: it starts no
-        // stacks, so there are no forwards yet — the next `ws up` creates them.)
+        // off the still-present port record. (`set` mirrors this for the same
+        // reason — see the teardown in its backfill loop.)
         let sanitized = workspace::sanitize_branch(&task);
         for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
             let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));

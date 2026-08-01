@@ -74,8 +74,10 @@ impl Phase {
 
 /// Compute the injection env (`WS_HOST_*`/`WS_PORT_*` + declared `env` mappings)
 /// for a repo's worktree, allocating host ports and rendering templates as the
-/// `phase` dictates. A bare-name repo, or one with no services/env, yields an
-/// empty vec. This is the one function every op calls.
+/// `phase` dictates. A repo with no services/env yields just the workspace
+/// context; a bare-name entry is treated as an object entry with no overrides
+/// (see `repo_config` below), not as an opt-out. This is the one function every op
+/// calls.
 ///
 /// Location-transparent via `site`: derivation, port-freeness probes, and the
 /// generated compose override all happen where the stack runs (locally, or on
@@ -95,9 +97,9 @@ pub fn prepare(
     // compose` instead of hardcoding podman/docker) and whether the workspace
     // offloads (so a hook can branch local-vs-remote behaviour — e.g. same-host db
     // copy locally vs importing a synced dump on the server). Emitted even for a
-    // bare-name repo, which returns early below with no routing env.
+    // repo that isn't in this workspace at all, which returns early below.
     let context = workspace_context(cfg);
-    let Some(rc) = cfg.repo_config(repo) else { return Ok(context) };
+    let Some(rc) = repo_config(cfg, repo) else { return Ok(context) };
 
     // The worktree path at the execution site: the local path, or the synced dir
     // on the server (absolute — see `site_worktree_path`). `compose config`/the
@@ -186,6 +188,32 @@ pub fn prepare(
     }
     env.extend(context);
     Ok(env)
+}
+
+/// The config to apply to `repo`, treating a **bare-name** entry as the object
+/// entry with no overrides that it means (`{"name": "<repo>"}`). `None` only when
+/// `repo` isn't an entry in this workspace at all.
+///
+/// A bare name is convention-only, not opt-out: `ws init` writes one whenever the
+/// compose derive yields nothing (or the runtime is absent at init time), and
+/// `is_container_repo` still infers container-ness from the worktree's compose
+/// file, so such a repo *does* run the default `<runtime> compose up -d`. Before
+/// this fallback it ran it with no `COMPOSE_PROJECT_NAME`, so compose fell back to
+/// the worktree's dir basename (`api`) — identical for every branch — and a second
+/// worktree's `up` stole the first's containers while `ws rm`'s `compose down -v`
+/// wiped the sibling's volumes. Everything downstream (derive, project name,
+/// override, routes) now treats the two spellings alike.
+fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
+    let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
+    match entry.config() {
+        Some(rc) => Some(rc),
+        // A bare name carries no overrides, so one shared all-defaults config
+        // serves every such entry (nothing here reads `name`).
+        None => {
+            static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
+            Some(BARE.get_or_init(RepoConfig::default))
+        }
+    }
 }
 
 /// The service set to reason about on a read-only path: prefer the effective set
@@ -358,14 +386,16 @@ fn compose_env(
 ///
 /// Read-only: it uses the effective service set recorded at the last `up` (so
 /// `down`/`rm` resolve the same `@id`s `up` created) and never allocates or
-/// derives. Empty when the repo has no config or no `domain` is set (no routing).
+/// derives. Empty when `repo` isn't in the workspace or no `domain` is set (no
+/// routing). A bare-name repo routes like any other (see `repo_config`) —
+/// `prepare` hands its services a `WS_HOST_*`, so something has to answer there.
 pub fn routes(
     cfg: &WsConfig,
     root: &Path,
     branch_sanitized: &str,
     repo: &str,
 ) -> Vec<crate::caddy::RouteSpec> {
-    let (Some(rc), Some(domain)) = (cfg.repo_config(repo), cfg.domain.as_deref()) else {
+    let (Some(rc), Some(domain)) = (repo_config(cfg, repo), cfg.domain.as_deref()) else {
         return Vec::new();
     };
     let services = recorded_or_declared(root, branch_sanitized, repo, rc);
@@ -502,8 +532,9 @@ fn ws_vars(
 /// A peer repo's `WS_HOST_*`/`WS_PORT_*`, re-keyed under a `<peer>.` prefix
 /// (`WS_PORT_<peer>.<svc>`) so another repo can reference it via substitution.
 /// Read-only: the peer's ports come from its recorded allocation (written at
-/// `ws new`) — never a fresh allocation here. Empty when the peer isn't configured
-/// or has no allocation yet, which leaves the referencing token literal.
+/// `ws new`) — never a fresh allocation here. Empty when the peer isn't a repo in
+/// this workspace or has no allocation yet, which leaves the referencing token
+/// literal.
 fn peer_vars(
     cfg: &WsConfig,
     site: &Site,
@@ -512,7 +543,7 @@ fn peer_vars(
     peer: &str,
     phase: Phase,
 ) -> Result<BTreeMap<String, String>> {
-    let Some(rc) = cfg.repo_config(peer) else { return Ok(BTreeMap::new()) };
+    let Some(rc) = repo_config(cfg, peer) else { return Ok(BTreeMap::new()) };
     let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 
@@ -662,6 +693,55 @@ mod tests {
         assert!(ctx.contains(&("WS_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
         // The destination, so a client-side `prepare` can actually reach the server.
         assert!(ctx.contains(&("WS_CONNECTION".to_string(), "srv".to_string())), "{ctx:?}");
+    }
+
+    #[test]
+    fn a_bare_name_compose_repo_gets_a_namespaced_compose_project() {
+        // A bare-name entry (`{"repos":["api"]}`) whose worktree has a compose
+        // file still runs the compose lifecycle (`is_container_repo` infers it, so
+        // `hooks::resolve` hands back `<runtime> compose up -d`). It must therefore
+        // get `COMPOSE_PROJECT_NAME`: without it compose falls back to the worktree
+        // dir's basename `api`, the same for every branch, and the second
+        // worktree's `up` adopts the first's containers/network/volumes.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let wt = root.join(".worktrees/feat-a/api");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+        let cfg: WsConfig = serde_json::from_str(r#"{"repos":["api"]}"#).unwrap();
+        // Inspect: no derive, no allocation, no runtime call — the project name is
+        // set on every phase, so this exercises the fix without a container runtime.
+        let env = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "api", Phase::Inspect).unwrap();
+        let proj = env.iter().find(|(k, _)| k == "COMPOSE_PROJECT_NAME").map(|(_, v)| v.as_str());
+        assert_eq!(proj, Some("feat-a-api"), "bare-name compose repo must be namespaced: {env:?}");
+
+        // A name that isn't a repo here still gets only the workspace context.
+        let none = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "nope", Phase::Inspect).unwrap();
+        assert!(!none.iter().any(|(k, _)| k == "COMPOSE_PROJECT_NAME"), "{none:?}");
+    }
+
+    #[test]
+    fn a_bare_name_repo_routes_its_recorded_services() {
+        // Same rule on the routing side: `prepare` hands a bare-name repo's HTTP
+        // services a `WS_HOST_*`, so `routes` must produce the Caddy route that
+        // hostname resolves to — otherwise the injected host is a dead name.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cfg: WsConfig =
+            serde_json::from_str(r#"{"domain":"myapp.test","repos":["api"]}"#).unwrap();
+        let recorded = services(&repo_with(&[("web", svc(Some(HttpDecl::Enabled(true)), 80))]));
+        ports::record_services(root, "feat-a", "api", &recorded).unwrap();
+
+        let specs = routes(&cfg, root, "feat-a", "api");
+        assert_eq!(
+            specs.len(),
+            1,
+            "bare-name repo must still route: {:?}",
+            specs.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(specs[0].hostname, "feat-a.web.myapp.test");
+        assert_eq!(specs[0].upstream, "feat-a-api-web-1:80");
     }
 
     #[test]

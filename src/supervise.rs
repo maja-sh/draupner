@@ -200,6 +200,52 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     Ok(true)
 }
 
+/// The `down` script for the pid file at shell expression `pid`. Split out from
+/// [`down`] so the shell itself can be exercised — the bugs this snippet has had
+/// all live in the shell text, not in the Rust around it.
+fn down_script(pid: &str) -> String {
+    // Only signal when the pid is alive AND its start time matches what we recorded
+    // — never a recycled pid belonging to an unrelated process. `KILL` after a short
+    // `TERM` grace guarantees the process is gone before we drop the pid file.
+    // The whole tree, not just the recorded pid — see `tree_fn`. Descendants are
+    // collected *before* the first signal: killing the wrapper first would reparent
+    // the dev server to init and lose the link to it.
+    //
+    // The tree is carried in the positional parameters and always expanded as
+    // `"$@"`, never as an unquoted variable. On a remote workspace this script is
+    // handed to the *login* shell (see `Site::shell`), and zsh — the macOS default
+    // and a common Linux login shell — word-splits unquoted command substitution
+    // but *not* unquoted parameter expansion. `kill -TERM $victims` there passed
+    // the single argument "1234 5678" ("illegal pid"), killed nothing, and fell
+    // through to `rm -f` on the pid file: `ws down` reported success while leaking
+    // the whole tree and discarding the only record of it.
+    format!(
+        "{tree}\n\
+         {read}\n\
+         if [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null; then\n\
+         \x20 got=$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
+         \x20 if [ \"$got\" = \"$want\" ]; then\n\
+         \x20   set -- $(ws_tree \"$p\")\n\
+         \x20   kill -TERM \"$@\" 2>/dev/null\n\
+         \x20   for _ in 1 2 3 4 5 6; do\n\
+         \x20     alive=; for v in \"$@\"; do kill -0 \"$v\" 2>/dev/null && alive=1; done\n\
+         \x20     [ -n \"$alive\" ] || break\n\
+         \x20     sleep 0.5\n\
+         \x20   done\n\
+         \x20   kill -KILL \"$@\" 2>/dev/null\n\
+         \x20   rm -f {pid}\n\
+         \x20 else\n\
+         \x20   echo {stranger}\n\
+         \x20 fi\n\
+         else\n\
+         \x20 rm -f {pid}\n\
+         fi",
+        tree = tree_fn(),
+        read = read_pidfile(pid),
+        stranger = STRANGER_MARKER,
+    )
+}
+
 /// Stop a host process and drop its pid file. A process that was never started or
 /// has already gone is a safe no-op. Sends `TERM`, waits briefly, then `KILL`s — so
 /// on return the process is dead and a caller (teardown) won't remove the worktree
@@ -215,37 +261,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
 /// into a leak.
 pub fn down(site: &Site, name: &str) -> Result<()> {
     let pid = run_path(name, "pid");
-    let read = read_pidfile(&pid);
-    // Only signal when the pid is alive AND its start time matches what we recorded
-    // — never a recycled pid belonging to an unrelated process. `KILL` after a short
-    // `TERM` grace guarantees the process is gone before we drop the pid file.
-    // The whole tree, not just the recorded pid — see `tree_fn`. Descendants are
-    // collected *before* the first signal: killing the wrapper first would reparent
-    // the dev server to init and lose the link to it.
-    let tree = tree_fn();
-    let script = format!(
-        "{tree}\n\
-         {read}\n\
-         if [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null; then\n\
-         \x20 got=$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
-         \x20 if [ \"$got\" = \"$want\" ]; then\n\
-         \x20   victims=$(ws_tree \"$p\")\n\
-         \x20   kill -TERM $victims 2>/dev/null\n\
-         \x20   for _ in 1 2 3 4 5 6; do\n\
-         \x20     alive=; for v in $victims; do kill -0 \"$v\" 2>/dev/null && alive=1; done\n\
-         \x20     [ -n \"$alive\" ] || break\n\
-         \x20     sleep 0.5\n\
-         \x20   done\n\
-         \x20   kill -KILL $victims 2>/dev/null\n\
-         \x20   rm -f {pid}\n\
-         \x20 else\n\
-         \x20   echo {stranger}\n\
-         \x20 fi\n\
-         else\n\
-         \x20 rm -f {pid}\n\
-         fi",
-        stranger = STRANGER_MARKER,
-    );
+    let script = down_script(&pid);
     let out = site
         .shell(&script)
         .stdin(Stdio::null())
@@ -361,6 +377,13 @@ impl Health {
 /// liveness rather than inventing a verdict. A socket that *is* listening but
 /// whose owner we can't see reads as `other`: it isn't ours as far as we can tell,
 /// which is the safe direction — it says "look at this", not "all good".
+///
+/// Neither pid list is iterated as a bare `$var`: the listeners are re-split through
+/// a command substitution and the tree is matched by substring. On a remote this
+/// runs under the server's *login* shell (see `Site::shell`), and zsh doesn't
+/// word-split unquoted parameter expansions — `for t in $2` saw the whole tree as
+/// one word, so a healthy multi-pid host process never matched and every port came
+/// back `other` ("running, :NNNNN held by another process").
 fn owner_fn() -> &'static str {
     "ws_owner() {\n\
      \x20 if command -v ss >/dev/null 2>&1; then\n\
@@ -374,10 +397,8 @@ fn owner_fn() -> &'static str {
      \x20   echo unknown; return\n\
      \x20 fi\n\
      \x20 [ -n \"$pids\" ] || { echo other; return; }\n\
-     \x20 for q in $pids; do\n\
-     \x20   for t in $2; do\n\
-     \x20     [ \"$q\" = \"$t\" ] && { echo ours; return; }\n\
-     \x20   done\n\
+     \x20 for q in $(echo $pids); do\n\
+     \x20   case \" $2 \" in *\" $q \"*) echo ours; return;; esac\n\
      \x20 done\n\
      \x20 echo other\n\
      }"
@@ -500,6 +521,54 @@ fn parse_health(out: &str) -> Option<Health> {
 mod tests {
     use super::*;
 
+    /// Run `script` through `sh` and return its trimmed stdout.
+    fn sh_capture(script: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run sh");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Whether `bin` is on PATH here.
+    fn have(bin: &str) -> bool {
+        !sh_capture(&format!("command -v {bin} 2>/dev/null")).is_empty()
+    }
+
+    /// A fresh scratch directory for a test's files.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("ws-supervise-{tag}-{}-{uniq}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Whether `pid` is a *live* process — not merely a pid `kill -0` accepts. A
+    /// process the test itself spawned is a zombie until reaped, and signalling a
+    /// zombie succeeds, so liveness is read off the process state (the same `ps -o`
+    /// idiom the launch script uses).
+    fn pid_running(pid: u32) -> bool {
+        let st = sh_capture(&format!("ps -o stat= -p {pid} 2>/dev/null | tr -d ' '"));
+        !st.is_empty() && !st.starts_with('Z')
+    }
+
+    /// The first child of `pid`, waiting briefly for it to appear.
+    fn child_of(pid: u32) -> Option<u32> {
+        for _ in 0..40 {
+            let out =
+                sh_capture(&format!("ps -eo pid=,ppid= | awk -v w={pid} '$2==w{{print $1}}'"));
+            if let Some(kid) = out.lines().next().and_then(|l| l.trim().parse().ok()) {
+                return Some(kid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None
+    }
+
     #[test]
     fn proc_name_sanitizes_branch() {
         assert_eq!(proc_name("feat/foo", "api"), "ws-feat-foo-api");
@@ -574,5 +643,127 @@ mod tests {
             health(&Site::Local, "ws-no-such-worktree-probe-test", &[20000]),
             Some(Health::NotStarted)
         );
+    }
+
+    #[test]
+    fn down_kills_the_whole_tree_under_a_shell_that_does_not_split_parameters() {
+        // A remote workspace hands this script to the server's *login* shell
+        // (`Site::shell`), which is zsh on macOS and on plenty of Linux dev boxes.
+        // zsh word-splits unquoted command substitution but not unquoted parameter
+        // expansion, so `kill -TERM $victims` passed one "1234 5678" argument,
+        // signalled nothing, and fell through to `rm -f` on the pid file: `ws down`
+        // reported success while leaking the tree and discarding the record of it.
+        if !have("zsh") {
+            eprintln!("skipping: no `zsh` to stand in for a non-POSIX login shell");
+            return;
+        }
+        let dir = scratch_dir("down");
+        let pid_path = dir.join("tree.pid");
+
+        // Two pids: a wrapper `sh` that can't `exec` its child because something
+        // follows it, plus the `sleep` itself — the shape `tree_fn` exists for.
+        let mut wrapper = std::process::Command::new("sh")
+            .args(["-c", "sleep 30; :"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a wrapper shell");
+        let parent = wrapper.id();
+        let child = child_of(parent).expect("the wrapper should have started a child");
+        let want = sh_capture(&format!("ps -o lstart= -p {parent} 2>/dev/null | tr -d ' '"));
+        std::fs::write(&pid_path, format!("{parent}\n{want}\n")).expect("write pid file");
+
+        let script = down_script(&shell_quote(pid_path.to_str().unwrap()));
+        let status = std::process::Command::new("zsh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .status()
+            .expect("run the down script under zsh");
+
+        let mut settled = false;
+        for _ in 0..30 {
+            if !pid_running(parent) && !pid_running(child) {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let (parent_running, child_running) = (pid_running(parent), pid_running(child));
+        // Leave no stray behind, whatever the assertions below decide.
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(parent.to_string())
+            .arg(child.to_string())
+            .status();
+        let _ = wrapper.wait();
+        let pid_file_gone = !pid_path.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(status.success(), "the down script must exit 0, got {status}");
+        assert!(
+            !child_running,
+            "the descendant must be killed, not left holding its port while the pid file is dropped"
+        );
+        assert!(!parent_running, "the recorded process must be killed");
+        assert!(settled, "the whole tree must be gone once `down` returns");
+        assert!(pid_file_gone, "a stopped process's pid file must be removed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn port_attribution_sees_individual_pids_in_every_shell() {
+        // `ws_owner`'s two pid lists used to be iterated as bare `$pids`/`$2`, which
+        // a login shell that doesn't split parameters (zsh) hands over as a single
+        // word — so a healthy host process with more than one pid never matched and
+        // `ws list` reported "held by another process" for its own server.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("owner");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        // Stand-in `ss`: one listening socket held by two pids, as a forked dev
+        // server reports. Deterministic, and it needs no real listener.
+        let ss = bin.join("ss");
+        std::fs::write(
+            &ss,
+            "#!/bin/sh\necho 'LISTEN 0 511 0.0.0.0:20000 0.0.0.0:* \
+             users:((\"node\",pid=111,fd=3),(\"node\",pid=222,fd=4))'\n",
+        )
+        .expect("write fake ss");
+        std::fs::set_permissions(&ss, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+        let script = format!("{}\nws_owner \"$1\" \"$2\"", owner_fn());
+        for shell in ["sh", "zsh", "bash", "dash"] {
+            if !have(shell) {
+                continue;
+            }
+            let verdict = |port: &str, tree: &str| {
+                let out = std::process::Command::new(shell)
+                    .args(["-c", script.as_str(), "ws-owner-test", port, tree])
+                    .env("PATH", &path)
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("run ws_owner");
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            assert_eq!(
+                verdict("20000", "999 222"),
+                "ours",
+                "{shell}: a listener pid inside the tree must attribute the port to us"
+            );
+            assert_eq!(
+                verdict("20000", "999 333"),
+                "other",
+                "{shell}: a listener outside the tree is not ours"
+            );
+            assert_eq!(
+                verdict("30000", "111"),
+                "none",
+                "{shell}: a port nobody listens on must read as free"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
