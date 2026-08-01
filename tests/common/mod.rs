@@ -299,7 +299,6 @@ impl WorkspaceFixture {
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(cwd)
-            .env_remove("RUST_LOG")
             // The HOME redirect below is what isolates `~/.config/ws` (the
             // global config, persisted https_port) into the fixture — an
             // XDG_CONFIG_HOME inherited from the dev shell would bypass it and
