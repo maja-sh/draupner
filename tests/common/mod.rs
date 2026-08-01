@@ -86,6 +86,30 @@ fn content_length(headers: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
+/// The isolated git config + identity every git invocation in a fixture runs
+/// with — including `ws` itself, which shells out to git. Without it the
+/// developer's global/system gitconfig (and their commit identity) leaks into
+/// the test repos.
+fn git_env(cmd: &mut Command) {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com");
+}
+
+/// Write a fixture script and make it runnable — one place that knows a script
+/// the tests hand to `ws` (stub, hook) has to be 0755.
+fn write_exec(path: &Path, contents: &str) {
+    std::fs::write(path, contents).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
 pub struct WorkspaceFixture {
     pub root: TempDir,
     admin: AdminStub,
@@ -120,40 +144,19 @@ impl WorkspaceFixture {
     pub fn add_repo(&self, name: &str) -> PathBuf {
         let repo = self.path().join(name);
         std::fs::create_dir_all(&repo).expect("mkdir repo");
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(&repo)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .expect("git");
-            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["commit", "--allow-empty", "-m", "init", "-q"]);
+        self.git(name, &["init", "-q", "-b", "main"]);
+        self.git(name, &["commit", "--allow-empty", "-m", "init", "-q"]);
         repo
     }
 
-    /// Run a git command inside `<root>/<repo_rel>` with the same isolated env
-    /// as `add_repo`. Panics on failure. Lets tests drive git directly to set
-    /// up scenarios (commits, upstreams, dirty state).
+    /// Run a git command inside `<root>/<repo_rel>` with the isolated git env.
+    /// Panics on failure. Lets tests drive git directly to set up scenarios
+    /// (commits, upstreams, dirty state).
     pub fn git(&self, repo_rel: &str, args: &[&str]) {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(self.path().join(repo_rel))
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .expect("git");
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(self.path().join(repo_rel));
+        git_env(&mut cmd);
+        let out = cmd.output().expect("git");
         assert!(
             out.status.success(),
             "git {args:?} in {repo_rel} failed: {}",
@@ -184,12 +187,7 @@ impl WorkspaceFixture {
     /// pointed at `WS_SSH`/`WS_MUTAGEN` to simulate reachable/unreachable.
     pub fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path().join(name);
-        std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).expect("write stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_exec(&path, &format!("#!/usr/bin/env bash\n{body}\n"));
         path
     }
 
@@ -198,18 +196,7 @@ impl WorkspaceFixture {
     /// can assert the exact command `ws` would run without a real server.
     /// Point `WS_SSH`/`WS_MUTAGEN` at it and set `ARGS_FILE`.
     pub fn arg_recorder(&self, name: &str) -> PathBuf {
-        let path = self.path().join(name);
-        std::fs::write(
-            &path,
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\n",
-        )
-        .expect("write recorder");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
+        self.stub(name, "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"")
     }
 
     /// Write a hook script under `.ws-hooks/<repo>/<event>` and make it executable.
@@ -218,17 +205,7 @@ impl WorkspaceFixture {
         let dir = self.path().join(".ws-hooks").join(repo);
         std::fs::create_dir_all(&dir).expect("create hook dir");
         let path = dir.join(event);
-        std::fs::write(
-            &path,
-            format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
-        )
-        .expect("write hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod hook");
-        }
+        write_exec(&path, &format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"));
     }
 
     /// Run `ws <args>` from the fixture root. Returns Output for inspection.
@@ -272,13 +249,8 @@ impl WorkspaceFixture {
             // `ws up` never spins up a real Caddy container / `ws-net` yet its
             // route calls still succeed. A test can override this (e.g. to a dead
             // endpoint) to drive the routing-failure path.
-            .env("WS_CADDY_ADMIN", self.admin.url.as_str())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com");
+            .env("WS_CADDY_ADMIN", self.admin.url.as_str());
+        git_env(&mut cmd);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -304,4 +276,12 @@ pub fn stderr(o: &Output) -> String {
 
 pub fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+/// The digits in `<marker>NNNNN]` — the convention a test's `up` script uses to
+/// hand an allocated port back through ws's own output.
+pub fn port_after(haystack: &str, marker: &str) -> u16 {
+    let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
+    let end = start + haystack[start..].find(']').expect("closing ]");
+    haystack[start..end].parse().unwrap_or(0)
 }

@@ -510,8 +510,16 @@ pub fn ask(prompt: &str) -> Option<String> {
     }
 }
 
+/// The first non-empty line of `s`, trimmed. Condenses a child process's
+/// stderr/stdout into the one line a user-facing message has room for. `None`
+/// when there is nothing to say (empty or all-whitespace output); callers that
+/// need a message regardless supply their own fallback.
+pub fn first_nonempty_line(s: &str) -> Option<&str> {
+    s.lines().map(str::trim).find(|l| !l.is_empty())
+}
+
 fn pad_tag(tag: &str) -> String {
-    format!("{tag:<width$}", width = TAG_WIDTH)
+    pad_key(tag, TAG_WIDTH)
 }
 
 fn format_timing(d: Duration) -> String {

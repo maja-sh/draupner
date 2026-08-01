@@ -273,9 +273,7 @@ fn validate_repos(requested: &[String], known: &[&str]) -> Result<()> {
 }
 
 fn fetch_origin(repo: &Path) {
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let _ = git::git(repo)
         .args(["fetch", "origin", "--quiet"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -286,9 +284,7 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
     let local_exists = git::ref_exists(repo, &format!("refs/heads/{branch}"));
 
     let out = if local_exists {
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        git::git(repo)
             .args(["worktree", "add"])
             .arg(wt_path)
             .arg(branch)
@@ -306,9 +302,7 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
                 ))
             })?
         };
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        git::git(repo)
             .args(["worktree", "add", "-b", branch])
             .arg(wt_path)
             .arg(&start)
@@ -415,9 +409,7 @@ fn symlink_node_modules(repo_name: &str, wt: &Path) -> Result<()> {
 /// only runs while unwinding from an earlier error, and the original error is
 /// what the caller propagates.
 fn remove_worktree(repo: &Path, wt: &Path) {
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let _ = git::git(repo)
         .args(["worktree", "remove", "--force"])
         .arg(wt)
         .output();

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::path::Path;
-use std::process::Command;
 
 use crate::config;
 use crate::git;
@@ -127,12 +126,7 @@ fn audit(worktrees: &[(String, std::path::PathBuf)], task_name: &str) -> Verdict
 }
 
 fn current_branch(wt: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .output()
-        .ok()?;
+    let out = git::git(wt).args(["symbolic-ref", "--short", "HEAD"]).output().ok()?;
     if !out.status.success() {
         return None; // detached HEAD
     }
@@ -147,9 +141,9 @@ fn is_ancestor_of_default(wt: &Path) -> bool {
     let Some(default) = git::default_ref(wt) else {
         return false;
     };
-    Command::new("git")
-        .arg("-C")
-        .arg(wt)
+    // stderr is deliberately left alone rather than nulled: a default that
+    // doesn't resolve (a dangling `origin/HEAD`) still says so on the terminal.
+    git::git(wt)
         .args(["merge-base", "--is-ancestor", "HEAD", &default])
         .status()
         .map(|s| s.success())

@@ -7,7 +7,7 @@
 mod common;
 
 use common::{stderr, WorkspaceFixture};
-use std::path::Path;
+use std::path::PathBuf;
 
 /// A host repo whose `up` records the injected env, then runs a long sleep as the
 /// supervised (tracked) process.
@@ -22,20 +22,29 @@ fn host_fixture() -> WorkspaceFixture {
     f
 }
 
+/// Where `ws` records the pid of `feat/foo`'s api host process (under the
+/// fixture HOME).
+fn pid_file(f: &WorkspaceFixture) -> PathBuf {
+    f.path().join(".ws-run/ws-feat-foo-api.pid")
+}
+
+/// Whether a pid is alive, probed the way the shell does.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Whether the host process for `feat/foo`'s api is alive, read the same way `ws`
 /// does: the pid file under the fixture HOME, then `kill -0`.
 fn proc_alive(f: &WorkspaceFixture) -> bool {
-    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
-    let Ok(contents) = std::fs::read_to_string(&pid_file) else { return false };
+    let Ok(contents) = std::fs::read_to_string(pid_file(f)) else { return false };
     // The pid file is two lines — pid, then the start-time identity. We only need
     // the pid to probe liveness the way the shell does.
     let pid = contents.lines().next().unwrap_or("").trim();
-    !pid.is_empty()
-        && std::process::Command::new("kill")
-            .args(["-0", pid])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+    !pid.is_empty() && alive(pid)
 }
 
 fn stop(f: &WorkspaceFixture) {
@@ -45,8 +54,7 @@ fn stop(f: &WorkspaceFixture) {
 
 /// The pid `ws` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
-    let contents = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid"))
-        .expect("pid file after up");
+    let contents = std::fs::read_to_string(pid_file(f)).expect("pid file after up");
     contents.lines().next().unwrap().trim().to_string()
 }
 
@@ -272,11 +280,11 @@ fn host_up_is_idempotent_when_already_running() {
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
-    let pid1 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+    let pid1 = std::fs::read_to_string(pid_file(&f)).unwrap();
 
     // A second up must NOT relaunch — same pid, and it says "already running".
     let out = f.run_ok(&["up", "feat/foo"]);
-    let pid2 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+    let pid2 = std::fs::read_to_string(pid_file(&f)).unwrap();
     assert_eq!(pid1, pid2, "up must not relaunch a running host process");
     assert!(
         stderr(&out).contains("already running"),
@@ -298,10 +306,7 @@ fn host_up_with_no_up_script_is_skipped() {
     let out = f.run_ok(&["up", "feat/foo"]);
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
     assert!(stderr(&out).contains("no up script"), "expected a skip note:\n{}", stderr(&out));
-    assert!(
-        !Path::new(&f.path().join(".ws-run/ws-feat-foo-api.pid")).exists(),
-        "nothing to launch → no pid file"
-    );
+    assert!(!pid_file(&f).exists(), "nothing to launch → no pid file");
 }
 
 #[test]
@@ -346,13 +351,6 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
         .expect("the wrapper should have started a child")
         .trim()
         .to_string();
-    let alive = |pid: &str| {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
     assert!(alive(&child), "the child should be running before down");
 
     f.run_ok(&["down", "feat/foo"]);
@@ -380,7 +378,7 @@ fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
 
-    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
+    let pid_file = pid_file(&f);
     let recorded = std::fs::read_to_string(&pid_file).expect("pid file after up");
     let pid = recorded.lines().next().unwrap().trim().to_string();
 
@@ -390,13 +388,6 @@ fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
     let out = f.run(&["down", "feat/foo"]);
     let err = stderr(&out);
 
-    let alive = |p: &str| {
-        std::process::Command::new("kill")
-            .args(["-0", p])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
     assert!(alive(&pid), "an unmatched process must be left running, not signalled");
     assert!(
         pid_file.exists(),

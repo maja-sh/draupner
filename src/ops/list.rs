@@ -131,7 +131,7 @@ pub fn run() -> Result<()> {
             let path = if key == "(unmanaged)" {
                 String::new()
             } else {
-                ws.root.join(".worktrees").join(&key).display().to_string()
+                workspace::task_dir(&ws.root, &key).display().to_string()
             };
             ListGroup { task: label, path, rows: rows.into_iter().map(|(r, _)| r).collect() }
         })
@@ -146,7 +146,7 @@ pub fn run() -> Result<()> {
 fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
     let mut branches = rows.iter().filter_map(|(_, b)| b.as_deref());
     if let Some(first) = branches.next() {
-        if rows.iter().filter_map(|(_, b)| b.as_deref()).all(|b| b == first) {
+        if branches.all(|b| b == first) {
             return first.to_string();
         }
     }

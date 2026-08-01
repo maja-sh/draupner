@@ -279,6 +279,16 @@ impl Script {
             Script::Many(v) => v,
         }
     }
+
+    /// The commands as one fail-fast shell command (`cmd1 && cmd2`), with
+    /// `.ws-hooks/…` references anchored to `$WS_WORKSPACE_ROOT` (see
+    /// [`anchor_ws_hooks`]) so the same string resolves locally and on the
+    /// server. The single home for "what shell string does this script run",
+    /// shared by the local runner (`hooks::run_script`) and the remote dispatch
+    /// ([`WsConfig::command_for`]).
+    pub fn joined(&self) -> String {
+        self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
+    }
 }
 
 /// A format-blind config template: render `src` → `dest` with `${WS_*}` tokens.
@@ -294,9 +304,8 @@ fn is_false(b: &bool) -> bool {
 
 impl WsConfig {
     /// Container runtime for `ws`'s own calls, defaulting to `podman`.
-    // Consumed by the routing slices (compose introspection / Caddy); parsed now
-    // so the schema is stable.
-    #[allow(dead_code)]
+    // The default lives here, not at the call sites, so compose introspection,
+    // Caddy and the hook defaults all agree on the runtime.
     pub fn runtime(&self) -> &str {
         self.runtime.as_deref().unwrap_or("podman")
     }
@@ -330,9 +339,7 @@ impl WsConfig {
     /// owner of "what shell command does this event run", shared by the host-repo
     /// launch path and every remote-dispatch caller.
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
-        self.repo_config(repo)
-            .and_then(|rc| rc.scripts.get(event))
-            .map(|s| s.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && "))
+        self.repo_config(repo).and_then(|rc| rc.scripts.get(event)).map(Script::joined)
     }
 
     /// The command for `event`: the declared `scripts` entry, else the container
@@ -370,19 +377,13 @@ impl RepoEntry {
     }
 
     pub fn worktree_excludes(&self) -> &[String] {
-        match self {
-            RepoEntry::Name(_) => &[],
-            RepoEntry::Extended(c) => &c.worktree_excludes,
-        }
+        self.config().map_or(&[], |c| c.worktree_excludes.as_slice())
     }
 
     /// Untracked paths to seed from the main checkout into a new worktree. Empty
     /// for a bare-name repo.
     pub fn copy(&self) -> &[String] {
-        match self {
-            RepoEntry::Name(_) => &[],
-            RepoEntry::Extended(c) => &c.copy,
-        }
+        self.config().map_or(&[], |c| c.copy.as_slice())
     }
 }
 

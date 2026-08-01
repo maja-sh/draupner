@@ -96,11 +96,9 @@ impl Site {
                 c.args(&argv[1..]);
                 c
             }
-            Site::Remote { connection, .. } => {
+            Site::Remote { .. } => {
                 let script: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
-                let mut c = ssh_fast(connection);
-                c.arg(script.join(" "));
-                c
+                self.shell(&script.join(" "))
             }
         }
     }
@@ -216,14 +214,33 @@ const SSH_MUX_OPTS: &[&str] = &[
     "-o", "LogLevel=ERROR",
 ];
 
+/// The single owner of the `ssh [-t] [<fast-opts>] <mux-opts> <dest>` prefix
+/// shared by `Site`, the probes, and the lifecycle dispatch — the caller appends
+/// the remote command/script and sets stdio.
+///
+/// `want_tty` forces a remote pty (`-t`). `batch` applies [`SSH_FAST_OPTS`]: it
+/// belongs on a probe, which must fail rather than hang, but *not* on a call that
+/// may legitimately have to prompt for SSH auth (a key passphrase with no agent,
+/// a password) — there `BatchMode=yes` turns an answerable prompt into a refusal.
+fn ssh_base(connection: &str, want_tty: bool, batch: bool) -> Command {
+    let mut c = Command::new(ssh_bin());
+    if want_tty {
+        c.arg("-t");
+    }
+    if batch {
+        c.args(SSH_FAST_OPTS);
+    }
+    // Ride the same multiplexed connection the probes/`Site` calls opened, so a
+    // later call doesn't pay a second full handshake.
+    c.args(SSH_MUX_OPTS).arg(connection);
+    c
+}
+
 /// An `ssh` command to `connection` with the non-interactive fail-fast options
 /// (+ connection multiplexing) applied — the caller appends the remote
-/// command/script and sets stdio. The single owner of the `ssh <fast-opts> <dest>`
-/// prefix shared by `Site` and the probes.
+/// command/script and sets stdio.
 fn ssh_fast(connection: &str) -> Command {
-    let mut c = Command::new(ssh_bin());
-    c.args(SSH_FAST_OPTS).args(SSH_MUX_OPTS).arg(connection);
-    c
+    ssh_base(connection, false, true)
 }
 
 /// Whether an SSH destination is safe to pass as an `ssh` argv element. `ssh`
@@ -643,7 +660,7 @@ pub fn capture_status(
     script.push_str(&format!("timeout {timeout_secs} sh -c {}", shell_quote(command)));
 
     let out = ssh_capture(connection, &script)?;
-    out.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
+    crate::ui::first_nonempty_line(&out).map(String::from)
 }
 
 /// Assemble the `ssh` command for `connection` running `script`. Passes `-t`
@@ -651,14 +668,11 @@ pub fn capture_status(
 /// our stdio is interactive; see `exec`. Interactive work (tinker, prompts,
 /// colors) gets a pty; piped/redirected/test invocations don't, keeping output
 /// clean.
+///
+/// Not `batch` (see `ssh_base`): these calls may need to prompt for SSH auth.
 pub fn ssh_command(connection: &str, script: &str, want_tty: bool) -> Command {
-    let mut c = Command::new(ssh_bin());
-    if want_tty {
-        c.arg("-t");
-    }
-    // Ride the same multiplexed connection the probes/`Site` calls opened, so the
-    // lifecycle script doesn't pay a second full handshake.
-    c.args(SSH_MUX_OPTS).arg(connection).arg(script);
+    let mut c = ssh_base(connection, want_tty, false);
+    c.arg(script);
     c
 }
 

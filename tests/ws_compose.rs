@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{stderr, WorkspaceFixture};
+use common::{port_after, stderr, WorkspaceFixture};
 use std::process::Command;
 
 /// Is `docker compose config` usable here? The derivation only parses the file
@@ -28,16 +28,13 @@ fn services_are_derived_from_compose_config() {
     f.add_repo("api");
     // A real compose file committed on `main`: an HTTP service (web on 80), a
     // single-port raw-TCP service (db), and a multi-port one (mailpit).
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
+    commit_compose(
+        &f,
         "services:\n\
         \x20 web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
         \x20 db:\n    image: mysql:8\n    ports: [\"3306\"]\n\
         \x20 mailpit:\n    image: axllent/mailpit\n    ports: [\"1025:1025\", \"8025:8025\"]\n",
-    )
-    .unwrap();
-    f.git("api", &["add", "docker-compose.yml"]);
-    f.git("api", &["commit", "-q", "-m", "add compose"]);
+    );
 
     // No `services` declared — everything comes from the live derivation.
     f.write_ws_json(
@@ -67,13 +64,10 @@ fn declared_services_override_the_derivation() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
+    commit_compose(
+        &f,
         "services:\n  mailpit:\n    image: axllent/mailpit\n    ports: [\"8025:8025\"]\n",
-    )
-    .unwrap();
-    f.git("api", &["add", "docker-compose.yml"]);
-    f.git("api", &["commit", "-q", "-m", "add compose"]);
+    );
 
     // Derivation would make mailpit (8025) a raw-TCP service; the override routes
     // it as HTTP under the `mail` subdomain instead.
@@ -98,14 +92,11 @@ fn read_phases_resolve_derived_services_after_up() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
+    commit_compose(
+        &f,
         "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
         \x20 db:\n    image: mysql:8\n    ports: [\"3306\"]\n",
-    )
-    .unwrap();
-    f.git("api", &["add", "docker-compose.yml"]);
-    f.git("api", &["commit", "-q", "-m", "add compose"]);
+    );
 
     // No declared services — `web`/`db` exist only via derivation. `up` records
     // the effective set so a later `ws exec` (a read-only, non-deriving phase)
@@ -159,12 +150,11 @@ fn init_scaffolds_derived_services() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
+    write_compose(
+        &f,
         "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
         \x20 db:\n    image: mysql:8\n    ports: [\"3306\"]\n",
-    )
-    .unwrap();
+    );
 
     // No .ws.json yet — init creates it, scaffolding the derived services.
     let out = f.run(&["init", "--runtime", "docker"]);
@@ -188,15 +178,12 @@ fn container_override_deconflicts_raw_tcp_ports() {
     f.add_repo("api");
     // web (HTTP, host-published) + db (raw-TCP). 6.1 reissues db's host port to
     // the allocated one and leaves web's publish alone.
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
+    commit_compose(
+        &f,
         "services:\n\
         \x20 web:\n    image: nginx\n    ports: [\"8080:80\"]\n\
         \x20 db:\n    image: mysql:8\n    ports: [\"3306:3306\"]\n",
-    )
-    .unwrap();
-    f.git("api", &["add", "docker-compose.yml"]);
-    f.git("api", &["commit", "-q", "-m", "add compose"]);
+    );
 
     // The up script validates the merged config (proves `!override` parses on
     // this compose) and echoes the project name ws injected.
@@ -237,13 +224,7 @@ fn container_override_injects_declared_env() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    std::fs::write(
-        f.path().join("api/docker-compose.yml"),
-        "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n",
-    )
-    .unwrap();
-    f.git("api", &["add", "docker-compose.yml"]);
-    f.git("api", &["commit", "-q", "-m", "add compose"]);
+    commit_compose(&f, "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n");
 
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
@@ -273,9 +254,14 @@ fn override_port(ov: &str) -> u16 {
     inside.split(':').next().unwrap().parse().unwrap_or(0)
 }
 
-/// Parse the digits in `<marker>NNNNN]`.
-fn port_after(haystack: &str, marker: &str) -> u16 {
-    let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
-    let end = start + haystack[start..].find(']').expect("closing ]");
-    haystack[start..end].parse().unwrap_or(0)
+/// Write `api/docker-compose.yml` in the main checkout.
+fn write_compose(f: &WorkspaceFixture, yaml: &str) {
+    std::fs::write(f.path().join("api/docker-compose.yml"), yaml).unwrap();
+}
+
+/// …and commit it on `main`, so a new worktree carries it.
+fn commit_compose(f: &WorkspaceFixture, yaml: &str) {
+    write_compose(f, yaml);
+    f.git("api", &["add", "docker-compose.yml"]);
+    f.git("api", &["commit", "-q", "-m", "add compose"]);
 }

@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::WsConfig;
+use crate::git;
 use crate::hooks;
 use crate::inject;
 use crate::mutagen;
@@ -48,43 +48,11 @@ pub fn remove_task(
         // its down/post-remove scripts on the server; a local container runs them
         // as hooks here.
         if cfg.is_host_repo(repo) {
-            match site.as_ref() {
-                Some(s) => {
-                    let step = crate::ui::step(repo, "stop");
-                    match crate::supervise::down(s, &crate::supervise::proc_name(branch, repo)) {
-                        Ok(()) => step.ok(),
-                        Err(e) => {
-                            step.fail(&format!("{e}"));
-                            hook_failed = true;
-                        }
-                    }
-                }
-                // Remote server unreachable — can't stop the unit now; still drop
-                // the local worktree below so `ws rm` isn't blocked.
-                None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
-            }
+            teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
             teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
         } else {
-            // Read the existing allocation (never allocate) for the hook env.
-            let extra_env =
-                inject::prepare(cfg, &Site::Local, root, wt, &sanitized, repo, inject::Phase::Inspect)
-                    .unwrap_or_default();
-
-            // Resource teardown hooks — best-effort. A failing hook is reported
-            // but doesn't stop removal (the user wants the worktree gone).
-            for event in ["down", "post-remove"] {
-                if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
-                    let step = crate::ui::step(repo, &format!("{event} hook"));
-                    match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
-                        Ok(()) => step.ok(),
-                        Err(e) => {
-                            step.fail(&format!("{e}"));
-                            hook_failed = true;
-                        }
-                    }
-                }
-            }
+            teardown_local(cfg, root, wt, &sanitized, repo, &mut hook_failed);
         }
 
         // Remove this worktree's Caddy routes before `forget` drops the recorded
@@ -169,6 +137,55 @@ pub fn remove_task(
     Ok(hook_failed)
 }
 
+/// Stop a `kind: host` repo's supervised process at its site (best-effort).
+fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mut bool) {
+    match site {
+        Some(s) => {
+            let step = crate::ui::step(repo, "stop");
+            match crate::supervise::down(s, &crate::supervise::proc_name(branch, repo)) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    step.fail(&format!("{e}"));
+                    *hook_failed = true;
+                }
+            }
+        }
+        // Remote server unreachable — can't stop the unit now; the caller still
+        // drops the local worktree so `ws rm` isn't blocked.
+        None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
+    }
+}
+
+/// Run a local workspace's `down` + `post-remove` hooks here on the host.
+fn teardown_local(
+    cfg: &WsConfig,
+    root: &Path,
+    wt: &Path,
+    sanitized: &str,
+    repo: &str,
+    hook_failed: &mut bool,
+) {
+    // Read the existing allocation (never allocate) for the hook env.
+    let extra_env =
+        inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
+            .unwrap_or_default();
+
+    // Resource teardown hooks — best-effort. A failing hook is reported
+    // but doesn't stop removal (the user wants the worktree gone).
+    for event in ["down", "post-remove"] {
+        if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
+            let step = crate::ui::step(repo, &format!("{event} hook"));
+            match hooks::run_action(root, wt, repo, sanitized, event, &action, &extra_env) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    step.fail(&format!("{e}"));
+                    *hook_failed = true;
+                }
+            }
+        }
+    }
+}
+
 /// Run a remote workspace's `down` + `post-remove` scripts on the server
 /// (best-effort). Skips with a note when the server is unreachable — `ws rm` /
 /// `ws clean` must still drop the local worktree even when the server is gone.
@@ -216,18 +233,14 @@ fn remove_if_symlink(p: &Path) {
 /// Remove a worktree, retrying with `--force` when a soft remove refuses
 /// (dirty tree, untracked deps). Errors only when even `--force` fails.
 fn remove_worktree(main: &Path, wt: &Path) -> Result<()> {
-    let soft = Command::new("git")
-        .arg("-C")
-        .arg(main)
+    let soft = git::git(main)
         .args(["worktree", "remove"])
         .arg(wt)
         .output()?;
     if soft.status.success() {
         return Ok(());
     }
-    let hard = Command::new("git")
-        .arg("-C")
-        .arg(main)
+    let hard = git::git(main)
         .args(["worktree", "remove", "--force"])
         .arg(wt)
         .output()?;
@@ -241,9 +254,7 @@ fn remove_worktree(main: &Path, wt: &Path) -> Result<()> {
 }
 
 fn delete_branch(main: &Path, branch: &str) {
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(main)
+    let _ = git::git(main)
         .args(["branch", "-D", branch])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

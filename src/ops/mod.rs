@@ -147,6 +147,19 @@ pub(crate) fn run_remote_event(
     }
 }
 
+/// Persist a workspace config to `<root>/.ws.json`, step UI included, so the
+/// ops that write one (`ws init`, `ws remote set`/`unset`) can't drift on the
+/// filename or the step label.
+pub(crate) fn write_ws_json(
+    root: &std::path::Path,
+    cfg: &crate::config::WsConfig,
+) -> anyhow::Result<()> {
+    let step = crate::ui::step("cfg", ".ws.json");
+    crate::config::write_json_pretty(&root.join(".ws.json"), cfg)?;
+    step.ok();
+    Ok(())
+}
+
 /// Exit with `code`, printing no failure banner — everything worth saying has
 /// already been said (`silent: true`; `main` skips the banner). Used where `ws`
 /// mirrors an outcome it merely relays: `ws exec` passing through a child's
