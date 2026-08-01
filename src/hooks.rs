@@ -5,8 +5,7 @@
 //!
 //! `resolve` answers "what command does this (repo, event) run"; `run_command` /
 //! `capture_command` run it **here on this machine**. Streamed output goes through
-//! `ui::hook_line` so it lands with the correct gutter/indent. See
-//! `spec-output-formatting.md`.
+//! `ui::hook_line` so it lands with the correct gutter/indent.
 //!
 //! Ops don't call the two runners directly: `lifecycle::Ctx` does, as the local
 //! arm of the one dispatcher that decides between here and the server (its remote
