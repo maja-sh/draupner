@@ -468,7 +468,7 @@ pub fn run_event(
     crate::hooks::stream_and_wait(child, &format!("{repo}-{event}"))
 }
 
-/// Remote analogue of `hooks::capture_action`; server-side `timeout` so a wedged probe can't stall `ws list`.
+/// Remote analogue of `hooks::capture_command`; server-side `timeout` so a wedged probe can't stall `ws list`.
 pub fn capture_status(
     connection: &str,
     base: &str,
