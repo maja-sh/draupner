@@ -35,40 +35,11 @@ pub fn remove_task(
         // Host processes are ws-owned units — stop them at their site instead of
         // running hooks (same exclusive split as `ws down`).
         if cfg.is_host_repo(repo) {
-            match site.as_ref() {
-                Some(s) => {
-                    let step = crate::ui::step(repo, "stop");
-                    match crate::supervise::down(s, &crate::supervise::proc_name(branch, repo)) {
-                        Ok(()) => step.ok(),
-                        Err(e) => {
-                            step.fail(&format!("{e}"));
-                            hook_failed = true;
-                        }
-                    }
-                }
-                None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
-            }
+            teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
             teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
         } else {
-            // Inspect: read the existing allocation, never allocate.
-            let extra_env =
-                inject::prepare(cfg, &Site::Local, root, wt, &sanitized, repo, inject::Phase::Inspect)
-                    .unwrap_or_default();
-
-            // Best-effort: a failing hook is reported but doesn't block removal.
-            for event in ["down", "post-remove"] {
-                if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
-                    let step = crate::ui::step(repo, &format!("{event} hook"));
-                    match hooks::run_action(root, wt, repo, &sanitized, event, &action, &extra_env) {
-                        Ok(()) => step.ok(),
-                        Err(e) => {
-                            step.fail(&format!("{e}"));
-                            hook_failed = true;
-                        }
-                    }
-                }
-            }
+            teardown_local(cfg, root, wt, &sanitized, repo, &mut hook_failed);
         }
 
         // Drop routes before `ports::forget` wipes the service set they derive from.
@@ -138,6 +109,58 @@ pub fn remove_task(
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
 
     Ok(hook_failed)
+}
+
+/// Stop a `kind: host` repo's supervised process at its site (best-effort); a `None` site is a remote server that's unreachable, so `ws rm` still drops the local worktree.
+fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mut bool) {
+    match site {
+        Some(s) => {
+            let step = crate::ui::step(repo, "stop");
+            match crate::supervise::down(s, &crate::supervise::proc_name(branch, repo)) {
+                Ok(()) => step.ok(),
+                Err(e) => {
+                    step.fail(&format!("{e}"));
+                    *hook_failed = true;
+                }
+            }
+        }
+        None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
+    }
+}
+
+/// Run a local workspace's `down` + `post-remove` hooks; best-effort — a failing hook is reported but doesn't stop removal.
+fn teardown_local(
+    cfg: &WsConfig,
+    root: &Path,
+    wt: &Path,
+    sanitized: &str,
+    repo: &str,
+    hook_failed: &mut bool,
+) {
+    // Inspect: read the existing allocation, never allocate.
+    let extra_env =
+        inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
+            .unwrap_or_default();
+
+    for event in ["down", "post-remove"] {
+        let cmd = match hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => continue,
+            Err(e) => {
+                crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
+                *hook_failed = true;
+                continue;
+            }
+        };
+        let step = crate::ui::step(repo, &format!("{event} hook"));
+        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &extra_env) {
+            Ok(()) => step.ok(),
+            Err(e) => {
+                step.fail(&format!("{e}"));
+                *hook_failed = true;
+            }
+        }
+    }
 }
 
 /// Run a remote workspace's `down` + `post-remove` scripts on the server;

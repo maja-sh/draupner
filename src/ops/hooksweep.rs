@@ -136,10 +136,19 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        let Some(action) = hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt)) else {
-            crate::ui::skip(repo, &format!("no {event} hook"));
-            result.skipped.push(repo.clone());
-            continue;
+        let cmd = match hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt))
+        {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => {
+                crate::ui::skip(repo, &format!("no {event} hook"));
+                result.skipped.push(repo.clone());
+                continue;
+            }
+            Err(e) => {
+                crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
+                result.failed.push(repo.clone());
+                continue;
+            }
         };
 
         // A failure here is isolated per-repo, like a failing hook.
@@ -153,7 +162,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        let res = hooks::run_action(&ws.root, wt, repo, &sanitized, event, &action, &extra_env);
+        let res = hooks::run_command(&ws.root, wt, repo, &sanitized, event, &cmd, &extra_env);
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
@@ -178,15 +187,20 @@ fn run_prepare(
     repo: &str,
     result: &mut SweepResult,
 ) -> bool {
-    let Some(action) = hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt))
-    else {
-        return true;
+    let cmd = match hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt)) {
+        Ok(Some(cmd)) => cmd,
+        Ok(None) => return true,
+        Err(e) => {
+            crate::ui::step(repo, "prepare hook").fail(&format!("{e}"));
+            result.failed.push(repo.to_string());
+            return false;
+        }
     };
     let extra_env =
         inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
             .unwrap_or_default();
     let step = crate::ui::step(repo, "prepare hook");
-    match hooks::run_action(root, wt, repo, sanitized, "prepare", &action, &extra_env) {
+    match hooks::run_command(root, wt, repo, sanitized, "prepare", &cmd, &extra_env) {
         Ok(()) => {
             step.ok();
             true
@@ -199,7 +213,7 @@ fn run_prepare(
     }
 }
 
-/// Handle one container repo on the server for a remote workspace: run its declarative script over SSH, then sync Caddy routes on the server. A legacy `.ws-hooks/<repo>/<event>` file lives on the host and can't run here, so a repo without a declared `scripts` entry is a skip — declarative `scripts` is the remote contract.
+/// Handle one container repo on the server for a remote workspace: run its declarative script over SSH, then sync Caddy routes on the server. Mirrors the local container path but the script and routing run where the stack lives.
 #[allow(clippy::too_many_arguments)]
 fn sweep_container_remote(
     cfg: &config::WsConfig,

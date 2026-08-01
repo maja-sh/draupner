@@ -90,9 +90,6 @@ pub struct RepoConfig {
     /// Untracked files seeded verbatim from the main checkout into each new worktree at `ws new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
-    /// Legacy per-event hook path overrides, deprecated by `scripts`; kept until the execution path migrates.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub hooks: BTreeMap<String, String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_excludes: Vec<String>,
@@ -268,12 +265,10 @@ impl WsConfig {
 
     /// Repo's `scripts[event]` joined fail-fast (`cmd1 && cmd2`); the single owner shared by the host-repo launch path and every remote-dispatch caller.
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
-        self.repo_config(repo)
-            .and_then(|rc| rc.scripts.get(event))
-            .map(|s| s.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && "))
+        self.repo_config(repo).and_then(|rc| rc.scripts.get(event)).map(Script::joined)
     }
 
-    /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for callers dispatching a command rather than an `Action`.
+    /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for the paths that never ran a hook file.
     pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
         self.script_command(repo, event)
             .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
@@ -364,7 +359,9 @@ fn runtime_looks_safe(runtime: &str) -> bool {
 
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
-    let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
+    let path = root.join(".ws.json");
+    let cfg: WsConfig = read_json(&path)?;
+    refuse_legacy_hooks_field(&path)?;
     // Reject a dangerous SSH destination at the choke point every op shares — `.ws.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
         if !crate::remote::connection_looks_safe(&r.connection) {
@@ -401,6 +398,45 @@ pub fn load(root: &Path) -> Result<WsConfig> {
         }
     }
     Ok(cfg)
+}
+
+// Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. `RepoConfig.hooks`
+// was silently parseable and would be dropped on the next `ws remote set` rewrite;
+// name it at load instead so a leftover block can't erase a user's config.
+
+/// Refuse a `.ws.json` still carrying a repo's `hooks` override map.
+fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    // Cheap gate — `".ws-hooks/…"` script values don't have the bare-key quote pattern, so the reparse stays rare.
+    if !raw.contains("\"hooks\"") {
+        return Ok(());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(
+        raw.strip_prefix('\u{feff}').unwrap_or(&raw),
+    ) else {
+        return Ok(()); // `read_json` will surface the parse error.
+    };
+    let stale: Vec<&str> = v["repos"]
+        .as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .filter(|r| r["hooks"].is_object())
+                .filter_map(|r| r["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`hooks` in {} ({}) points at the hook-file mechanism removed in ws 0.6 — move each \
+         entry into that repo's `scripts` block instead. The contract changed with it: a script \
+         runs with cwd = the worktree (not the workspace root), and the worktree path arrives as \
+         $WS_WORKTREE (not $1).",
+        path.display(),
+        stale.join(", "),
+    )
 }
 
 /// Machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
@@ -583,6 +619,23 @@ mod tests {
             );
             assert!(load(dir.path()).is_ok(), "expected {good:?} accepted");
         }
+    }
+
+    /// The migration shim (delete with it): a leftover `hooks` override map must
+    /// be named, not parsed away — `ws remote set` rewrites this file, so a
+    /// silently-ignored block would be silently deleted.
+    #[test]
+    fn load_refuses_a_leftover_hooks_override_map() {
+        let dir = tempfile::tempdir().unwrap();
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".ws-hooks/api/up"}}]}"#);
+        let err = load(dir.path()).err().expect("a `hooks` block must be refused").to_string();
+        assert!(err.contains("`hooks`") && err.contains("api"), "{err}");
+        assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
+
+        // A `.ws-hooks/…` *script* value is the supported lane — never mistaken
+        // for the removed field by the cheap substring gate.
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#);
+        assert!(load(dir.path()).is_ok());
     }
 
     #[test]

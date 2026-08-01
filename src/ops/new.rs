@@ -175,7 +175,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     Ok(())
 }
 
-/// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared.
+/// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared. Failure is fatal for `new` — one-time setup that didn't complete.
 #[allow(clippy::too_many_arguments)]
 fn run_post_create(
     cfg: &config::WsConfig,
@@ -205,9 +205,9 @@ fn run_post_create(
             }
         }
     } else {
-        if let Some(action) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path)) {
+        if let Some(cmd) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path))? {
             let step = crate::ui::step(repo, "Post-create hook");
-            hooks::run_action(ws_root, wt_path, repo, sanitized, "post-create", &action, extra_env)?;
+            hooks::run_command(ws_root, wt_path, repo, sanitized, "post-create", &cmd, extra_env)?;
             step.ok();
         }
         Ok(())

@@ -150,7 +150,7 @@ fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
 #[test]
 fn happy_path_two_repos() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    f.add_hook("api", "post-create", "echo \"api-hook: wt=$1\"");
+    f.add_hook("api", "post-create", "echo \"api-hook: wt=$WS_WORKTREE\"");
 
     let out = f.run_ok(&["new", "api,app", "feat/login"]);
     let err = stderr(&out);
