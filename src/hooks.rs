@@ -1,13 +1,11 @@
-//! Per-repo lifecycle execution. Two mechanisms behind one interface:
+//! Per-repo lifecycle execution. One mechanism: the **declarative `scripts`**
+//! block in `.ws.json` — one or more shell commands run via `sh -c` in the
+//! worktree, with the `WS_*` env — plus a `ws`-synthesized default for a
+//! container repo that declares nothing.
 //!
-//! - **Declarative `scripts`** in `.ws.json` (preferred) — one or more shell
-//!   commands run via `sh -c` in the worktree, with the `WS_*` env.
-//! - **Legacy `.ws-hooks/<repo>/<event>` files** (fallback) — an executable run
-//!   with the worktree path as `$1`, cwd = the workspace root.
-//!
-//! `resolve` picks scripts-first-then-file; `run_action` / `capture_action`
-//! dispatch. Streamed output goes through `ui::hook_line` so it lands with the
-//! correct gutter/indent. See `spec-output-formatting.md`.
+//! `resolve` answers "what command does this (repo, event) run"; `run_command` /
+//! `capture_command` dispatch it. Streamed output goes through `ui::hook_line` so
+//! it lands with the correct gutter/indent. See `spec-output-formatting.md`.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};
@@ -24,28 +22,17 @@ use crate::ui;
 /// up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
-/// A resolved lifecycle action for a (repo, event): one shell command (a
-/// declarative `scripts` entry, preferred, or a synthesized default) or a legacy
-/// `.ws-hooks/` file path (fallback).
-pub enum Action {
-    /// Path to the hook file, relative to the workspace root.
-    File(String),
-    /// A shell command run in the worktree: a declared `scripts` entry already
-    /// joined and anchored by `config::script_command`, or a `ws`-synthesized
-    /// container default (see `config::default_script`).
-    Command(String),
-}
-
-/// Resolve the action for `event`: declared `scripts` win; else a `.ws-hooks/`
-/// file (via `lookup`); else, for a container repo, the compose default (see
-/// `config::default_script`). `None` when none apply — the caller treats that as
-/// a dim skip.
+/// Resolve the shell command for `event`: the declared `scripts` entry; else, for
+/// a container repo, the compose default (see `config::default_script`). `None`
+/// when neither applies — the caller treats that as a dim skip.
+///
+/// Errors only for the removed-mechanism migration (see [`refuse_legacy_hook_file`]).
 ///
 /// A declared script arrives as the string `config::script_command` builds — the
 /// one owner of "what shell command does this event run", so a `Many` is joined
 /// fail-fast with `&&` and a `.ws-hooks/…` reference is anchored to
 /// `$WS_WORKSPACE_ROOT`. Deferring that rule to the dispatch site is what once let
-/// `capture_action` join *without* anchoring: with cwd = the worktree, a `status`
+/// `capture_command` join *without* anchoring: with cwd = the worktree, a `status`
 /// script naming a `.ws-hooks/` path exited 127, the non-zero exit was swallowed,
 /// and `ws list` showed an empty status column while the identical config worked
 /// for `up` and on a remote workspace.
@@ -55,57 +42,12 @@ pub fn resolve(
     repo: &str,
     event: &str,
     is_container: bool,
-) -> Option<Action> {
+) -> Result<Option<String>> {
     if let Some(cmd) = cfg.script_command(repo, event) {
-        return Some(Action::Command(cmd));
+        return Ok(Some(cmd));
     }
-    let override_path = cfg.repo_config(repo).and_then(|c| c.hooks.get(event).map(String::as_str));
-    if let Some(f) = lookup(workspace_root, repo, event, override_path) {
-        return Some(Action::File(f));
-    }
-    is_container
-        .then(|| crate::config::default_script(cfg.runtime(), event))
-        .flatten()
-        .map(Action::Command)
-}
-
-/// Find a legacy hook file for the given repo and event. Returns the relative
-/// path if it exists and is executable, or `None` if absent/non-executable.
-///
-/// Checks the override path first (from `RepoConfig.hooks`), then falls back
-/// to the convention path `.ws-hooks/<repo>/<event>`.
-fn lookup(
-    workspace_root: &Path,
-    repo: &str,
-    event: &str,
-    override_path: Option<&str>,
-) -> Option<String> {
-    if let Some(ovr) = override_path {
-        let full = workspace_root.join(ovr);
-        if full.exists() && is_executable(&full) {
-            return Some(ovr.to_string());
-        }
-        return None;
-    }
-    let conv = format!(".ws-hooks/{}/{}", repo, event);
-    let full = workspace_root.join(&conv);
-    if full.exists() && is_executable(&full) {
-        return Some(conv);
-    }
-    None
-}
-
-#[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    p.metadata()
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(_p: &Path) -> bool {
-    true
+    refuse_legacy_hook_file(workspace_root, repo, event)?;
+    Ok(is_container.then(|| crate::config::default_script(cfg.runtime(), event)).flatten())
 }
 
 /// The `WS_*` context every hook/script receives. Single source of truth for the
@@ -132,9 +74,8 @@ pub fn base_env(
 
 /// Apply the whole env contract to `c`: the base `WS_*` set (see [`base_env`]),
 /// then the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env` mappings) on top. Shared by script and file commands so both mechanisms
-/// see the same routing context — and applied as one call, since a declared `env`
-/// key only overrides a base `WS_*` key because `extra_env` is applied last.
+/// `env` mappings) on top. Applied as one call, since a declared `env` key only
+/// overrides a base `WS_*` key because `extra_env` is applied last.
 fn apply_env(
     c: &mut Command,
     workspace_root: &Path,
@@ -169,49 +110,8 @@ fn script_command(
     c
 }
 
-/// Build the process for a legacy hook file: executed directly (honoring its
-/// shebang) with the worktree path as `$1`, cwd = the workspace root. `hook_rel`
-/// must be relative (callers guard). Stdio is left to the caller.
-fn file_command(
-    workspace_root: &Path,
-    hook_rel: &str,
-    worktree_path: &Path,
-    repo: &str,
-    branch_sanitized: &str,
-    event: &str,
-    extra_env: &[(String, String)],
-) -> Command {
-    let mut c = Command::new(workspace_root.join(hook_rel));
-    c.arg(worktree_path).current_dir(workspace_root);
-    apply_env(&mut c, workspace_root, worktree_path, repo, branch_sanitized, event, extra_env);
-    c
-}
-
-/// Run a resolved streaming action (`up` / `down` / `post-create` / `post-remove`).
-/// `extra_env` carries the injection context (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env`) the caller computed for this repo; pass `&[]` when there's none.
-pub fn run_action(
-    workspace_root: &Path,
-    worktree_path: &Path,
-    repo: &str,
-    branch_sanitized: &str,
-    event: &str,
-    action: &Action,
-    extra_env: &[(String, String)],
-) -> Result<()> {
-    match action {
-        Action::File(rel) => {
-            run(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
-        }
-        Action::Command(cmd) => run_one(
-            workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
-        ),
-    }
-}
-
 /// Spawn `cmd` with piped stdio, stream its output under `tag`, and fail on a
-/// non-zero exit reported as "`{what}` exited N". The single home for the
-/// child-lifecycle plumbing shared by the script and file runners.
+/// non-zero exit reported as "`{what}` exited N".
 fn spawn_streamed(
     mut cmd: Command,
     tag: &str,
@@ -230,11 +130,14 @@ fn spawn_streamed(
 /// Run one already-joined shell command in the worktree via a single `sh -c` with
 /// cwd = the worktree and the `WS_*` env, streaming its output like a hook. A
 /// `Many` arrives already joined with `&&` — sequential and fail-fast, in one
-/// shell so `cd`/env carry across commands (the same shape `capture_action` uses,
-/// so the two agree). Shared by a declared `scripts` entry and a synthesized
-/// container default.
+/// shell so `cd`/env carry across commands (the same shape `capture_command`
+/// uses, so the two agree). Shared by a declared `scripts` entry and a
+/// synthesized container default.
+///
+/// `extra_env` carries the injection context (`WS_HOST_*`/`WS_PORT_*` + declared
+/// `env`) the caller computed for this repo; pass `&[]` when there's none.
 #[allow(clippy::too_many_arguments)]
-fn run_one(
+pub fn run_command(
     workspace_root: &Path,
     worktree_path: &Path,
     repo: &str,
@@ -254,37 +157,11 @@ fn run_one(
     )
 }
 
-/// Run a legacy hook file: executed directly (honoring its shebang) with the
-/// worktree path as `$1` and cwd = the workspace root.
-fn run(
-    workspace_root: &Path,
-    hook_rel: &str,
-    worktree_path: &Path,
-    repo: &str,
-    branch_sanitized: &str,
-    event: &str,
-    extra_env: &[(String, String)],
-) -> Result<()> {
-    if Path::new(hook_rel).is_absolute() {
-        bail!("hook path must be relative to the workspace root: {hook_rel}");
-    }
-    let tag = format!("{repo}-{event}");
-    let cmd = file_command(
-        workspace_root, hook_rel, worktree_path, repo, branch_sanitized, event, extra_env,
-    );
-    spawn_streamed(
-        cmd,
-        &tag,
-        || format!("spawn {}", workspace_root.join(hook_rel).display()),
-        hook_rel,
-    )
-}
-
 /// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
-/// wait for exit. Shared by file-hook `run`, declarative `run_script`, and the
-/// remote lifecycle dispatch (`remote::run_event`) so a hook's output gets the
-/// same gutter + spinner-suspend whether it ran locally or over SSH. The child
-/// must be spawned with stdout+stderr piped.
+/// wait for exit. Shared by the local runner (`run_command`) and the remote
+/// lifecycle dispatch (`remote::run_event`) so a hook's output gets the same
+/// gutter + spinner-suspend whether it ran locally or over SSH. The child must be
+/// spawned with stdout+stderr piped.
 pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
@@ -300,34 +177,27 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     Ok(status)
 }
 
-/// Run a resolved action for a read-only `status`-style event and capture its
+/// Run a resolved command for a read-only `status`-style event and capture its
 /// first non-empty stdout line, giving up after `timeout`. Used by `ws list`.
+///
+/// A status probe is normally one command; a `Many` arrives already joined as a
+/// fail-fast `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output
+/// is captured. See `resolve` for why that join — and the `.ws-hooks/…` anchoring
+/// that comes with it — must not be re-derived here.
 #[allow(clippy::too_many_arguments)]
-pub fn capture_action(
+pub fn capture_command(
     workspace_root: &Path,
     worktree_path: &Path,
     repo: &str,
     branch_sanitized: &str,
     event: &str,
-    action: &Action,
+    command: &str,
     timeout: Duration,
     extra_env: &[(String, String)],
 ) -> Option<String> {
-    let mut cmd = match action {
-        Action::File(rel) => {
-            if Path::new(rel).is_absolute() {
-                return None;
-            }
-            file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
-        }
-        // A status probe is normally one command; a `Many` arrives already joined
-        // as a fail-fast `cmd1 && cmd2 …` sequence (nothing silently dropped) and
-        // its output is captured. See `resolve` for why that join — and the
-        // `.ws-hooks/…` anchoring that comes with it — must not be re-derived here.
-        Action::Command(cmd) => script_command(
-            workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
-        ),
-    };
+    let mut cmd = script_command(
+        workspace_root, worktree_path, repo, branch_sanitized, event, command, extra_env,
+    );
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let text = capture_within(cmd.spawn().ok()?, timeout)?;
     ui::first_nonempty_line(&text).map(String::from)
@@ -400,6 +270,45 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
     for_each_line(r, |line| ui::hook_line(tag, line, stderr));
 }
 
+// --- Migration shim: DELETE a release after 0.6, together with its test. ------
+//
+// Until 0.6 an executable `.ws-hooks/<repo>/<event>` file was *discovered* by
+// convention and run as that repo's lifecycle event, with its own contract (cwd =
+// the workspace root, worktree as `$1`). Dropping it silently would turn a
+// working hook into a no-op — or, for a container repo, into the compose default
+// — so a leftover file fails its repo loudly instead. This is a diagnostic, not a
+// resolution rung: `resolve` reaches it only where the old mechanism would have
+// won, and it can never produce a command.
+
+/// Fail when an executable `.ws-hooks/<repo>/<event>` is left over from the
+/// removed hook-file mechanism, naming the `scripts` entry that replaces it and
+/// the two contract changes that come with the move.
+fn refuse_legacy_hook_file(workspace_root: &Path, repo: &str, event: &str) -> Result<()> {
+    let rel = format!(".ws-hooks/{repo}/{event}");
+    if !is_executable(&workspace_root.join(&rel)) {
+        return Ok(());
+    }
+    bail!(
+        "{rel} is an executable hook file, but hook files discovered by convention were \
+         removed in ws 0.6 — declare it instead: add \"scripts\": {{\"{event}\": \"{rel}\"}} \
+         to {repo}'s entry in .ws.json. The contract changed with it: the script now runs \
+         with cwd = the worktree (not the workspace root), and the worktree path arrives as \
+         $WS_WORKTREE (not $1)."
+    )
+}
+
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
+}
+// --- end migration shim ------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,10 +352,9 @@ mod tests {
             r#"{"repos":[{"name":"api","scripts":{"status":[".ws-hooks/status.sh","echo ok"]}}]}"#,
         )
         .expect("parse config");
-        let Some(Action::Command(cmd)) = resolve(&cfg, Path::new("/ws"), "api", "status", false)
-        else {
-            panic!("a declared script must resolve to a command");
-        };
+        let cmd = resolve(&cfg, Path::new("/ws"), "api", "status", false)
+            .expect("resolve")
+            .expect("a declared script must resolve to a command");
         assert_eq!(cmd, "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/status.sh && echo ok");
     }
 
@@ -454,15 +362,60 @@ mod tests {
     fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
         let cfg: WsConfig =
             serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
-        // No declared script and no hook file: a container repo gets the compose
-        // default, everything else resolves to nothing (a dim skip for the caller).
-        let Some(Action::Command(cmd)) = resolve(&cfg, Path::new("/ws"), "api", "up", true) else {
-            panic!("a container repo must fall back to the compose default");
-        };
+        // No declared script: a container repo gets the compose default,
+        // everything else resolves to nothing (a dim skip for the caller).
+        let cmd = resolve(&cfg, Path::new("/ws"), "api", "up", true)
+            .expect("resolve")
+            .expect("a container repo must fall back to the compose default");
         assert_eq!(cmd, "podman compose up -d");
-        assert!(resolve(&cfg, Path::new("/ws"), "api", "up", false).is_none());
+        assert!(resolve(&cfg, Path::new("/ws"), "api", "up", false).unwrap().is_none());
         // No default exists for this event, container or not.
-        assert!(resolve(&cfg, Path::new("/ws"), "api", "post-create", true).is_none());
+        assert!(resolve(&cfg, Path::new("/ws"), "api", "post-create", true).unwrap().is_none());
+    }
+
+    /// The migration shim (delete with it): a leftover executable hook file must
+    /// fail loudly rather than silently become a no-op — or, worse for a container
+    /// repo, silently become the compose default.
+    #[test]
+    fn a_leftover_executable_hook_file_fails_with_the_scripts_entry_to_paste() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = dir.path().join(".ws-hooks").join("api");
+        std::fs::create_dir_all(&hooks).expect("mkdir");
+        let file = hooks.join("up");
+        std::fs::write(&file, "#!/bin/sh\necho hi\n").expect("write hook");
+
+        let cfg: WsConfig =
+            serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
+
+        // Not executable: it was already inert before the removal, so nothing to
+        // migrate — a container repo still gets its default.
+        assert_eq!(
+            resolve(&cfg, dir.path(), "api", "up", true).expect("resolve").as_deref(),
+            Some("podman compose up -d")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let err = resolve(&cfg, dir.path(), "api", "up", true)
+            .expect_err("an executable hook file must be refused")
+            .to_string();
+        assert!(err.contains(r#""scripts": {"up": ".ws-hooks/api/up"}"#), "{err}");
+        assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
+        assert!(err.contains("cwd = the worktree"), "the cwd change must be named: {err}");
+
+        // A declared script wins outright — the shim never fires for a repo that
+        // already migrated, even with the old file still sitting there.
+        let migrated: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#,
+        )
+        .expect("parse config");
+        assert_eq!(
+            resolve(&migrated, dir.path(), "api", "up", true).expect("resolve").as_deref(),
+            Some("\"$WS_WORKSPACE_ROOT\"/.ws-hooks/api/up")
+        );
     }
 
     /// A child with piped stdout, for the capture loop.

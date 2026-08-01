@@ -78,7 +78,8 @@ and writes three things:
 - **`.ws.schema.json`** — a JSON Schema for it, generated from the code, so your
   editor completes and validates every field. Regenerate after an upgrade with
   `ws init --refresh-schema`.
-- **`.ws-hooks/`** — starter scripts for the lifecycle events you want to fill in.
+- **`.ws-hooks/`** — starter scripts for the lifecycle events you want to fill
+  in. Each is inert until a repo's `scripts` block in `.ws.json` names it.
 
 Then work a task:
 

@@ -225,19 +225,13 @@ environment contract.
 
 ---
 
-## Two fields that get misread
+## A field that gets misread
 
 **`worktree_excludes`** appends entries to a worktree's
 `.git/info/exclude`. It is a *git visibility* control and nothing else — it hides
 files from `git status`. It has no bearing on what is synced to an offload
 server; files seeded by `copy` are excluded from git precisely so they *can* ride
 the sync.
-
-**`hooks`** is the legacy per-event file mechanism, superseded by `scripts`.
-Legacy hook files run from the workspace root with the worktree path as `$1`,
-which also means they only exist on the client — a remote workspace can't run
-them, so `ws list` will skip a legacy `status` hook when offloaded. Prefer
-`scripts`.
 
 ---
 

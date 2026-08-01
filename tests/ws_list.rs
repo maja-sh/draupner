@@ -80,7 +80,7 @@ fn missing_status_hook_does_not_crash() {
 #[test]
 fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
     // A declared `status` script runs with cwd = the worktree, but `.ws-hooks/`
-    // lives at the workspace root. Regression: `capture_action` used to join the
+    // lives at the workspace root. Regression: `capture_command` used to join the
     // script's commands without anchoring, so this exited 127 and `ws list`
     // showed an empty status column — while the same value worked for `up`
     // (which anchors) and on a remote workspace.
