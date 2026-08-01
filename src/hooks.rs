@@ -273,9 +273,9 @@ pub fn capture_action(
     extra_env: &[(String, String)],
 ) -> Option<String> {
     let mut cmd = match action {
-        // `Many` runs as fail-fast `cmd1 && cmd2 …` so nothing is silently dropped.
+        // Via `Script::joined` so `.ws-hooks/…` is anchored — the hand-rolled join here used to run a status hook naming a shared hook file with cwd = worktree, exit 127, and (silently) leave `ws list`'s status column blank.
         Action::Script(s) => {
-            let joined = s.commands().join(" && ");
+            let joined = s.joined();
             script_command(
                 workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
             )

@@ -75,8 +75,13 @@ pub fn set(
         let repo = wt.repo;
         let session = mutagen::session_name(&task, &repo);
 
-        // Terminate first: `create` masks a name collision as success, so a survivor of an
-        // older endpoint would keep syncing to the wrong server. Terminating an absent one is a no-op.
+        // Forwards outlive the sync flip: their endpoint bakes in the old host but their name doesn't, so `forward_create` next `up` succeeds idempotently while the socket still tunnels to the old machine. Drop them keyed off the still-present port record.
+        let sanitized = workspace::sanitize_branch(&task);
+        for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
+            let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
+        }
+
+        // Terminate first: `create` masks a name collision as success, so a survivor of an older endpoint would keep syncing to the wrong server. Terminating an absent one is a no-op.
         if let Err(e) = mutagen::terminate(&session) {
             crate::ui::step(&format!("{task}/{repo}"), "Sync created")
                 .fail(&format!("stale session not terminated: {e}"));
