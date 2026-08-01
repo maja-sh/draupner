@@ -199,24 +199,24 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
 }
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
+    // `list_child_dirs` swallows a failing `read_dir` and returns an empty vec,
+    // which for `ws init` would scaffold a repo-less `.ws.json` off an unreadable
+    // cwd instead of saying so. Probe first, then share the walk.
+    fs::read_dir(root).context("read cwd")?;
+
     let mut names = Vec::new();
-    // Swallow per-entry read errors — one broken symlink shouldn't abort the
-    // whole scan. Errors on the top-level `read_dir` still propagate.
-    for entry in fs::read_dir(root).context("read cwd")?.filter_map(Result::ok) {
-        let path = entry.path();
-        // Skip symlinks (they can point outside the workspace and confuse
-        // later ops). Also skip anything that isn't a real dir.
-        let Ok(meta) = entry.file_type() else { continue };
-        if meta.is_symlink() || !meta.is_dir() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
+    // The walk itself is shared with the rest of `ws` (`workspace::list_child_dirs`):
+    // it swallows per-entry read errors so one broken symlink doesn't abort the
+    // scan, and it skips symlinks (they can point outside the workspace and
+    // confuse later ops) and anything that isn't a real dir. Only the dotfile
+    // skip and the `is_git_repo` filter are `init`-specific.
+    for (name, path) in crate::workspace::list_child_dirs(root) {
+        let Some(name) = name else {
             // Non-UTF-8 dir names would round-trip through `.ws.json` lossily
             // and break later worktree lookups. Skip with a warn instead of
             // silently corrupting the config.
             tracing::warn!(
-                path = %entry.path().display(),
+                path = %path.display(),
                 "skipping non-UTF-8 directory name in workspace scan"
             );
             continue;
@@ -225,7 +225,7 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
             continue;
         }
         if crate::workspace::is_git_repo(&path) {
-            names.push(name.to_string());
+            names.push(name);
         }
     }
     names.sort();

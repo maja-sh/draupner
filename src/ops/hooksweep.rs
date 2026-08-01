@@ -46,6 +46,32 @@ impl SweepResult {
         }
     }
 
+    /// Compute a repo's injection context (ports/hosts/env) and render its
+    /// templates, filing the repo under `failed` — with the `inject` step line —
+    /// when it errors, so the caller can just skip the repo. A failure here is
+    /// isolated per-repo, like a failing hook: it doesn't strand the other repos
+    /// in the sweep.
+    #[allow(clippy::too_many_arguments)]
+    fn inject_env(
+        &mut self,
+        cfg: &config::WsConfig,
+        site: &Site,
+        root: &std::path::Path,
+        wt: &std::path::Path,
+        sanitized: &str,
+        repo: &str,
+        phase: inject::Phase,
+    ) -> Option<Vec<(String, String)>> {
+        match inject::prepare(cfg, site, root, wt, sanitized, repo, phase) {
+            Ok(env) => Some(env),
+            Err(e) => {
+                crate::ui::step(repo, "inject").fail(&format!("{e}"));
+                self.failed.push(repo.to_string());
+                None
+            }
+        }
+    }
+
     /// Move a repo already filed under `ran` into `failed`. Used when a repo's
     /// hook succeeded but installing its Caddy route failed — the containers are
     /// up, but with the host publish `!reset` away the HTTP service is
@@ -206,16 +232,9 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         };
 
-        // Compute the injection context (ports/hosts/env) and render templates.
-        // A failure here is isolated per-repo, like a failing hook — it doesn't
-        // strand the other repos in the sweep.
-        let extra_env = match inject::prepare(&cfg, &site, &ws.root, wt, &sanitized, repo, phase) {
-            Ok(env) => env,
-            Err(e) => {
-                crate::ui::step(repo, "inject").fail(&format!("{e}"));
-                result.failed.push(repo.clone());
-                continue;
-            }
+        let Some(extra_env) = result.inject_env(&cfg, &site, &ws.root, wt, &sanitized, repo, phase)
+        else {
+            continue;
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
@@ -223,16 +242,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
-        // Sync Caddy routes: add after a successful `up`, remove on `down`. A
-        // container's HTTP services are reachable ONLY through Caddy now (the
-        // override `!reset`s their host publish), so an `up` route that won't
-        // install means the running container is unreachable — fail the repo.
-        if cfg.routing_active() && (event == "down" || up_ok) {
-            let routed_ok = sync_routes(&cfg, &site, &ws.root, &sanitized, repo, event);
-            if event == "up" && !routed_ok {
-                result.demote(repo);
-            }
-        }
+        route_after_hook(&cfg, &site, &ws.root, &sanitized, repo, event, up_ok, &mut result);
     }
 
     Ok(result)
@@ -315,13 +325,8 @@ fn sweep_container_remote(
     // harmless.) Best-effort: the session may not exist yet, or mutagen be absent.
     let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
 
-    let extra_env = match inject::prepare(cfg, site, root, wt, sanitized, repo, phase) {
-        Ok(env) => env,
-        Err(e) => {
-            crate::ui::step(repo, "inject").fail(&format!("{e}"));
-            result.failed.push(repo.to_string());
-            return;
-        }
+    let Some(extra_env) = result.inject_env(cfg, site, root, wt, sanitized, repo, phase) else {
+        return;
     };
 
     let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
@@ -330,16 +335,39 @@ fn sweep_container_remote(
     let up_ok = res.is_ok();
     result.record(repo, step, res);
 
-    if cfg.routing_active() && (event == "down" || up_ok) {
-        let routed_ok = sync_routes(cfg, site, root, sanitized, repo, event);
-        if event == "up" && !routed_ok {
-            result.demote(repo);
-        }
-    }
+    route_after_hook(cfg, site, root, sanitized, repo, event, up_ok, result);
     // Forward this repo's raw-TCP ports (db, redis, …) to localhost, so a DB GUI
     // or CLI on this machine reaches the server's containers unchanged.
     if event == "down" || up_ok {
         sync_forwards(cfg, root, branch, sanitized, repo, event);
+    }
+}
+
+/// Sync a repo's Caddy routes once its hook has run: add after a successful `up`,
+/// remove on `down`. A container's HTTP services are reachable ONLY through Caddy
+/// now (the override `!reset`s their host publish), so an `up` route that won't
+/// install means the running container is unreachable — demote the repo into
+/// `failed`.
+///
+/// The hook paths only. A host repo routes best-effort instead (see `sweep_host`):
+/// it binds a real `WS_PORT` on the host, so it stays reachable there even if its
+/// Caddy route (the hostname) fails to sync.
+#[allow(clippy::too_many_arguments)]
+fn route_after_hook(
+    cfg: &config::WsConfig,
+    site: &Site,
+    root: &std::path::Path,
+    sanitized: &str,
+    repo: &str,
+    event: &str,
+    up_ok: bool,
+    result: &mut SweepResult,
+) {
+    if !cfg.routing_active() || !(event == "down" || up_ok) {
+        return;
+    }
+    if !sync_routes(cfg, site, root, sanitized, repo, event) && event == "up" {
+        result.demote(repo);
     }
 }
 
@@ -472,39 +500,34 @@ fn sweep_host(
         return;
     };
 
-    let extra_env = match inject::prepare(cfg, site, root, wt, sanitized, repo, phase) {
-        Ok(env) => env,
-        Err(e) => {
-            crate::ui::step(repo, "inject").fail(&format!("{e}"));
-            result.failed.push(repo.to_string());
-            return;
-        }
+    let Some(extra_env) = result.inject_env(cfg, site, root, wt, sanitized, repo, phase) else {
+        return;
     };
 
-    // The process's working dir at its execution site: the server-side synced dir
-    // (absolute) for a remote workspace — flush first so the launched process sees
-    // the rendered templates / latest code — else the local worktree.
-    // Both are the *execution site's* paths, and they must agree: `WS_WORKSPACE_ROOT`
-    // is what a `.ws-hooks/…` script path anchors against, so handing back the local
-    // root while the process runs on the server points it at a filesystem that isn't
-    // there (`/Users/…: not found` on a Linux box).
-    let (worktree, site_root) = match cfg.remote.as_ref() {
-        Some(r) => {
-            let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-            let base = site.abs_base(&r.worktree_base(root));
-            // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/
-            // .ws-hooks/…` resolves on the server (same lane the container path uses).
-            if event == "up" {
-                if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
-                    crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
-                    result.failed.push(repo.to_string());
-                    return;
-                }
+    // The process's working dir and workspace root at its execution site: the
+    // server-side synced dirs (absolute) for a remote workspace, else the local
+    // ones. Both come from `Site`, which owns the derivation and the reason the two
+    // must agree: `WS_WORKSPACE_ROOT` is what a `.ws-hooks/…` script path anchors
+    // against, so handing back the local root while the process runs on the server
+    // points it at a filesystem that isn't there (`/Users/…: not found` on a Linux
+    // box).
+    let site_root = site.root_at(cfg.remote.as_ref(), root);
+    let worktree = site.worktree_at(cfg.remote.as_ref(), root, wt, sanitized, repo);
+
+    if cfg.remote.is_some() {
+        // Flush first, so the launched process sees the rendered templates / latest
+        // code rather than whatever the last sync happened to carry.
+        let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
+        // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/
+        // .ws-hooks/…` resolves on the server (same lane the container path uses).
+        if event == "up" {
+            if let Err(e) = crate::remote::push_ws_hooks(site, root, &site_root) {
+                crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
+                result.failed.push(repo.to_string());
+                return;
             }
-            (crate::remote::worktree_path(&base, sanitized, repo), base)
         }
-        None => (wt.to_string_lossy().into_owned(), root.to_string_lossy().into_owned()),
-    };
+    }
 
     // The host process runs detached (not via the `Command`-based hook runner), so
     // apply the base `WS_*` contract here — otherwise the `up` script sees only the
@@ -521,15 +544,7 @@ fn sweep_host(
     match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
             let label = if started { "start" } else { "already running (ws down to apply changes)" };
-            // Surface the ports ws allocated for this host process. Unlike a routed
-            // container (which prints its hostname), a host service has no hostname
-            // to show — the bound port is the only handle, and it's otherwise
-            // invisible to the user. Sorted so the line is stable across runs.
-            let mut ports: Vec<String> = extra_env
-                .iter()
-                .filter_map(|(k, v)| k.strip_prefix("WS_PORT_").map(|svc| format!("{svc}:{v}")))
-                .collect();
-            ports.sort();
+            let (ports, allocated) = host_ports(&extra_env);
             let step = crate::ui::step(repo, label);
 
             // The post-condition. `supervise::up` proves a process was launched and
@@ -539,56 +554,8 @@ fn sweep_host(
             // finding this one busy, an orphan from an earlier run still holding it.
             // Both left `start web:20001` on screen and the failure surfacing much
             // later somewhere else.
-            let allocated: Vec<u16> = extra_env
-                .iter()
-                .filter(|(k, _)| k.starts_with("WS_PORT_"))
-                .filter_map(|(_, v)| v.parse().ok())
-                .collect();
             let health = crate::supervise::health_settled(site, &name, &allocated, BIND_GRACE);
-            let crashed = health == Some(crate::supervise::Health::Crashed);
-
-            match &health {
-                // Dying *after* the launch check is a failed `up`, not a green one
-                // with a caveat — there is nothing running left to talk to.
-                Some(crate::supervise::Health::Crashed) => {
-                    step.fail(&format!(
-                        "exited after launch — see {}",
-                        crate::supervise::log_hint(&name)
-                    ));
-                }
-                // Alive but nothing on the port yet is genuinely ambiguous — a
-                // `cargo watch` compiles for a minute before it listens — so it
-                // qualifies the claim rather than failing the repo.
-                Some(crate::supervise::Health::Silent(_)) => {
-                    step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
-                    crate::ui::note(&format!(
-                        "{repo}: nothing is listening on the port ws allocated yet. If it's still \
-                         starting this resolves itself — `ws list` will say. Otherwise check \
-                         `{log}`.",
-                        log = crate::supervise::log_hint(&name),
-                    ));
-                }
-                // A stranger on the port is not ambiguous: whatever just started
-                // cannot have it, so the server is either dead or somewhere else.
-                Some(crate::supervise::Health::Squatted(p)) => {
-                    step.ok_with(&format!("{} — port held by another process", ports.join(", ")));
-                    crate::ui::warn(
-                        &format!("{repo}: another process already holds the allocated port"),
-                        &p.iter()
-                            .map(|port| {
-                                format!(
-                                    ":{port} is held by something outside this process — a dev \
-                                     server that finds it busy will quietly move to another port"
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                }
-                _ if ports.is_empty() => step.ok(),
-                _ => step.ok_with(&ports.join(", ")),
-            }
-
-            if crashed {
+            if report_host_health(step, repo, &name, &ports, health) {
                 result.failed.push(repo.to_string());
                 return;
             }
@@ -605,5 +572,154 @@ fn sweep_host(
             crate::ui::step(repo, "start").fail(&format!("{e}"));
             result.failed.push(repo.to_string());
         }
+    }
+}
+
+/// Split a host repo's injected `WS_PORT_*` entries into the ports to display and
+/// the ports to probe.
+///
+/// The display list surfaces the ports ws allocated for this host process. Unlike
+/// a routed container (which prints its hostname), a host service has no hostname
+/// to show — the bound port is the only handle, and it's otherwise invisible to
+/// the user. Sorted so the line is stable across runs.
+///
+/// The two lists are deliberately not the same set: an entry whose value isn't a
+/// port number still shows on the line, but there's nothing there to probe.
+fn host_ports(extra_env: &[(String, String)]) -> (Vec<String>, Vec<u16>) {
+    let mut ports = Vec::new();
+    let mut allocated = Vec::new();
+    for (k, v) in extra_env {
+        let Some(svc) = k.strip_prefix("WS_PORT_") else { continue };
+        ports.push(format!("{svc}:{v}"));
+        if let Ok(port) = v.parse() {
+            allocated.push(port);
+        }
+    }
+    ports.sort();
+    (ports, allocated)
+}
+
+/// Turn a launched host process's settled health into its step line (and any
+/// follow-up note/warning). Returns whether it crashed after launch.
+fn report_host_health(
+    step: crate::ui::Step,
+    repo: &str,
+    name: &str,
+    ports: &[String],
+    health: Option<crate::supervise::Health>,
+) -> bool {
+    let crashed = health == Some(crate::supervise::Health::Crashed);
+
+    match &health {
+        // Dying *after* the launch check is a failed `up`, not a green one
+        // with a caveat — there is nothing running left to talk to.
+        Some(crate::supervise::Health::Crashed) => {
+            step.fail(&format!("exited after launch — see {}", crate::supervise::log_hint(name)));
+        }
+        // Alive but nothing on the port yet is genuinely ambiguous — a
+        // `cargo watch` compiles for a minute before it listens — so it
+        // qualifies the claim rather than failing the repo.
+        Some(crate::supervise::Health::Silent(_)) => {
+            step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
+            crate::ui::note(&format!(
+                "{repo}: nothing is listening on the port ws allocated yet. If it's still \
+                 starting this resolves itself — `ws list` will say. Otherwise check \
+                 `{log}`.",
+                log = crate::supervise::log_hint(name),
+            ));
+        }
+        // A stranger on the port is not ambiguous: whatever just started
+        // cannot have it, so the server is either dead or somewhere else.
+        Some(crate::supervise::Health::Squatted(p)) => {
+            step.ok_with(&format!("{} — port held by another process", ports.join(", ")));
+            crate::ui::warn(
+                &format!("{repo}: another process already holds the allocated port"),
+                &p.iter()
+                    .map(|port| {
+                        format!(
+                            ":{port} is held by something outside this process — a dev \
+                             server that finds it busy will quietly move to another port"
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        _ if ports.is_empty() => step.ok(),
+        _ => step.ok_with(&ports.join(", ")),
+    }
+
+    crashed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn host_ports_displays_sorted_and_probes_only_the_numeric_ones() {
+        let (ports, allocated) = host_ports(&env(&[
+            ("WS_PORT_web", "20001"),
+            ("WS_BRANCH", "test/foo"),
+            ("WS_PORT_api", "20000"),
+            ("WS_HOST_web", "web.test-foo.example"),
+        ]));
+        assert_eq!(ports, vec!["api:20000".to_string(), "web:20001".to_string()]);
+        // Probe order follows the env, not the display sort.
+        assert_eq!(allocated, vec![20001, 20000]);
+    }
+
+    #[test]
+    fn host_ports_shows_an_unparsable_port_but_does_not_probe_it() {
+        let (ports, allocated) = host_ports(&env(&[("WS_PORT_web", "not-a-port")]));
+        assert_eq!(ports, vec!["web:not-a-port".to_string()]);
+        assert!(allocated.is_empty());
+    }
+
+    #[test]
+    fn host_ports_is_empty_without_injected_ports() {
+        let (ports, allocated) = host_ports(&env(&[("WS_REPO", "api")]));
+        assert!(ports.is_empty());
+        assert!(allocated.is_empty());
+    }
+
+    #[test]
+    fn report_host_health_reports_a_crash_and_nothing_else() {
+        assert!(report_host_health(
+            crate::ui::step("api", "start"),
+            "api",
+            "ws-test-foo-api",
+            &["web:20001".to_string()],
+            Some(crate::supervise::Health::Crashed),
+        ));
+        for health in [
+            None,
+            Some(crate::supervise::Health::Serving(vec![20001])),
+            Some(crate::supervise::Health::Running),
+            Some(crate::supervise::Health::NotStarted),
+            Some(crate::supervise::Health::Silent(vec![20001])),
+            Some(crate::supervise::Health::Squatted(vec![20001])),
+        ] {
+            assert!(!report_host_health(
+                crate::ui::step("api", "start"),
+                "api",
+                "ws-test-foo-api",
+                &["web:20001".to_string()],
+                health,
+            ));
+        }
+    }
+
+    #[test]
+    fn demote_moves_a_ran_repo_into_failed_exactly_once() {
+        let mut result =
+            SweepResult { ran: vec!["api".into()], skipped: Vec::new(), failed: Vec::new() };
+        result.demote("api");
+        result.demote("api");
+        assert!(result.ran.is_empty());
+        assert_eq!(result.failed, vec!["api".to_string()]);
     }
 }

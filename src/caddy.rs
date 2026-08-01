@@ -178,13 +178,19 @@ fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
     (!host.is_empty()).then(|| host.trim_matches(['[', ']']).to_string())
 }
 
+/// Write one of the persisted ports [`persisted_port`] reads back:
+/// `~/.config/ws/<file>`, one trailing newline so the file stays hand-editable.
+fn set_persisted_port(file: &str, port: u16) -> Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(dir.join(file), format!("{port}\n"))
+        .with_context(|| format!("persist {file}"))
+}
+
 /// Persist the opt-in HTTPS port so every later `ws` run agrees on it. Caddy
 /// keeps serving the old port until the next `ensure_running` re-seeds it.
 pub fn set_https_port(port: u16) -> Result<()> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(dir.join("https_port"), format!("{port}\n"))
-        .with_context(|| "persist https_port".to_string())
+    set_persisted_port("https_port", port)
 }
 
 /// The admin API port `ws` publishes to the site's loopback. `WS_CADDY_ADMIN_PORT`
@@ -202,10 +208,7 @@ pub fn admin_port() -> u16 {
 
 /// Persist the opt-in admin port so every later `ws` run dials the same one.
 pub fn set_admin_port(port: u16) -> Result<()> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(dir.join("admin_port"), format!("{port}\n"))
-        .with_context(|| "persist admin_port".to_string())
+    set_persisted_port("admin_port", port)
 }
 
 /// A route's stable admin `@id` for a worktree service. Includes the repo so
@@ -1049,6 +1052,33 @@ mod tests {
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
         std::env::remove_var("WS_CADDY_ADMIN_PORT");
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
+    }
+
+    #[test]
+    fn set_ports_persist_under_their_own_file_names() {
+        // Pins what the two setters share: file name per port, a trailing newline
+        // so the file stays hand-editable, and that `persisted_port` reads it back.
+        // Holds the env guard because it repoints the config dir process-wide.
+        let _g = env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        std::env::remove_var("WS_HTTPS_PORT");
+        std::env::remove_var("WS_CADDY_ADMIN_PORT");
+
+        // Values distinct from both defaults, so a no-op writer can't pass.
+        set_https_port(9443).unwrap();
+        set_admin_port(2021).unwrap();
+        let dir = tmp.path().join("ws");
+        assert_eq!(std::fs::read_to_string(dir.join("https_port")).unwrap(), "9443\n");
+        assert_eq!(std::fs::read_to_string(dir.join("admin_port")).unwrap(), "2021\n");
+        assert_eq!(https_port(), 9443);
+        assert_eq!(admin_port(), 2021);
+
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     #[test]

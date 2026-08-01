@@ -78,7 +78,7 @@ pub fn log_hint(name: &str) -> String {
 }
 
 /// A shell snippet that reads the pid file into `$p` (pid) and `$want` (identity),
-/// leaving `$p` empty when the file is missing/blank. Shared by `is_active`/`down`.
+/// leaving `$p` empty when the file is missing/blank. Shared by `down`/`health`.
 fn read_pidfile(pid: &str) -> String {
     format!("p=; want=; {{ IFS= read -r p; IFS= read -r want; }} < {pid} 2>/dev/null")
 }
@@ -124,25 +124,23 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
     // detached process on the server inherits the non-interactive SSH env — where a
     // version-manager `node` doesn't exist. So `#!/usr/bin/env node` shebangs (vite,
     // next, every JS dev server) die at launch with `env: 'node': No such file`, in
-    // the log, after `ws` has already reported the step green. Same harvest the hook
-    // dispatch uses; this path builds its own command and would otherwise miss it —
-    // the same bypass that once cost host scripts their base `WS_*` contract.
+    // the log, after `ws` has already reported the step green. The same harvest the
+    // hook dispatch uses, through the one owner of that rule
+    // (`remote::harvested_path`) — this path builds its own command and carried its
+    // own copy of it, the same bypass that once cost host scripts their base `WS_*`
+    // contract.
     //
     // Emitted first so a repo declaring its own PATH in `env` still wins (`env`
-    // applies assignments left to right).
-    let harvested = match site {
-        Site::Remote { connection, .. } => crate::remote::login_path(connection),
-        Site::Local => None,
-    };
+    // applies assignments left to right; the harvest also yields nothing when the
+    // caller declares one).
+    let harvested = crate::remote::harvested_path(site.connection(), env);
     // Env as an `env K=V …` prefix. The whole `K=V` token is `shell_quote`d (not
     // just the value): a declared env key from `.ws.json` is untrusted, and quoting
     // the token keeps `env` seeing exactly one argument, closing key injection.
     let mut env_prefix = String::new();
-    if let Some(p) = harvested.filter(|_| !env.iter().any(|(k, _)| k == "PATH")) {
-        env_prefix.push_str(&format!("{} ", shell_quote(&format!("PATH={p}"))));
+    for (k, v) in harvested.iter().chain(env) {
+        env_prefix.push_str(&format!("{} ", shell_quote(&format!("{k}={v}"))));
     }
-    env_prefix
-        .extend(env.iter().map(|(k, v)| format!("{} ", shell_quote(&format!("{k}={v}")))));
     // `nohup … &` detaches (survives `ws` exiting and the terminal / SSH session
     // closing); stdio to the log so a remote `ssh` returns at once instead of
     // holding the channel open. `$!` is the launched process — `nohup`/`env`/`sh`
@@ -288,29 +286,19 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
 /// alive (`kill -0`), and its start time matches the recorded identity (so a
 /// recycled pid isn't mistaken for ours). Over a flaky remote link the SSH call
 /// fails and this returns `false` (same best-effort posture as the rest of teardown).
-pub fn is_active(site: &Site, name: &str) -> bool {
-    let pid = run_path(name, "pid");
-    let read = read_pidfile(&pid);
-    let script = format!(
-        "{read}\n\
-         [ -n \"$p\" ] || exit 1\n\
-         kill -0 \"$p\" 2>/dev/null || exit 1\n\
-         got=$(ps -o lstart= -p \"$p\" 2>/dev/null | tr -d ' ')\n\
-         [ \"$got\" = \"$want\" ]",
-    );
-    site.shell(&script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+///
+/// Asked of [`health`] with no ports, which is exactly this question: with an empty
+/// port list the probe reports liveness alone, and `Running` is precisely "alive
+/// and ours" — `NotStarted`, `Crashed` and an unreachable site are all not. One
+/// copy of the liveness+identity shell rather than a third spelling of it.
+fn is_active(site: &Site, name: &str) -> bool {
+    matches!(health(site, name, &[]), Some(Health::Running))
 }
 
 /// What a supervised host process is actually *doing*, as opposed to what `ws`
 /// reported when it launched it.
 ///
-/// [`up`], [`down`] and [`is_active`] all answer the same question: is a process
+/// [`up`], [`down`] and `is_active` all answer the same question: is a process
 /// with our recorded identity alive. That is the *action* ws took, not the
 /// *effect* it implied. A dev server can be perfectly alive while serving a port
 /// ws never allocated (vite silently increments past a port it finds busy), and
@@ -643,6 +631,14 @@ mod tests {
             health(&Site::Local, "ws-no-such-worktree-probe-test", &[20000]),
             Some(Health::NotStarted)
         );
+    }
+
+    #[test]
+    fn a_process_that_was_never_started_is_not_active() {
+        // `up`'s idempotence guard reads `health` with no ports: only `Running`
+        // means "alive and ours", so a name with no pid file must be inactive — a
+        // false positive here skips a launch the user asked for.
+        assert!(!is_active(&Site::Local, "ws-no-such-worktree-active-test"));
     }
 
     #[test]

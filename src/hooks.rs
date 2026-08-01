@@ -16,7 +16,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::{Script, WsConfig};
+use crate::config::WsConfig;
 use crate::ui;
 
 /// Max bytes buffered per streamed line. A hook that emits an unterminated
@@ -24,14 +24,15 @@ use crate::ui;
 /// up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
-/// A resolved lifecycle action for a (repo, event): a declarative `scripts`
-/// entry (preferred) or a legacy `.ws-hooks/` file path (fallback).
-pub enum Action<'a> {
-    Script(&'a Script),
+/// A resolved lifecycle action for a (repo, event): one shell command (a
+/// declarative `scripts` entry, preferred, or a synthesized default) or a legacy
+/// `.ws-hooks/` file path (fallback).
+pub enum Action {
     /// Path to the hook file, relative to the workspace root.
     File(String),
-    /// A `ws`-synthesized container default (see `config::default_script`) — no
-    /// declared script, no hook file. Runs exactly like a declared one-liner.
+    /// A shell command run in the worktree: a declared `scripts` entry already
+    /// joined and anchored by `config::script_command`, or a `ws`-synthesized
+    /// container default (see `config::default_script`).
     Command(String),
 }
 
@@ -39,18 +40,26 @@ pub enum Action<'a> {
 /// file (via `lookup`); else, for a container repo, the compose default (see
 /// `config::default_script`). `None` when none apply — the caller treats that as
 /// a dim skip.
-pub fn resolve<'a>(
-    cfg: &'a WsConfig,
+///
+/// A declared script arrives as the string `config::script_command` builds — the
+/// one owner of "what shell command does this event run", so a `Many` is joined
+/// fail-fast with `&&` and a `.ws-hooks/…` reference is anchored to
+/// `$WS_WORKSPACE_ROOT`. Deferring that rule to the dispatch site is what once let
+/// `capture_action` join *without* anchoring: with cwd = the worktree, a `status`
+/// script naming a `.ws-hooks/` path exited 127, the non-zero exit was swallowed,
+/// and `ws list` showed an empty status column while the identical config worked
+/// for `up` and on a remote workspace.
+pub fn resolve(
+    cfg: &WsConfig,
     workspace_root: &Path,
     repo: &str,
     event: &str,
     is_container: bool,
-) -> Option<Action<'a>> {
-    let rc = cfg.repo_config(repo);
-    if let Some(s) = rc.and_then(|c| c.scripts.get(event)) {
-        return Some(Action::Script(s));
+) -> Option<Action> {
+    if let Some(cmd) = cfg.script_command(repo, event) {
+        return Some(Action::Command(cmd));
     }
-    let override_path = rc.and_then(|c| c.hooks.get(event).map(String::as_str));
+    let override_path = cfg.repo_config(repo).and_then(|c| c.hooks.get(event).map(String::as_str));
     if let Some(f) = lookup(workspace_root, repo, event, override_path) {
         return Some(Action::File(f));
     }
@@ -191,9 +200,6 @@ pub fn run_action(
     extra_env: &[(String, String)],
 ) -> Result<()> {
     match action {
-        Action::Script(s) => {
-            run_script(workspace_root, worktree_path, repo, branch_sanitized, event, s, extra_env)
-        }
         Action::File(rel) => {
             run(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
         }
@@ -201,28 +207,6 @@ pub fn run_action(
             workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
         ),
     }
-}
-
-/// Run a declarative script in the worktree via one `sh -c` with cwd = the
-/// worktree and the `WS_*` env (plus `WS_WORKTREE`). A `Many` is joined with
-/// `&&` — sequential and fail-fast, in a single shell so `cd`/env carry across
-/// commands (the same shape `capture_action` uses, so the two agree). Output is
-/// streamed like a hook.
-fn run_script(
-    workspace_root: &Path,
-    worktree_path: &Path,
-    repo: &str,
-    branch_sanitized: &str,
-    event: &str,
-    script: &Script,
-    extra_env: &[(String, String)],
-) -> Result<()> {
-    // Anchor `.ws-hooks/…` references to `$WS_WORKSPACE_ROOT` — same as the remote
-    // path's `command_for` — so a config names `.ws-hooks/up.sh` and it resolves
-    // whether the hook runs here or on the server. `Script::joined` is the single
-    // home for that rule.
-    let joined = script.joined();
-    run_one(workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env)
 }
 
 /// Spawn `cmd` with piped stdio, stream its output under `tag`, and fail on a
@@ -243,8 +227,12 @@ fn spawn_streamed(
     Ok(())
 }
 
-/// Run one already-joined shell command in the worktree, streaming its output.
-/// Shared by a declared `scripts` entry and a synthesized container default.
+/// Run one already-joined shell command in the worktree via a single `sh -c` with
+/// cwd = the worktree and the `WS_*` env, streaming its output like a hook. A
+/// `Many` arrives already joined with `&&` — sequential and fail-fast, in one
+/// shell so `cd`/env carry across commands (the same shape `capture_action` uses,
+/// so the two agree). Shared by a declared `scripts` entry and a synthesized
+/// container default.
 #[allow(clippy::too_many_arguments)]
 fn run_one(
     workspace_root: &Path,
@@ -326,38 +314,33 @@ pub fn capture_action(
     extra_env: &[(String, String)],
 ) -> Option<String> {
     let mut cmd = match action {
-        // A status probe is normally one command; a `Many` runs as a fail-fast
-        // `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output is
-        // captured. Go through `Script::joined` — not an open-coded join — so
-        // `.ws-hooks/…` is anchored to `$WS_WORKSPACE_ROOT` here too. This arm
-        // used to hand-roll the join, and since it runs with cwd = the worktree
-        // a `status` script naming a `.ws-hooks/` path exited 127; the non-zero
-        // exit is swallowed, so `ws list` just showed an empty status column
-        // while the identical config worked for `up` and on a remote workspace.
-        Action::Script(s) => {
-            let joined = s.joined();
-            script_command(
-                workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env,
-            )
-        }
         Action::File(rel) => {
             if Path::new(rel).is_absolute() {
                 return None;
             }
             file_command(workspace_root, rel, worktree_path, repo, branch_sanitized, event, extra_env)
         }
+        // A status probe is normally one command; a `Many` arrives already joined
+        // as a fail-fast `cmd1 && cmd2 …` sequence (nothing silently dropped) and
+        // its output is captured. See `resolve` for why that join — and the
+        // `.ws-hooks/…` anchoring that comes with it — must not be re-derived here.
         Action::Command(cmd) => script_command(
             workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
         ),
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    capture_child(cmd.spawn().ok()?, timeout)
+    let text = capture_within(cmd.spawn().ok()?, timeout)?;
+    ui::first_nonempty_line(&text).map(String::from)
 }
 
 /// Drain a child's stdout on a helper thread (so a full pipe buffer can't
-/// deadlock the wait loop), enforce `timeout`, and return its first non-empty
-/// line. `None` on non-zero exit, timeout, or empty output.
-fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
+/// deadlock the wait loop), enforce `timeout` by killing the child, and return
+/// everything it wrote. `None` on non-zero exit or timeout.
+///
+/// The one copy of the process-timeout loop, shared by the `status` capture above
+/// and `remote::probe_login_path` (the login-`PATH` harvest) — each keeps its own
+/// reading of the captured text, but a fix to the wait/kill loop lands in both.
+pub(crate) fn capture_within(mut child: Child, timeout: Duration) -> Option<String> {
     let mut stdout = child.stdout.take()?;
     let reader = thread::spawn(move || {
         let mut s = String::new();
@@ -370,10 +353,7 @@ fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let text = reader.join().unwrap_or_default();
-                if !status.success() {
-                    return None;
-                }
-                return ui::first_nonempty_line(&text).map(String::from);
+                return status.success().then_some(text);
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -451,5 +431,75 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(lines[0] == "before");
         assert!(lines[2] == "after");
+    }
+
+    #[test]
+    fn a_declared_script_resolves_to_one_anchored_command() {
+        // `resolve` hands back the string `config::script_command` built: a `Many`
+        // already joined fail-fast, and `.ws-hooks/…` already anchored to
+        // `$WS_WORKSPACE_ROOT`. Deferring either step to the dispatch site is how
+        // the captured (`status`) path once ended up joining without anchoring.
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","scripts":{"status":[".ws-hooks/status.sh","echo ok"]}}]}"#,
+        )
+        .expect("parse config");
+        let Some(Action::Command(cmd)) = resolve(&cfg, Path::new("/ws"), "api", "status", false)
+        else {
+            panic!("a declared script must resolve to a command");
+        };
+        assert_eq!(cmd, "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/status.sh && echo ok");
+    }
+
+    #[test]
+    fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
+        let cfg: WsConfig =
+            serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
+        // No declared script and no hook file: a container repo gets the compose
+        // default, everything else resolves to nothing (a dim skip for the caller).
+        let Some(Action::Command(cmd)) = resolve(&cfg, Path::new("/ws"), "api", "up", true) else {
+            panic!("a container repo must fall back to the compose default");
+        };
+        assert_eq!(cmd, "podman compose up -d");
+        assert!(resolve(&cfg, Path::new("/ws"), "api", "up", false).is_none());
+        // No default exists for this event, container or not.
+        assert!(resolve(&cfg, Path::new("/ws"), "api", "post-create", true).is_none());
+    }
+
+    /// A child with piped stdout, for the capture loop.
+    fn sh(script: &str) -> Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh")
+    }
+
+    #[test]
+    fn capture_within_returns_the_whole_output_and_refuses_a_failed_child() {
+        // Everything the child wrote, verbatim — reading a *line* out of it is the
+        // caller's rule (`ws list` takes the first non-empty one; the login-PATH
+        // probe wants the line after its sentinel), not this loop's.
+        assert_eq!(
+            capture_within(sh("printf 'a\\nb\\n'"), Duration::from_secs(30)).as_deref(),
+            Some("a\nb\n")
+        );
+        // A non-zero exit is no answer at all, whatever landed on stdout.
+        assert_eq!(capture_within(sh("echo out; exit 3"), Duration::from_secs(30)), None);
+    }
+
+    #[test]
+    fn capture_within_kills_a_child_that_outlives_its_timeout() {
+        // The path neither caller could afford to get wrong: a wedged `status`
+        // script must not stall `ws list`, and a misbehaving interactive rc must
+        // not hang the op that harvested its PATH.
+        let started = Instant::now();
+        assert_eq!(capture_within(sh("sleep 30"), Duration::from_millis(200)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the timeout must return without waiting for the child"
+        );
     }
 }

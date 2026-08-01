@@ -73,73 +73,13 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             .with_context(|| format!("create worktree for {repo_name}"))?;
         step.ok();
 
-        // Artifacts ws drops into the worktree get registered in the worktree's
-        // git exclude so they never show as untracked. Seeded with the repo's
-        // configured `worktree_excludes`.
-        let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
-
-        // Seeding `vendor/` from the main checkout only makes sense for a
-        // gitignored, per-host one. A repo that *commits* its vendor/ already has
-        // it in the fresh worktree (`git worktree add` checked it out), and
-        // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
-        // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
-        // exclude below stops git descending, and pushed over SSH on a remote
-        // workspace since a tracked vendor/ is source and isn't sync-ignored.
-        if repo_path.join("composer.json").is_file()
-            && repo_path.join("vendor").is_dir()
-            && !wt_path.join("vendor").exists()
-        {
-            let step = crate::ui::step(repo_name, "vendor/ copied");
-            if let Err(e) = copy_vendor(&repo_path, &wt_path) {
-                remove_worktree(&repo_path, &wt_path);
-                return Err(e.context("vendor/ copy failed"));
-            }
-            excludes.push("/vendor".to_string());
-            step.ok();
+        // One rollback site for the whole seeding step: any failure in there
+        // leaves a registered-but-half-populated worktree, and the caller's next
+        // `ws new` would refuse on the "already exists" conflict.
+        if let Err(e) = seed_worktree(repo_entry, repo_name, &repo_path, &wt_path) {
+            remove_worktree(&repo_path, &wt_path);
+            return Err(e);
         }
-
-        #[cfg(unix)]
-        if repo_path.join("node_modules").is_dir() {
-            let step = crate::ui::step(repo_name, "node_modules symlinked");
-            symlink_node_modules(repo_name, &wt_path)?;
-            excludes.push("/node_modules".to_string());
-            step.ok();
-        }
-
-        // Seed declared untracked files (dev certs/keys/env) from the main checkout
-        // into the fresh worktree. Ordered before the excludes registration below so
-        // the copied paths join them — `copy` seeds files that aren't in git, and one
-        // that isn't gitignored either would otherwise leave the worktree reading
-        // permanently dirty. Also before the remote sync (so they ride it to the
-        // server) and before post-create (so build steps see them).
-        let copies = repo_entry.copy();
-        if !copies.is_empty() {
-            let step = crate::ui::step(repo_name, "files copied");
-            match seed_copies(&repo_path, &wt_path, copies) {
-                Ok(dests) => {
-                    // Also exclude the copy *sources* in the main checkout. A
-                    // `copy` source is a ws-managed untracked file (a dev cert, a
-                    // seed dump) living in main at the same relative path it lands
-                    // in the worktree — so the worktree excludes double as main's.
-                    // Best-effort: keeps main's `git status` clean and ws's
-                    // footprint fully local (nothing committed), but a failure to
-                    // write main's exclude must not block creating the worktree.
-                    let _ = git::add_worktree_excludes(&repo_path, &dests);
-                    excludes.extend(dests);
-                    step.ok()
-                }
-                Err(e) => {
-                    remove_worktree(&repo_path, &wt_path);
-                    return Err(e.context(format!("copy for {repo_name}")));
-                }
-            }
-        }
-
-        // A symlinked node_modules is a *file* to git, so a repo's conventional
-        // `node_modules/` (trailing slash = dir-only) rule won't match it —
-        // without this the worktree reads as permanently dirty.
-        git::add_worktree_excludes(&wt_path, &excludes)
-            .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
         // Advisory isolation lint — run once, here, when the worktree's compose
         // file first lands (not on every `ws up`): its constructs are static
@@ -329,6 +269,77 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Materialize the fresh worktree's non-git content — the shared `vendor/` copy,
+/// the `node_modules` symlink, declared `copy` entries — and register everything
+/// ws dropped in the worktree's git exclude.
+///
+/// Every failure propagates plainly; the caller owns the rollback, so all four
+/// steps unwind the same way instead of two of them stranding the worktree.
+fn seed_worktree(
+    repo_entry: &config::RepoEntry,
+    repo_name: &str,
+    repo_path: &Path,
+    wt_path: &Path,
+) -> Result<()> {
+    // Artifacts ws drops into the worktree get registered in the worktree's
+    // git exclude so they never show as untracked. Seeded with the repo's
+    // configured `worktree_excludes`.
+    let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
+
+    // Seeding `vendor/` from the main checkout only makes sense for a
+    // gitignored, per-host one. A repo that *commits* its vendor/ already has
+    // it in the fresh worktree (`git worktree add` checked it out), and
+    // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
+    // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
+    // exclude below stops git descending, and pushed over SSH on a remote
+    // workspace since a tracked vendor/ is source and isn't sync-ignored.
+    if repo_path.join("composer.json").is_file()
+        && repo_path.join("vendor").is_dir()
+        && !wt_path.join("vendor").exists()
+    {
+        let step = crate::ui::step(repo_name, "vendor/ copied");
+        copy_vendor(repo_path, wt_path).context("vendor/ copy failed")?;
+        excludes.push("/vendor".to_string());
+        step.ok();
+    }
+
+    #[cfg(unix)]
+    if repo_path.join("node_modules").is_dir() {
+        let step = crate::ui::step(repo_name, "node_modules symlinked");
+        symlink_node_modules(repo_name, wt_path)?;
+        excludes.push("/node_modules".to_string());
+        step.ok();
+    }
+
+    // Seed declared untracked files (dev certs/keys/env) from the main checkout
+    // into the fresh worktree. Ordered before the excludes registration below so
+    // the copied paths join them — `copy` seeds files that aren't in git, and one
+    // that isn't gitignored either would otherwise leave the worktree reading
+    // permanently dirty. Also before the remote sync (so they ride it to the
+    // server) and before post-create (so build steps see them).
+    let copies = repo_entry.copy();
+    if !copies.is_empty() {
+        let step = crate::ui::step(repo_name, "files copied");
+        let dests = seed_copies(repo_path, wt_path, copies)
+            .with_context(|| format!("copy for {repo_name}"))?;
+        // Also exclude the copy *sources* in the main checkout. A `copy` source
+        // is a ws-managed untracked file (a dev cert, a seed dump) living in
+        // main at the same relative path it lands in the worktree — so the
+        // worktree excludes double as main's. Best-effort: keeps main's `git
+        // status` clean and ws's footprint fully local (nothing committed), but
+        // a failure to write main's exclude must not block creating the worktree.
+        let _ = git::add_worktree_excludes(repo_path, &dests);
+        excludes.extend(dests);
+        step.ok();
+    }
+
+    // A symlinked node_modules is a *file* to git, so a repo's conventional
+    // `node_modules/` (trailing slash = dir-only) rule won't match it —
+    // without this the worktree reads as permanently dirty.
+    git::add_worktree_excludes(wt_path, &excludes)
+        .with_context(|| format!("register worktree excludes for {repo_name}"))
+}
+
 fn copy_vendor(repo: &Path, wt: &Path) -> Result<()> {
     cp_r(&repo.join("vendor"), &wt.join("vendor")).context("cp vendor/")
 }
@@ -427,13 +438,100 @@ fn remove_worktree(repo: &Path, wt: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::seed_copies;
+    use super::{seed_copies, seed_worktree};
+    use crate::config::{RepoConfig, RepoEntry};
     use std::fs;
     use std::path::Path;
 
     fn touch(p: &Path, body: &str) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, body).unwrap();
+    }
+
+    /// `git init` at `dir`, so `add_worktree_excludes` has a real
+    /// `info/exclude` to resolve and append to.
+    fn git_init(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "-q"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+    }
+
+    fn exclude_lines(repo: &Path) -> Vec<String> {
+        fs::read_to_string(repo.join(".git/info/exclude"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn seeding_does_every_job_and_registers_one_exclude_set() {
+        // Pins the four jobs `seed_worktree` owns as a unit — vendor copy,
+        // node_modules symlink, `copy` entries, and the single exclude
+        // registration that covers all of them plus the configured ones.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        git_init(&repo);
+        git_init(&wt);
+        touch(&repo.join("composer.json"), "{}");
+        touch(&repo.join("vendor/autoload.php"), "v");
+        touch(&repo.join("node_modules/pkg/index.js"), "n");
+        touch(&repo.join(".env"), "e");
+
+        let entry = RepoEntry::Extended(RepoConfig {
+            name: "api".into(),
+            copy: vec![".env".into()],
+            worktree_excludes: vec!["/.venv".into()],
+            ..Default::default()
+        });
+
+        seed_worktree(&entry, "api", &repo, &wt).unwrap();
+
+        assert!(wt.join("vendor/autoload.php").is_file(), "vendor/ seeded from main");
+        assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "e");
+        #[cfg(unix)]
+        assert!(
+            fs::symlink_metadata(wt.join("node_modules")).unwrap().is_symlink(),
+            "node_modules is linked, not copied",
+        );
+
+        let lines = exclude_lines(&wt);
+        for want in ["/.venv", "/vendor", "/.env"] {
+            assert!(lines.iter().any(|l| l == want), "{want} missing from {lines:?}");
+        }
+        #[cfg(unix)]
+        assert!(lines.iter().any(|l| l == "/node_modules"));
+
+        // The copy *sources* are excluded in the main checkout too, so seeding a
+        // worktree doesn't leave main reading dirty.
+        assert!(exclude_lines(&repo).iter().any(|l| l == "/.env"));
+    }
+
+    #[test]
+    fn a_failed_seed_propagates_without_touching_the_worktree() {
+        // Rollback is the caller's job (one site, uniform across all four steps);
+        // `seed_worktree` itself must only report.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        git_init(&repo);
+        git_init(&wt);
+
+        let entry = RepoEntry::Extended(RepoConfig {
+            name: "api".into(),
+            copy: vec!["../secret".into()],
+            ..Default::default()
+        });
+
+        assert!(seed_worktree(&entry, "api", &repo, &wt).is_err());
+        assert!(wt.is_dir(), "the half-seeded worktree is left for the caller to remove");
     }
 
     #[test]

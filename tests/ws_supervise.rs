@@ -47,6 +47,21 @@ fn proc_alive(f: &WorkspaceFixture) -> bool {
     !pid.is_empty() && alive(pid)
 }
 
+/// Poll `cond` every 50 ms for up to 2 s, reporting whether it ever held.
+///
+/// Detached work — a supervised process starting, or dying after a signal —
+/// races the assertion that follows it, and each wait below wants the same
+/// budget rather than one invented per call site.
+fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..40 {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
 fn stop(f: &WorkspaceFixture) {
     // Always tear the worktree down so no detached `sleep` leaks past the test.
     let _ = f.run(&["rm", "feat/foo", "--force"]);
@@ -147,12 +162,7 @@ fn list_reports_a_host_process_that_crashed() {
 
     // Kill it the way a crash would — behind ws's back, no `ws down`.
     std::process::Command::new("kill").args(["-9", &pid]).status().unwrap();
-    for _ in 0..20 {
-        if !proc_alive(&f) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    wait_until(|| !proc_alive(&f));
 
     let out = f.run_ok(&["list"]);
     assert!(
@@ -358,12 +368,7 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
     f.run_ok(&["up", "feat/foo"]);
 
     let child_pid_file = f.path().join("child.pid");
-    for _ in 0..40 {
-        if child_pid_file.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    wait_until(|| child_pid_file.exists());
     let child = std::fs::read_to_string(&child_pid_file)
         .expect("the wrapper should have started a child")
         .trim()
@@ -372,12 +377,7 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
 
     f.run_ok(&["down", "feat/foo"]);
     // Give the TERM a moment to land.
-    for _ in 0..20 {
-        if !alive(&child) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    wait_until(|| !alive(&child));
     assert!(
         !alive(&child),
         "the real server behind the wrapper must be stopped, not orphaned to init"
@@ -438,14 +438,37 @@ fn teardown_runs_when_an_assertion_fails_mid_test() {
     }));
     assert!(result.is_err(), "precondition: the guarded block must have panicked");
 
-    for _ in 0..20 {
-        if !alive(&pid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    wait_until(|| !alive(&pid));
     assert!(
         !alive(&pid),
         "a failed assertion must still tear the worktree down — pid {pid} was orphaned to init"
+    );
+}
+
+#[test]
+fn wait_until_returns_early_and_gives_up_after_its_budget() {
+    // Every wait above is a race against detached work, so both halves matter:
+    // returning the instant the condition holds (or the tests pay the full budget
+    // each time) and giving up after ~2 s (or a wait that never comes true hangs
+    // the suite instead of failing its assertion).
+    let mut polls = 0;
+    let started = std::time::Instant::now();
+    assert!(wait_until(|| {
+        polls += 1;
+        polls == 3
+    }));
+    assert_eq!(polls, 3, "must stop polling as soon as the condition holds");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1000),
+        "an early return must not sleep out the budget, took {:?}",
+        started.elapsed()
+    );
+
+    let started = std::time::Instant::now();
+    assert!(!wait_until(|| false), "a condition that never holds must report failure");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1500),
+        "the budget is ~2 s; waiting only {:?} would race the detached work it exists for",
+        started.elapsed()
     );
 }

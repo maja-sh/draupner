@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::process::{Command, Stdio};
 
 /// Where a workspace's stack runs, and thus where `ws` drives podman, Caddy,
@@ -59,6 +59,50 @@ impl Site {
     /// Whether the stack runs on a remote server.
     pub fn is_remote(&self) -> bool {
         matches!(self, Site::Remote { .. })
+    }
+
+    /// The SSH destination this site runs through, `None` for `Local`. Lets a
+    /// caller reach the things that only exist for a connection (the harvested
+    /// login `PATH`) without matching on the variant itself.
+    pub fn connection(&self) -> Option<&str> {
+        match self {
+            Site::Local => None,
+            Site::Remote { connection, .. } => Some(connection),
+        }
+    }
+
+    /// The workspace root **as the execution site sees it**: the local root for a
+    /// local workspace, else the server's synced-worktree base, absolute
+    /// (home-resolved — see [`abs_base`](Self::abs_base)).
+    ///
+    /// This and [`worktree_at`](Self::worktree_at) are the one owner of "which
+    /// paths does a command running at this site see", and they must agree:
+    /// `WS_WORKSPACE_ROOT` is what a `.ws-hooks/…` script path anchors against, so
+    /// handing back the client's root while the command runs on the server points
+    /// it at a filesystem that isn't there (`/Users/…: not found` on a Linux box).
+    /// Absolute for the same reason `COMPOSE_FILE` must be: the command runs with
+    /// `cd <worktree>`, so a relative base would resolve against that cwd.
+    pub fn root_at(&self, remote: Option<&crate::config::RemoteConfig>, ws_root: &Path) -> String {
+        match remote {
+            None => ws_root.to_string_lossy().into_owned(),
+            Some(r) => self.abs_base(&r.worktree_base(ws_root)),
+        }
+    }
+
+    /// A repo's worktree at the execution site: `local_worktree` for a local
+    /// workspace, else the server-side synced dir under [`root_at`](Self::root_at).
+    pub fn worktree_at(
+        &self,
+        remote: Option<&crate::config::RemoteConfig>,
+        ws_root: &Path,
+        local_worktree: &Path,
+        branch_sanitized: &str,
+        repo: &str,
+    ) -> String {
+        match remote {
+            None => local_worktree.to_string_lossy().into_owned(),
+            Some(_) => worktree_path(&self.root_at(remote, ws_root), branch_sanitized, repo),
+        }
     }
 
     /// Resolve a server-side absolute path from a `$HOME`-relative one (e.g.
@@ -477,6 +521,24 @@ pub fn login_path(connection: &str) -> Option<String> {
     probed
 }
 
+/// The `PATH` pair to put in front of a command launched at a site, or `None`
+/// when there is nothing to add. The one owner of "harvested login PATH unless the
+/// caller declared one", shared by the hook dispatch ([`run_event`]) and the
+/// detached host-process launch (`supervise::up`) — two paths that build their own
+/// command and had this rule spelled out separately.
+///
+/// `connection` is the site's SSH destination (`None` = local, which harvests
+/// nothing: a local hook already inherits the user's environment). Skipped when
+/// `declared` carries its own `PATH`, so a repo that sets one still wins. See
+/// [`login_path`] for why this exists at all.
+pub fn harvested_path(
+    connection: Option<&str>,
+    declared: &[(String, String)],
+) -> Option<(String, String)> {
+    let harvested = login_path(connection?)?;
+    (!declared.iter().any(|(k, _)| k == "PATH")).then(|| ("PATH".to_string(), harvested))
+}
+
 /// One probe round trip. `$SHELL -i` so rc files run; `</dev/null` so a shell
 /// that reads stdin sees EOF instead of blocking; stderr dropped because an
 /// interactive shell without a tty legitimately complains about job control.
@@ -493,34 +555,7 @@ fn probe_login_path(connection: &str) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    parse_probe(&capture_within(child, PROBE_TIMEOUT)?)
-}
-
-/// Read a child's stdout on a helper thread (a full pipe buffer would otherwise
-/// deadlock the wait loop) and give up after `timeout`, killing the child.
-fn capture_within(mut child: std::process::Child, timeout: Duration) -> Option<String> {
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
-        s
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let text = reader.join().unwrap_or_default();
-                return status.success().then_some(text);
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => return None,
-        }
-    }
+    parse_probe(&crate::hooks::capture_within(child, PROBE_TIMEOUT)?)
 }
 
 /// Pull the `PATH` out of a probe reply: the line after the sentinel. Everything
@@ -579,6 +614,19 @@ struct EnvPrefix {
     via_env: bool,
 }
 
+impl EnvPrefix {
+    /// `command` with these env words in front of it and `exec` placed where the
+    /// shell honours it (see the `via_env` field) — so the login shell
+    /// is replaced and the child's exit code propagates back cleanly.
+    fn exec(&self, command: &str) -> String {
+        if self.via_env {
+            format!("exec {}{command}", self.words)
+        } else {
+            format!("{}exec {command}", self.words)
+        }
+    }
+}
+
 /// Render `env` as words that place the pairs in the environment of the command
 /// that follows.
 ///
@@ -611,22 +659,62 @@ fn env_prefix(env: &[(&str, &str)]) -> EnvPrefix {
     EnvPrefix { words, via_env }
 }
 
+/// The head every remote script shares: run `rest` in `dir`. `cd` failure
+/// short-circuits `&&`, so a missing worktree surfaces as the shell's non-zero
+/// exit rather than a silent no-op.
+fn in_dir(dir: &str, rest: &str) -> String {
+    format!("cd {} && {rest}", shell_quote(dir))
+}
+
 /// Build the remote shell script run over SSH: change into `dir`, export the
-/// given `WS_*` env pairs, then `exec` the command so the login shell is
-/// replaced and the child's exit code propagates back cleanly.
-///
-/// `cd` failure short-circuits `&&`, so a missing worktree surfaces as the
-/// shell's non-zero exit rather than a silent no-op.
+/// given `WS_*` env pairs, then `exec` the command.
 pub fn remote_script(dir: &str, env: &[(&str, &str)], command: &[String]) -> String {
-    let prefix = env_prefix(env);
     let quoted: Vec<String> = command.iter().map(|a| shell_quote(a)).collect();
-    let cmd = quoted.join(" ");
-    let dir = shell_quote(dir);
-    if prefix.via_env {
-        format!("cd {dir} && exec {}{cmd}", prefix.words)
-    } else {
-        format!("cd {dir} && {}exec {cmd}", prefix.words)
-    }
+    in_dir(dir, &env_prefix(env).exec(&quoted.join(" ")))
+}
+
+/// The remote script for a read-only `status` probe: the same `cd` + env prelude
+/// [`remote_script`] builds, but bounded by a server-side `timeout` and *not*
+/// `exec`ed — `timeout` has to stay alive to enforce the bound.
+///
+/// Same env-word rule as `remote_script` (see [`env_prefix`]): a key that isn't a
+/// shell name — `WS_PORT_redis-cache` from a dashed compose service — would be run
+/// as a command instead of set, and the failure is silent here, since
+/// `ssh_capture` turns the non-zero exit into `None` and `ws list` just shows a
+/// dash forever.
+fn status_script(dir: &str, env: &[(&str, &str)], command: &str, timeout_secs: u64) -> String {
+    in_dir(
+        dir,
+        &format!(
+            "{}timeout {timeout_secs} sh -c {}",
+            env_prefix(env).words,
+            shell_quote(command)
+        ),
+    )
+}
+
+/// The environment a remote command runs with: the shared `WS_*` contract
+/// ([`crate::hooks::base_env`] — the same keys a local hook gets, with the
+/// server's paths) plus the caller's injected pairs on top, so a declared `env`
+/// key overrides a base one. The one owner of the remote side of that contract:
+/// both the lifecycle dispatch and the `status` probe build their env here, so a
+/// new `WS_*` key can't reach one and miss the other.
+fn event_env(
+    base: &str,
+    dir: &str,
+    task: &str,
+    repo: &str,
+    event: &str,
+    extra_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut env = crate::hooks::base_env(Path::new(base), dir, repo, task, event);
+    env.extend(extra_env.iter().cloned());
+    env
+}
+
+/// Borrow owned env pairs as the `(&str, &str)` slice the script builders take.
+fn as_pairs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
 }
 
 /// Run a lifecycle command on the server: `cd` into the synced worktree, export
@@ -635,9 +723,10 @@ pub fn remote_script(dir: &str, env: &[(&str, &str)], command: &[String]) -> Str
 /// status. The caller flushes the worktree's mutagen sync first so the server
 /// sees the latest files.
 ///
-/// The base `WS_*` here mirrors [`crate::hooks`]'s local contract, but the paths
-/// are the server's: `WS_WORKTREE` is the synced dir, `WS_WORKSPACE_ROOT` the
-/// synced-worktrees base (there's no `.ws.json` workspace root on the server).
+/// The base `WS_*` here is [`crate::hooks::base_env`]'s local contract verbatim,
+/// but the paths are the server's: `WS_WORKTREE` is the synced dir,
+/// `WS_WORKSPACE_ROOT` the synced-worktrees base (there's no `.ws.json` workspace
+/// root on the server).
 pub fn run_event(
     connection: &str,
     worktree_base: &str,
@@ -648,26 +737,15 @@ pub fn run_event(
     extra_env: &[(String, String)],
 ) -> Result<std::process::ExitStatus> {
     let dir = worktree_path(worktree_base, task, repo);
-    let mut env: Vec<(&str, &str)> = vec![
-        ("WS_REPO", repo),
-        ("WS_BRANCH_SANITIZED", task),
-        ("WS_HOOK_NAME", event),
-        ("WS_WORKTREE", &dir),
-        ("WS_WORKSPACE_ROOT", worktree_base),
-    ];
-    env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let mut env = event_env(worktree_base, &dir, task, repo, event, extra_env);
     // Give the hook the PATH the user would have in their own terminal here, so a
     // `kind: host` repo's toolchain (nvm/asdf/pyenv/mise) resolves. Best-effort and
     // cached; an unavailable probe just leaves the default non-interactive PATH.
-    // Placed after `extra_env` so a repo that declares its own PATH still wins.
-    let harvested = login_path(connection);
-    if let Some(p) = &harvested {
-        if !extra_env.iter().any(|(k, _)| k == "PATH") {
-            env.push(("PATH", p));
-        }
-    }
+    // Appended after `extra_env` so a repo that declares its own PATH still wins
+    // (`harvested_path` yields nothing when one is declared).
+    env.extend(harvested_path(Some(connection), extra_env));
     let cmd = ["sh".to_string(), "-c".to_string(), command.to_string()];
-    let script = remote_script(&dir, &env, &cmd);
+    let script = remote_script(&dir, &as_pairs(&env), &cmd);
     // Pipe the SSH stdio and stream it through the same `hook_line` path a local
     // hook uses, instead of letting the ssh child inherit the terminal — otherwise
     // the server's output writes straight over the step spinner (the interleaving
@@ -698,26 +776,11 @@ pub fn capture_status(
     timeout_secs: u64,
 ) -> Option<String> {
     let dir = worktree_path(base, task, repo);
-    let mut env: Vec<(&str, &str)> = vec![
-        ("WS_REPO", repo),
-        ("WS_BRANCH_SANITIZED", task),
-        ("WS_HOOK_NAME", "status"),
-        ("WS_WORKTREE", &dir),
-        ("WS_WORKSPACE_ROOT", base),
-    ];
-    env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-
-    // Same env-word rule as `remote_script` (see `env_prefix`): a key that isn't a
-    // shell name — `WS_PORT_redis-cache` from a dashed compose service — would be
-    // run as a command instead of set, and the failure is silent here, since
-    // `ssh_capture` turns the non-zero exit into `None` and `ws list` just shows a
-    // dash forever.
-    let script = format!(
-        "cd {} && {}timeout {timeout_secs} sh -c {}",
-        shell_quote(&dir),
-        env_prefix(&env).words,
-        shell_quote(command)
-    );
+    // Deliberately no harvested login PATH, unlike `run_event`: this probe is
+    // read-only, runs once per repo behind `ws list`, and the harvest costs an
+    // extra SSH round trip on a cold cache.
+    let env = event_env(base, &dir, task, repo, "status", extra_env);
+    let script = status_script(&dir, &as_pairs(&env), command, timeout_secs);
 
     let out = ssh_capture(connection, &script)?;
     crate::ui::first_nonempty_line(&out).map(String::from)
@@ -814,6 +877,77 @@ mod tests {
         assert_eq!(site.abs_base("/srv/ws"), "/srv/ws");
         // Local leaves the base alone (host paths need no home resolution).
         assert_eq!(Site::Local.abs_base("myapp"), "myapp");
+    }
+
+    #[test]
+    fn site_paths_are_the_execution_sites_own() {
+        let root = Path::new("/home/me/myapp");
+        let wt = Path::new("/home/me/myapp/.worktrees/feat-foo/api");
+        // Local: exactly the host paths the caller already holds.
+        assert_eq!(Site::Local.root_at(None, root), "/home/me/myapp");
+        assert_eq!(
+            Site::Local.worktree_at(None, root, wt, "feat-foo", "api"),
+            wt.to_string_lossy()
+        );
+        // Remote: the server's base (home-resolved, so a `cd`'d script can't
+        // double-resolve it) and the synced worktree under it — never the client's
+        // paths, which don't exist there.
+        let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
+        let r = crate::config::RemoteConfig::new("srv".into(), Some("ws".into()));
+        assert_eq!(site.root_at(Some(&r), root), "/home/u/ws");
+        assert_eq!(
+            site.worktree_at(Some(&r), root, wt, "feat-foo", "api"),
+            "/home/u/ws/feat-foo/api"
+        );
+    }
+
+    #[test]
+    fn a_remote_command_gets_the_same_ws_contract_as_a_local_hook() {
+        // The contract has one owner (`hooks::base_env`) so a new `WS_*` key can't
+        // reach a local hook and miss the remote one; the injected pairs land last
+        // so a declared `env` key overrides a base one.
+        let env = event_env(
+            "/home/u/ws",
+            "/home/u/ws/feat-foo/api",
+            "feat-foo",
+            "api",
+            "up",
+            &[("WS_PORT_web".to_string(), "20001".to_string())],
+        );
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "WS_WORKSPACE_ROOT",
+                "WS_WORKTREE",
+                "WS_REPO",
+                "WS_BRANCH_SANITIZED",
+                "WS_HOOK_NAME",
+                "WS_PORT_web"
+            ]
+        );
+        assert_eq!(env[0].1, "/home/u/ws");
+        assert_eq!(env[1].1, "/home/u/ws/feat-foo/api");
+        assert_eq!(env[4].1, "up");
+    }
+
+    #[test]
+    fn status_script_bounds_the_probe_without_exec() {
+        // `timeout` must stay alive to enforce the bound, so this script is the one
+        // remote form that doesn't `exec`.
+        let s = status_script("/w/t/api", &[("WS_REPO", "api")], "docker compose ps", 5);
+        assert_eq!(s, "cd /w/t/api && WS_REPO=api timeout 5 sh -c 'docker compose ps'");
+        // Same env-word rule as the dispatch path: a key that isn't a shell name
+        // goes through `env`, or the server shell would run it as a command and
+        // `ws list` would show a dash forever.
+        let s = status_script("/w/t/api", &[("WS_PORT_redis-cache", "20001")], "ps", 5);
+        assert_eq!(s, "cd /w/t/api && env WS_PORT_redis-cache=20001 timeout 5 sh -c ps");
+    }
+
+    #[test]
+    fn a_local_site_harvests_no_login_path() {
+        // Nothing to harvest: a local hook already inherits the user's environment.
+        assert_eq!(harvested_path(None, &[]), None);
     }
 
     #[test]
