@@ -9,9 +9,7 @@ use std::process::Command;
 
 /// The digits inside `PORT=[…]` emitted by a test's `up` script.
 fn port_in(haystack: &str) -> u16 {
-    let start = haystack.find("PORT=[").expect("PORT=[ marker") + "PORT=[".len();
-    let end = start + haystack[start..].find(']').expect("closing ]");
-    haystack[start..end].parse().expect("numeric port")
+    common::port_after(haystack, "PORT=[")
 }
 
 #[test]

@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::ui;
 use crate::workspace;
 
 /// Mutagen binary to invoke. Overridable via `WS_MUTAGEN` for tests.
@@ -39,7 +40,7 @@ pub fn installed() -> bool {
 /// This is the documented escape hatch — a user can `mutagen sync pause ws-…`
 /// directly — so the naming is a stable contract.
 pub fn session_name(branch: &str, repo: &str) -> String {
-    format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
+    workspace::ws_name(branch, repo)
 }
 
 /// The forwarding-session name for one remote service port. Keyed by port (a repo
@@ -70,7 +71,7 @@ pub fn forward_create(session: &str, connection: &str, port: u16) -> Result<()> 
         if err.contains("already exists") {
             return Ok(());
         }
-        bail!("mutagen forward create: {}", first_line(&err));
+        bail!("mutagen forward create: {}", ui::first_nonempty_line(&err).unwrap_or("failed"));
     }
     Ok(())
 }
@@ -83,24 +84,7 @@ fn forward_endpoints(connection: &str, port: u16) -> (String, String) {
 
 /// Terminate a forwarding session. Best-effort: an absent session is success.
 pub fn forward_terminate(session: &str) -> Result<()> {
-    let out = Command::new(mutagen_bin())
-        .args(["forward", "terminate", session])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("spawn {}", mutagen_bin()))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("did not match")
-            || err.contains("unable to locate")
-            || err.contains("no sessions")
-        {
-            return Ok(());
-        }
-        bail!("mutagen forward terminate: {}", first_line(&err));
-    }
-    Ok(())
+    terminate_session("forward", session)
 }
 
 /// Sync ignores for a worktree: the repo's configured `worktree_excludes` plus
@@ -147,12 +131,6 @@ fn beta_endpoint(connection: &str, remote_path: &str) -> String {
     format!("{connection}:{remote_path}")
 }
 
-/// Create a two-way sync between the local worktree (`local`) and the server
-/// (`<connection>:<remote_path>`). `ignores` keeps per-worktree artifacts
-/// (node_modules, vendor) off the wire, and includes the worktree's `.git`
-/// pointer — `--ignore-vcs` does NOT cover that, since it matches VCS
-/// directories and a linked worktree's `.git` is a file. Idempotent: an existing
-/// session of the same name is treated as success.
 /// Create the beta root's **parent** on the server.
 ///
 /// Mutagen creates the synchronization root itself but not the directories above
@@ -171,9 +149,10 @@ fn ensure_beta_parent(connection: &str, remote_path: &str) -> Result<()> {
         .output()
         .with_context(|| format!("spawn ssh to {connection}"))?;
     if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
         bail!(
             "could not create {parent} on {connection}: {}",
-            first_line(&String::from_utf8_lossy(&out.stderr))
+            ui::first_nonempty_line(&err).unwrap_or("failed")
         );
     }
     Ok(())
@@ -202,6 +181,12 @@ pub fn verify_beta(connection: &str, remote_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Create a two-way sync between the local worktree (`local`) and the server
+/// (`<connection>:<remote_path>`). `ignores` keeps per-worktree artifacts
+/// (node_modules, vendor) off the wire, and includes the worktree's `.git`
+/// pointer — `--ignore-vcs` does NOT cover that, since it matches VCS
+/// directories and a linked worktree's `.git` is a file. Idempotent: an existing
+/// session of the same name is treated as success.
 pub fn create(
     session: &str,
     local: &Path,
@@ -244,7 +229,7 @@ pub fn create(
         if err.contains("already exists") || err.contains("in use") {
             return Ok(());
         }
-        bail!("mutagen sync create: {}", first_line(&err));
+        bail!("mutagen sync create: {}", ui::first_nonempty_line(&err).unwrap_or("failed"));
     }
     Ok(())
 }
@@ -252,8 +237,16 @@ pub fn create(
 /// Terminate a sync session. Best-effort: a session that's already gone (never
 /// created, or removed out of band) is not an error.
 pub fn terminate(session: &str) -> Result<()> {
+    terminate_session("sync", session)
+}
+
+/// `mutagen <kind> terminate <session>` — the shared body behind both
+/// `terminate` and `forward_terminate`. One copy so the set of "already gone"
+/// phrases mutagen emits stays in a single place; `kind` is `sync` or
+/// `forward`.
+fn terminate_session(kind: &str, session: &str) -> Result<()> {
     let out = Command::new(mutagen_bin())
-        .args(["sync", "terminate", session])
+        .args([kind, "terminate", session])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -268,13 +261,9 @@ pub fn terminate(session: &str) -> Result<()> {
         {
             return Ok(());
         }
-        bail!("mutagen sync terminate: {}", first_line(&err));
+        bail!("mutagen {kind} terminate: {}", ui::first_nonempty_line(&err).unwrap_or("failed"));
     }
     Ok(())
-}
-
-fn first_line(s: &str) -> &str {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed").trim()
 }
 
 /// Flush a sync session so the far side has the latest edits. Best-effort by
@@ -292,8 +281,7 @@ pub fn flush(session: &str) -> Result<()> {
         .with_context(|| format!("spawn {}", mutagen_bin()))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let reason = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("flush failed");
-        bail!("{}", reason.trim());
+        bail!("{}", ui::first_nonempty_line(&err).unwrap_or("flush failed"));
     }
     Ok(())
 }

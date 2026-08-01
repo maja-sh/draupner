@@ -7,11 +7,37 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// `git -C <path>` with no other args set yet.
-fn git(path: &Path) -> Command {
+/// `git -C <path>` with no other args set yet. Public because ops that own their
+/// own git *policy* (new's `worktree add`, teardown's removal ladder) still route
+/// the invocation itself through here — a `-C` dropped at one of those call sites
+/// runs the command against the wrong repo.
+pub fn git(path: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(path);
     c
+}
+
+/// Run `c` and report whether it exited cleanly; output discarded. For the
+/// probe-shaped commands whose exit code *is* the answer.
+fn succeeds(c: &mut Command) -> bool {
+    c.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Run `c` and return its stdout as lines. Empty on any failure — a non-zero
+/// exit, a missing git, a path that isn't a repo — so callers reporting "nothing
+/// found" never have to distinguish those from a genuinely empty answer.
+pub fn stdout_lines(c: &mut Command) -> Vec<String> {
+    match c.output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Every worktree git has registered for `repo`, as `(path, branch)`. `branch` is
@@ -61,13 +87,7 @@ fn parse_worktree_list(text: &str) -> Vec<(PathBuf, Option<String>)> {
 /// Used before rendering a template to a `dest` so we never silently dirty a
 /// committed file.
 pub fn is_tracked(wt: &Path, rel: &str) -> bool {
-    git(wt)
-        .args(["ls-files", "--error-unmatch", rel])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    succeeds(git(wt).args(["ls-files", "--error-unmatch", rel]))
 }
 
 /// Append `entries` to the worktree's git exclude file (`info/exclude`),
@@ -120,13 +140,7 @@ pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
 /// `git status --porcelain` lines. Empty on a clean tree, on error, or when the
 /// path isn't a git repo.
 pub fn dirty_files(wt: &Path) -> Vec<String> {
-    match git(wt).args(["status", "--porcelain"]).output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
+    stdout_lines(git(wt).args(["status", "--porcelain"]))
 }
 
 /// Whether the worktree has uncommitted changes (tracked or untracked).
@@ -137,13 +151,7 @@ pub fn is_dirty(wt: &Path) -> bool {
 /// Whether `refspec` resolves in the repo (`rev-parse --verify`). Accepts full
 /// refs (`refs/heads/main`) or short names (`origin/main`).
 pub fn ref_exists(path: &Path, refspec: &str) -> bool {
-    git(path)
-        .args(["rev-parse", "--verify", "--quiet", refspec])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    succeeds(git(path).args(["rev-parse", "--verify", "--quiet", refspec]))
 }
 
 /// The repo's default branch as a start-point name (`origin/main`, `main`, …),

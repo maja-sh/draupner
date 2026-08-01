@@ -26,9 +26,27 @@ pub fn sanitize_branch(b: &str) -> String {
     b.replace('/', "-")
 }
 
+/// The per-worktree name `ws-<sanitized-branch>-<repo>`, shared by every
+/// namespace ws keys off a worktree (mutagen sessions, host-process pid/log
+/// files). They are documented as reading alike and one of them is a user-facing
+/// contract, so the string is built once here rather than agreed on by
+/// convention. See [`crate::mutagen::session_name`] and
+/// [`crate::supervise::proc_name`].
+pub fn ws_name(branch: &str, repo: &str) -> String {
+    format!("ws-{}-{}", sanitize_branch(branch), repo)
+}
+
 /// `<root>/.worktrees/<sanitized-branch>/`
 pub fn task_dir(root: &Path, branch: &str) -> PathBuf {
     root.join(".worktrees").join(sanitize_branch(branch))
+}
+
+/// The canonical `<root>/.worktrees` dir — the prefix [`task_repo_under`]
+/// expects. Canonicalized (falling back to the raw path) so a path derived from a
+/// canonical cwd strips against it; callers that compare a real filesystem path
+/// to the worktrees tree should go through here rather than joining the literal.
+pub fn worktrees_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).join(".worktrees")
 }
 
 /// `<root>/.worktrees/<sanitized-branch>/<repo>/` if the worktree exists on disk.
@@ -82,8 +100,7 @@ pub struct Worktree {
 ///
 /// The main checkout is excluded — it isn't a task worktree.
 pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let worktrees_root = canonical_root.join(".worktrees");
+    let worktrees_root = worktrees_root(root);
 
     let mut out = Vec::new();
     for entry in &cfg.repos {

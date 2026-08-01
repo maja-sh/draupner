@@ -95,7 +95,7 @@ pub fn write_override(
     site: &Site,
     path: &str,
     services: &BTreeMap<String, ServiceConfig>,
-    all_services: &std::collections::BTreeSet<String>,
+    all_services: &BTreeSet<String>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
     join_ws_net: bool,
@@ -147,7 +147,7 @@ struct ServicePlan {
 /// them, so dropping the publish would strand them).
 fn render_override(
     services: &BTreeMap<String, ServiceConfig>,
-    all_services: &std::collections::BTreeSet<String>,
+    all_services: &BTreeSet<String>,
     port_map: &BTreeMap<String, u16>,
     env: &[(String, String)],
     join_ws_net: bool,
@@ -287,8 +287,7 @@ fn yaml_dquote(v: &str) -> String {
 /// fall back to the declared `services`. `worktree` is the path *at the site*
 /// (the local worktree, or the server-side synced dir).
 pub fn derive(site: &Site, runtime: &str, worktree: &str) -> Result<Derived> {
-    let json = compose_config_json(site, runtime, worktree, false)?;
-    Ok(Derived { services: parse(&json)?, names: service_names(&json)? })
+    parse(&compose_config_json(site, runtime, worktree, false)?)
 }
 
 /// What a `compose config` derive yields: the port-bearing services `ws` models,
@@ -298,13 +297,8 @@ pub fn derive(site: &Site, runtime: &str, worktree: &str) -> Result<Derived> {
 /// usually exactly where the application code runs.
 pub struct Derived {
     pub services: BTreeMap<String, ServiceConfig>,
-    pub names: std::collections::BTreeSet<String>,
-}
-
-/// Every service name in `compose config` output, ports or not.
-fn service_names(json: &str) -> Result<std::collections::BTreeSet<String>> {
-    let cfg: ComposeConfig = serde_json::from_str(json).context("parse compose config JSON")?;
-    Ok(cfg.services.keys().cloned().collect())
+    /// Every service name in `compose config` output, ports or not.
+    pub names: BTreeSet<String>,
 }
 
 /// Run `<runtime> compose config --format json` in `worktree` at `site` and
@@ -372,21 +366,22 @@ struct ComposePort {
     protocol: Option<String>,
 }
 
-/// Parse `compose config --format json` output into derived services.
-fn parse(json: &str) -> Result<BTreeMap<String, ServiceConfig>> {
+/// Parse `compose config --format json` output into derived services plus the
+/// full set of compose service names.
+fn parse(json: &str) -> Result<Derived> {
     let cfg: ComposeConfig = serde_json::from_str(json).context("parse compose config JSON")?;
-    let mut out = BTreeMap::new();
+    let mut services = BTreeMap::new();
     for (name, svc) in &cfg.services {
-        derive_service(name, svc, &mut out);
+        derive_service(name, svc, &mut services);
     }
-    Ok(out)
+    Ok(Derived { services, names: cfg.services.keys().cloned().collect() })
 }
 
 /// Expand one compose service into its derived `ServiceConfig` entries.
 fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, ServiceConfig>) {
     // TCP target ports, deduped and ordered (BTreeSet), split into HTTP-ish
     // (80/443) and the rest. UDP and anything without a numeric target is ignored.
-    let ports: std::collections::BTreeSet<u16> = svc
+    let ports: BTreeSet<u16> = svc
         .ports
         .iter()
         .filter(|p| p.protocol.as_deref().unwrap_or("tcp") == "tcp")
@@ -538,7 +533,7 @@ mod tests {
 
     #[test]
     fn derives_http_tcp_and_multiport() {
-        let s = parse(SAMPLE).unwrap();
+        let s = parse(SAMPLE).unwrap().services;
 
         // web (80+443) → one HTTP entry dialing 80, subdomain = service name.
         let web = &s["web"];
@@ -576,7 +571,7 @@ mod tests {
     #[test]
     fn service_with_only_443_routes_http() {
         let json = r#"{"services":{"web":{"ports":[{"target":443,"protocol":"tcp"}]}}}"#;
-        let s = parse(json).unwrap();
+        let s = parse(json).unwrap().services;
         assert!(matches!(s["web"].http, Some(HttpDecl::Subdomain(_))));
         assert_eq!(s["web"].port, 443);
     }
@@ -586,7 +581,7 @@ mod tests {
         // web on 80 plus a 9000 metrics port → HTTP `web` + TCP `web_9000`.
         let json = r#"{"services":{"web":{"ports":[
             {"target":80,"protocol":"tcp"},{"target":9000,"protocol":"tcp"}]}}}"#;
-        let s = parse(json).unwrap();
+        let s = parse(json).unwrap().services;
         assert_eq!(s["web"].port, 80);
         assert!(matches!(s["web"].http, Some(HttpDecl::Subdomain(_))));
         assert_eq!(s["web_9000"].port, 9000);
@@ -596,12 +591,12 @@ mod tests {
     #[test]
     fn udp_ports_are_ignored() {
         let json = r#"{"services":{"dns":{"ports":[{"target":53,"protocol":"udp"}]}}}"#;
-        assert!(parse(json).unwrap().is_empty());
+        assert!(parse(json).unwrap().services.is_empty());
     }
 
     #[test]
     fn empty_services_parse_to_empty() {
-        assert!(parse(r#"{"name":"x"}"#).unwrap().is_empty());
+        assert!(parse(r#"{"name":"x"}"#).unwrap().services.is_empty());
     }
 
     fn svc(http: Option<HttpDecl>, port: u16) -> ServiceConfig {

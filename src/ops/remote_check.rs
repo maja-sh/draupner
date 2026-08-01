@@ -20,16 +20,16 @@ pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
     // worktree base rather than inheriting the configured `workspace_path` (which
     // describes the configured server). `config::load` already rejected an unsafe
     // configured connection; a `--host` value is fresh input, so validate it here.
-    let (connection, workspace_path) = match host {
-        Some(h) => (Some(h.to_string()), config::default_worktree_base(&ws.root)),
-        None => match &cfg.remote {
-            Some(r) => (Some(r.connection.clone()), r.worktree_base(&ws.root)),
-            None => (None, String::new()),
-        },
+    let target = match host {
+        Some(h) => Some((h.to_string(), config::default_worktree_base(&ws.root))),
+        None => cfg
+            .remote
+            .as_ref()
+            .map(|r| (r.connection.clone(), r.worktree_base(&ws.root))),
     };
 
-    match connection {
-        Some(conn) => {
+    match target {
+        Some((conn, workspace_path)) => {
             crate::remote::ensure_connection_safe(&conn)
                 .map_err(|e| super::preflight(e.to_string()))?;
             check_remote(&conn, &workspace_path, verbose)
