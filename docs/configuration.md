@@ -33,9 +33,16 @@ A repo entry is either a bare name or an object:
 }
 ```
 
-A bare name is convention-only — it gets worktrees and nothing else: no service
-derivation, no port allocation, no injected environment. Anything beyond
-"make me a worktree" needs the object form.
+A bare name means "this repo, with no overrides" — it behaves exactly like the
+object form with only a `name`. If the repo has a compose file it still gets
+service derivation, port allocation, its own compose project, and the injected
+environment; what it doesn't have is anywhere to put your own `scripts`, `env`,
+`templates` or `copy`. Use the object form when you need those.
+
+(Earlier versions skipped that machinery for a bare name, which meant a
+bare-name repo with a compose file shared one compose project across every
+worktree — so `ws rm` on one branch could tear down another's containers and
+volumes.)
 
 ### Container or host
 
