@@ -28,9 +28,9 @@ what's missing.
 | `curl` | `curl` | fetching mutagen |
 | `sshd` | `openssh-server` | the transport for all of the above |
 
-`timeout` and the rest of coreutils ship with Debian. Host processes
-(`kind: host` repos) also need a `systemd --user` session — that's the linger
-step at the bottom of the script.
+`timeout` and the rest of coreutils ship with Debian. `kind: host` repos need
+nothing further: `ws` supervises those as its own detached, PID-tracked
+processes rather than as service-manager units.
 
 Two pieces of configuration matter as much as the packages, and the script
 handles both:
