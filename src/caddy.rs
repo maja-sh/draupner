@@ -214,8 +214,25 @@ pub fn set_admin_port(port: u16) -> Result<()> {
 /// A route's stable admin `@id` for a worktree service. Includes the repo so
 /// two repos in one branch that expose a same-named service (e.g. both `web`)
 /// don't collide on one `@id` and delete each other's route.
+///
+/// Every part goes through `id_part`: the id is the only caller-supplied piece
+/// of the admin API path, and `repo`/`service` come from `.ws.json`.
 pub fn route_id(branch_sanitized: &str, repo: &str, service: &str) -> String {
-    format!("ws-{branch_sanitized}-{repo}-{service}")
+    format!("ws-{}-{}-{}", id_part(branch_sanitized), id_part(repo), id_part(service))
+}
+
+/// Collapse one `@id` component to characters that are safe in a single URL path
+/// segment, mapping the rest to `-` (the separator `sanitize_branch` and
+/// `inject::dns_label` already use, so a dotted name keeps agreeing with the
+/// hostname it's routed under).
+///
+/// The id is interpolated into the admin path as `/id/<id>/` and `.ws.json` isn't
+/// gitignored, so a cloned repo can name a service `/../../config`: curl removes
+/// dot segments *before* sending, which turns one route delete into
+/// `DELETE /config/` — wiping the running Caddy config, every other workspace's
+/// live routes included. One segment, no slashes, nothing to normalize away.
+fn id_part(s: &str) -> String {
+    s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "-")
 }
 
 /// A worktree HTTP service's Caddy route: its `@id`, the hostname Caddy matches,
@@ -966,6 +983,22 @@ mod tests {
         assert_eq!(route_id("feat-foo", "api", "web"), "ws-feat-foo-api-web");
         // Same service name in two repos → distinct ids (no cross-repo clobber).
         assert_ne!(route_id("feat-foo", "api", "web"), route_id("feat-foo", "ui", "web"));
+        // Ordinary names survive untouched, including the underscores and digits
+        // compose service names routinely carry.
+        assert_eq!(route_id("release-1.2", "web_api", "app2"), "ws-release-1-2-web_api-app2");
+    }
+
+    #[test]
+    fn route_id_cannot_escape_its_admin_path_segment() {
+        // A cloned `.ws.json` names a service `/../../config`: interpolated raw,
+        // `/id/<id>/` becomes a path curl normalizes down to `/config/`, so the
+        // best-effort route delete would wipe the whole running Caddy config.
+        let id = route_id("feat-foo", "api", "/../../config");
+        assert!(!id.contains('/'), "id must stay one path segment: {id}");
+        assert!(!id.contains(".."), "id must carry no dot segments: {id}");
+        // Same for a hostile repo name, the other `.ws.json`-controlled part.
+        let id = route_id("feat-foo", "../../..", "web");
+        assert!(!id.contains('/') && !id.contains(".."), "{id}");
     }
 
     #[test]

@@ -190,6 +190,100 @@ fn tracked_template_dest_is_refused() {
 }
 
 #[test]
+fn template_dest_escaping_the_worktree_is_refused() {
+    // `.ws.json` isn't gitignored, so it arrives with a clone: a hostile
+    // `templates` entry used to write attacker-chosen bytes anywhere the user can
+    // write on `ws new`/`ws up`, with no `scripts` entry declared. Both spellings
+    // of the escape are covered — `..` walks out of the worktree, and an absolute
+    // `dest` discards the worktree entirely in `Path::join`.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(f.path().join("api/payload.tmpl"), "pwned\n").unwrap();
+    f.git("api", &["add", "payload.tmpl"]);
+    f.git("api", &["commit", "-q", "-m", "add payload"]);
+
+    // `..` — lands in the main checkout / workspace root.
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api",
+            "templates":[{"src":"payload.tmpl","dest":"../../../pwned.txt"}],
+            "scripts":{"up":"echo UP"}}]}"#,
+    );
+    let out = f.run(&["new", "api", "feat/foo"]);
+    assert_eq!(out.status.code(), Some(1), "a traversing template dest must fail");
+    let err = stderr(&out);
+    assert!(err.contains("must not contain `..`"), "expected the traversal refusal:\n{err}");
+    assert!(!f.path().join("pwned.txt").exists(), "the escaping write must not happen");
+
+    // Absolute dest — same refusal, different spelling.
+    let abs = f.path().join("abs-pwned.txt");
+    f.write_ws_json(&format!(
+        r#"{{"repos":[{{"name":"api",
+            "templates":[{{"src":"payload.tmpl","dest":"{}"}}],
+            "scripts":{{"up":"echo UP"}}}}]}}"#,
+        abs.display()
+    ));
+    let out = f.run(&["new", "api", "feat/bar"]);
+    assert_eq!(out.status.code(), Some(1), "an absolute template dest must fail");
+    let err = stderr(&out);
+    assert!(err.contains("must be a path inside the worktree"), "expected the absolute-path refusal:\n{err}");
+    assert!(!abs.exists(), "the escaping write must not happen");
+}
+
+#[test]
+fn template_src_escaping_the_worktree_is_refused() {
+    // The read side of the same hole: an escaping `src` pulls a file from outside
+    // the worktree (an SSH key, a dotfile) into a dest the repo then syncs.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::write(f.path().join("secret.txt"), "top secret\n").unwrap();
+
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api",
+            "templates":[{"src":"../../../secret.txt","dest":"leak.txt"}],
+            "scripts":{"up":"echo UP"}}]}"#,
+    );
+    let out = f.run(&["new", "api", "feat/foo"]);
+    assert_eq!(out.status.code(), Some(1), "a traversing template src must fail");
+    let err = stderr(&out);
+    assert!(err.contains("must not contain `..`"), "expected the traversal refusal:\n{err}");
+    assert!(
+        !f.path().join(".worktrees/feat-foo/api/leak.txt").exists(),
+        "nothing should have been read or written"
+    );
+}
+
+#[test]
+fn a_nested_template_dest_still_renders() {
+    // The guard must not cost ordinary config: a template rendered into a
+    // subdirectory of the worktree is the common shape (`config/nginx.conf`), and
+    // it still renders, tokens and all.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    std::fs::create_dir_all(f.path().join("api/deploy")).unwrap();
+    std::fs::write(
+        f.path().join("api/deploy/svc.conf.tmpl"),
+        "port ${WS_PORT_mysql};\n",
+    )
+    .unwrap();
+    f.git("api", &["add", "deploy/svc.conf.tmpl"]);
+    f.git("api", &["commit", "-q", "-m", "add nested template"]);
+
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api",
+            "services":{"mysql":{"port":3306}},
+            "templates":[{"src":"deploy/svc.conf.tmpl","dest":"config/generated/svc.conf"}],
+            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/foo"]);
+    let port = port_in(&stderr(&f.run_ok(&["up", "feat/foo"])));
+
+    let rendered =
+        std::fs::read_to_string(f.path().join(".worktrees/feat-foo/api/config/generated/svc.conf"))
+            .expect("nested dest rendered");
+    assert!(rendered.contains(&format!("port {port};")), "WS_PORT should render:\n{rendered}");
+}
+
+#[test]
 fn exec_local_gets_ws_port_env() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
