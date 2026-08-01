@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -183,21 +183,14 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    // One broken entry (e.g. dangling symlink) shouldn't abort the whole scan.
-    for entry in fs::read_dir(root).context("read cwd")?.filter_map(Result::ok) {
-        let path = entry.path();
-        // Symlinks can point outside the workspace and confuse later ops.
-        let Ok(meta) = entry.file_type() else { continue };
-        if meta.is_symlink() || !meta.is_dir() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            // Non-UTF-8 names would round-trip lossily through `.ws.json` and break later worktree lookups.
-            tracing::warn!(
-                path = %entry.path().display(),
-                "skipping non-UTF-8 directory name in workspace scan"
-            );
+    // Shared walk skips symlinks/non-dirs and swallows per-entry errors; only the dotfile skip and `is_git_repo` filter are init-specific.
+    for (name, path) in crate::workspace::list_child_dirs(root) {
+        let Some(name) = name else {
+            // Non-UTF-8 dir names would round-trip lossily through `.ws.json` and break later worktree lookups.
+            crate::ui::note(&format!(
+                "skipping non-UTF-8 directory name: {}",
+                path.display()
+            ));
             continue;
         };
         if name.starts_with('.') {
