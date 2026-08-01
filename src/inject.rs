@@ -31,7 +31,7 @@ use crate::compose;
 use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
 use crate::git;
 use crate::ports;
-use crate::remote::{self, Site};
+use crate::remote::Site;
 
 /// The lifecycle phase an event belongs to. Decides port allocation and
 /// template rendering so callers state intent, not mechanics.
@@ -286,8 +286,11 @@ fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
 }
 
 /// The worktree path at the execution site: the local path for a local
-/// workspace, or the server-side synced dir (`<workspace_path>/<task>/<repo>`)
-/// for a remote one.
+/// workspace, or the server-side synced dir (`<workspace_path>/<task>/<repo>`,
+/// absolute — the server dir feeds `COMPOSE_FILE`, which must be absolute or the
+/// `cd`'d up script would double-resolve it) for a remote one.
+///
+/// `Site::worktree_at` owns that derivation; this is the name `prepare` reads by.
 fn site_worktree_path(
     cfg: &WsConfig,
     site: &Site,
@@ -296,14 +299,7 @@ fn site_worktree_path(
     branch_sanitized: &str,
     repo: &str,
 ) -> String {
-    match &cfg.remote {
-        None => worktree.to_string_lossy().into_owned(),
-        // Absolute (home-resolved): the server dir feeds `COMPOSE_FILE`, which must
-        // be absolute or the `cd`'d up script would double-resolve it.
-        Some(r) => {
-            remote::worktree_path(&site.abs_base(&r.worktree_base(root)), branch_sanitized, repo)
-        }
-    }
+    site.worktree_at(cfg.remote.as_ref(), root, worktree, branch_sanitized, repo)
 }
 
 /// The base compose file(s) as paths *at the site*: `compose::base_files` finds
@@ -331,10 +327,12 @@ pub(crate) fn override_path_at(
 ) -> String {
     match &cfg.remote {
         None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
-        // Absolute (home-resolved), same reason as `site_worktree_path`.
+        // Absolute (home-resolved), same reason as `site_worktree_path` — and the
+        // same owner, so the override can't land beside a *different* directory
+        // than the worktree it overrides.
         Some(r) => format!(
             "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
-            site.abs_base(&r.worktree_base(root)).trim_end_matches('/')
+            site.root_at(Some(r), root).trim_end_matches('/')
         ),
     }
 }

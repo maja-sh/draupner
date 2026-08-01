@@ -107,9 +107,41 @@ fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run a repo's declared lifecycle `cmd` for `event` on the remote server: flush
-/// the worktree's mutagen sync so the server sees the latest files, dispatch the
-/// command over SSH in the synced worktree, and map the outcome to a `Result`.
+/// The preamble every remote dispatch shares: flush the worktree's mutagen sync
+/// so the server sees the latest files, resolve the workspace root *as the server
+/// sees it*, and push the workspace-root `.ws-hooks/` there. Returns that root
+/// (the server's `WS_WORKSPACE_ROOT`).
+///
+/// The caller renders its own failure — the hook dispatch fails the whole op while
+/// the host-process launch fails one repo's step — so this returns a plain error
+/// rather than deciding for them.
+pub(crate) fn prepare_remote_dispatch(
+    site: &crate::remote::Site,
+    r: &crate::config::RemoteConfig,
+    root: &std::path::Path,
+    branch: &str,
+    repo: &str,
+) -> anyhow::Result<String> {
+    // Best-effort: the session may not exist yet, or mutagen may be absent (see
+    // `ws exec`) — a failed flush shouldn't block the dispatch.
+    let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
+    // Absolute, home-resolved base — as `ws list`/`status` already use. A relative
+    // base makes `cd` work only by luck (SSH lands in `$HOME`) and, worse, leaves
+    // `WS_WORKSPACE_ROOT` relative, so a hook resolving `$WS_WORKSPACE_ROOT/…` from
+    // the worktree cwd lands in the wrong place.
+    let base = site.root_at(Some(r), root);
+    // Ship the workspace-root `.ws-hooks/` to the server so a hook here can call
+    // `$WS_WORKSPACE_ROOT/.ws-hooks/…` — scripts that live outside the repos (and
+    // so never ride the worktree sync). Before dispatch, and fatal: a hook that
+    // can't find its script would fail anyway, with a muddier error.
+    crate::remote::push_ws_hooks(site, root, &base)?;
+    Ok(base)
+}
+
+/// Run a repo's declared lifecycle `cmd` for `event` on the remote server: the
+/// shared preamble ([`prepare_remote_dispatch`] — flush, resolve the server root,
+/// push `.ws-hooks/`), then dispatch the command over SSH in the synced worktree
+/// and map the outcome to a `Result`.
 /// Shared by up/down (hooksweep), post-create (new), and down/post-remove
 /// (teardown) so the flush → dispatch → status-mapping spine lives in one place;
 /// callers keep only their own skip decision, step UI, and bookkeeping.
@@ -125,21 +157,8 @@ pub(crate) fn run_remote_event(
     cmd: &str,
     extra_env: &[(String, String)],
 ) -> anyhow::Result<()> {
-    // Best-effort: the session may not exist yet, or mutagen may be absent (see
-    // `ws exec`) — a failed flush shouldn't block the dispatch.
-    let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-    // Absolute, home-resolved base — as `ws list`/`status` already use. A relative
-    // base makes `cd` work only by luck (SSH lands in `$HOME`) and, worse, leaves
-    // `WS_WORKSPACE_ROOT` relative, so a hook resolving `$WS_WORKSPACE_ROOT/…` from
-    // the worktree cwd lands in the wrong place.
-    let base = site.abs_base(&r.worktree_base(root));
-    // Ship the workspace-root `.ws-hooks/` to the server so a hook here can call
-    // `$WS_WORKSPACE_ROOT/.ws-hooks/…` — scripts that live outside the repos (and
-    // so never ride the worktree sync). Before dispatch, and fatal: a hook that
-    // can't find its script would fail anyway, with a muddier error.
-    if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
-        return Err(op_failure(format!("{event} on {}: {e}", r.connection)));
-    }
+    let base = prepare_remote_dispatch(site, r, root, branch, repo)
+        .map_err(|e| op_failure(format!("{event} on {}: {e}", r.connection)))?;
     match crate::remote::run_event(&r.connection, &base, sanitized, repo, event, cmd, extra_env) {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(op_failure(format!("{event} script exited {}", s.code().unwrap_or(-1)))),

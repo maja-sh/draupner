@@ -57,10 +57,10 @@ pub fn run(
     // Fail here if the worktree doesn't exist — before any SSH. `ws new` always
     // creates the local `.worktrees/<task>/<repo>` (even for a remote workspace),
     // so a valid `--branch` always has a local dir; a bogus one gets a clean error
-    // instead of an SSH round-trip to a `cd` into a nonexistent path.
-    if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
-        return Err(super::preflight(format!("no worktree for `{repo}` in task `{task}`")));
-    }
+    // instead of an SSH round-trip to a `cd` into a nonexistent path. Resolved
+    // once here and carried: injection and the local run want the same path.
+    let wt = workspace::worktree_for(&ws.root, &task, &repo)
+        .ok_or_else(|| super::preflight(format!("no worktree for `{repo}` in task `{task}`")))?;
 
     let remote = if local { None } else { cfg.remote.as_ref() };
 
@@ -73,33 +73,27 @@ pub fn run(
     // location-agnostic — this keeps `ws exec` from pre-dialing the server (its
     // deliberate no-pre-check behavior) yet still surfaces the recorded ports.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
-    let wt = workspace::task_dir(&ws.root, &task).join(&repo);
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
     let mut env: Vec<(&str, &str)> = vec![("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
     env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     let status = match remote {
         Some(r) => exec_remote(r, &ws.root, &task, &repo, no_flush, &env, command),
-        None => exec_local(&ws.root, &task, &repo, &env, program, args),
+        None => exec_local(&wt, &env, program, args),
     }?;
 
     propagate(status)
 }
 
-/// Run in the local worktree at `<root>/.worktrees/<task>/<repo>`.
+/// Run `program` in the already-resolved local worktree.
 fn exec_local(
-    root: &Path,
-    task: &str,
-    repo: &str,
+    wt: &Path,
     env: &[(&str, &str)],
     program: &str,
     args: &[String],
 ) -> Result<ExitStatus> {
-    let wt = workspace::worktree_for(root, task, repo).ok_or_else(|| {
-        super::preflight(format!("no worktree for `{repo}` in task `{task}`"))
-    })?;
     let mut c = Command::new(program);
-    c.args(args).current_dir(&wt);
+    c.args(args).current_dir(wt);
     for (k, v) in env {
         c.env(k, v);
     }
@@ -126,6 +120,16 @@ fn exec_remote(
         }
     }
 
+    // Deliberately NOT `Site::worktree_at` — this is the one derivation of the
+    // server-side worktree that stays *as configured*, relative base and all
+    // (`cd workspace/feat-foo/api`, resolved against the SSH login home). The
+    // shared owner home-resolves the base to an absolute path, which needs a
+    // resolved `Site`, which means dialing the server for its `$HOME` — the
+    // pre-check `ws exec` deliberately doesn't do (see the injection site above).
+    // Nothing here needs absoluteness either: the `cd` is the first thing in the
+    // script and nothing resolves a path against a different cwd afterwards, unlike
+    // the `COMPOSE_FILE`/`WS_WORKSPACE_ROOT` consumers that forced the other three
+    // absolute. `ws_exec::remote_workspace_dispatches_over_ssh` pins the string.
     let dir = remote::worktree_path(&r.worktree_base(ws_root), task, repo);
     let script = remote::remote_script(&dir, env, command);
     // Allocate a remote pty only when both stdin and stdout are terminals.
