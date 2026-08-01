@@ -128,8 +128,8 @@ note() { printf '  %s\n' "$*"; }
 # ---------------------------------------------------------------------------
 # `ws` drives this host over SSH; everything checked below is something it
 # actually invokes. `timeout` and the rest of coreutils ship with Debian already.
-# Host processes (`kind: host` repos) additionally need a `systemd --user`
-# session, which the linger step at the bottom of this script sets up.
+# `kind: host` repos need nothing beyond this list — `ws` supervises those as its
+# own detached, PID-tracked processes, not as service-manager units.
 
 # Report whether $1 is present; return non-zero so the caller can collect it.
 # /usr/sbin and /sbin hold the daemons but aren't on a normal user's PATH.
@@ -488,8 +488,12 @@ unprivileged_443() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Linger — keep `systemd --user` host units alive past logout
+# 4. Linger — give the login-less SSH sessions a `systemd --user` manager
 # ---------------------------------------------------------------------------
+# Not for host processes (`ws` supervises those itself, no service manager
+# involved) — for the rootless podman API socket below, which *is* a
+# `systemd --user` unit. Without lingering, that user manager only exists while
+# a session is open, and `ws` connects over non-login SSH.
 enable_linger() {
   # `id -un`, not `$USER`: the latter is just an env var, so a stray value would
   # aim this script's `sudo` at somebody else's account.
@@ -500,7 +504,7 @@ enable_linger() {
     note "already enabled."
   else
     sudo loginctl enable-linger "$user"
-    note "enabled — \`systemd --user\` units now survive logout."
+    note "enabled — the \`systemd --user\` manager now runs without a session."
   fi
 }
 
