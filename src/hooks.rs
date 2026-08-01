@@ -4,8 +4,14 @@
 //! container repo that declares nothing.
 //!
 //! `resolve` answers "what command does this (repo, event) run"; `run_command` /
-//! `capture_command` dispatch it. Streamed output goes through `ui::hook_line` so
-//! it lands with the correct gutter/indent. See `spec-output-formatting.md`.
+//! `capture_command` run it **here on this machine**. Streamed output goes through
+//! `ui::hook_line` so it lands with the correct gutter/indent. See
+//! `spec-output-formatting.md`.
+//!
+//! Ops don't call the two runners directly: `lifecycle::Ctx` does, as the local
+//! arm of the one dispatcher that decides between here and the server (its remote
+//! arm lands in `remote::run_event`, which shares this module's `base_env` and
+//! `stream_and_wait` so both sides keep the same contract and the same output).
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};

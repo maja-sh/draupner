@@ -6,6 +6,7 @@ mod config;
 mod git;
 mod hooks;
 mod inject;
+mod lifecycle;
 mod mutagen;
 mod obs;
 mod ops;
