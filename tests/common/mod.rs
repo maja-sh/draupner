@@ -113,6 +113,11 @@ fn write_exec(path: &Path, contents: &str) {
 pub struct WorkspaceFixture {
     pub root: TempDir,
     admin: AdminStub,
+    /// Every `add_hook` so far, as `(repo, event, script path)`. Kept so the
+    /// `scripts` entries can be re-applied after any `.ws.json` write — tests add
+    /// hooks and write their config in either order, and a raw `write_ws_json`
+    /// would otherwise drop the entries added before it.
+    hooks: std::cell::RefCell<Vec<(String, String, String)>>,
 }
 
 impl WorkspaceFixture {
@@ -121,7 +126,7 @@ impl WorkspaceFixture {
             .prefix("wsfix-")
             .tempdir()
             .expect("tempdir");
-        Self { root, admin: AdminStub::start() }
+        Self { root, admin: AdminStub::start(), hooks: Default::default() }
     }
 
     /// Create a workspace with the given repos and a `.ws.json` referencing them.
@@ -178,8 +183,11 @@ impl WorkspaceFixture {
     }
 
     /// Write `.ws.json` in the fixture root with the given raw JSON content.
+    /// Any hooks already registered via `add_hook` are re-applied on top, so the
+    /// two helpers can be called in either order.
     pub fn write_ws_json(&self, json: &str) {
         std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
+        self.apply_hook_scripts();
     }
 
     /// Executable stub at `<root>/<name>` with the given bash `body`. Use for a
@@ -199,13 +207,67 @@ impl WorkspaceFixture {
         self.stub(name, "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"")
     }
 
-    /// Write a hook script under `.ws-hooks/<repo>/<event>` and make it executable.
-    /// `body` is the script body (bash commands); the shebang is prepended.
+    /// Declare a lifecycle script for `(repo, event)`: `body` (bash commands; the
+    /// shebang is prepended) is written executable to `.ws-hooks/<repo>-<event>.sh`
+    /// and the repo's `scripts` block in `.ws.json` is pointed at it.
+    ///
+    /// A file rather than an inline `scripts` string so a multi-line body needs no
+    /// JSON escaping; `.ws-hooks/…` is anchored to `$WS_WORKSPACE_ROOT` by `ws`, so
+    /// it resolves from the worktree cwd a script runs in.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
-        let dir = self.path().join(".ws-hooks").join(repo);
-        std::fs::create_dir_all(&dir).expect("create hook dir");
-        let path = dir.join(event);
-        write_exec(&path, &format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"));
+        let dir = self.path().join(".ws-hooks");
+        std::fs::create_dir_all(&dir).expect("create .ws-hooks");
+        let rel = format!(".ws-hooks/{repo}-{event}.sh");
+        write_exec(
+            &self.path().join(&rel),
+            &format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
+        );
+        self.hooks.borrow_mut().push((repo.to_string(), event.to_string(), rel));
+        self.apply_hook_scripts();
+    }
+
+    /// Declare `cmd` inline as `(repo, event)`'s `scripts` entry — no script file
+    /// in between. Use when the test cares that `ws` is the shell's direct parent
+    /// (`$PPID`): a `scripts` entry naming a file forks a shell around it, an
+    /// inline one does not.
+    pub fn add_script(&self, repo: &str, event: &str, cmd: &str) {
+        self.hooks.borrow_mut().push((repo.to_string(), event.to_string(), cmd.to_string()));
+        self.apply_hook_scripts();
+    }
+
+    /// Merge every registered hook into `.ws.json` as a `scripts` entry, promoting
+    /// a bare-name repo (`"api"`) to an object entry as needed.
+    fn apply_hook_scripts(&self) {
+        let hooks = self.hooks.borrow();
+        if hooks.is_empty() {
+            return;
+        }
+        let path = self.path().join(".ws.json");
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{\"repos\":[]}".to_string());
+        let mut cfg: serde_json::Value = serde_json::from_str(&raw).expect("parse .ws.json");
+        let repos = cfg["repos"].as_array_mut().expect("repos array in .ws.json");
+        for (repo, event, script) in hooks.iter() {
+            let entry = match repos.iter_mut().position(|r| {
+                r.as_str() == Some(repo.as_str()) || r["name"].as_str() == Some(repo.as_str())
+            }) {
+                Some(i) => {
+                    if repos[i].is_string() {
+                        repos[i] = serde_json::json!({ "name": repo });
+                    }
+                    &mut repos[i]
+                }
+                None => {
+                    repos.push(serde_json::json!({ "name": repo }));
+                    repos.last_mut().unwrap()
+                }
+            };
+            if !entry["scripts"].is_object() {
+                entry["scripts"] = serde_json::json!({});
+            }
+            entry["scripts"][event] = serde_json::Value::String(script.clone());
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&cfg).expect("serialize .ws.json"))
+            .expect("write .ws.json");
     }
 
     /// Run `ws <args>` from the fixture root. Returns Output for inspection.

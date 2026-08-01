@@ -125,7 +125,9 @@ pub struct RepoConfig {
     /// Declarative lifecycle commands, keyed by event (`prepare`, `post-create`,
     /// `up`, `down`, `post-remove`, `status`). Each is one command or an array of
     /// commands, run via `sh -c` with the `WS_*` env forwarded. A value may be a
-    /// path to a script file for complex logic. Supersedes `.ws-hooks/`.
+    /// path to a script file for complex logic — a `.ws-hooks/…` path is anchored
+    /// to the workspace root (see [`anchor_ws_hooks`]) so it resolves wherever the
+    /// script runs.
     ///
     /// Most events run **where the stack lives** (the server, for a remote
     /// workspace). The exception is **`prepare`**: it runs on the **client** just
@@ -161,12 +163,6 @@ pub struct RepoConfig {
     /// The lane for dev certs/keys/env that aren't in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
-    /// Legacy per-event hook path overrides. Keys are event names. Values are
-    /// paths relative to the config dir. Deprecated by `scripts`; kept until the
-    /// execution path migrates. `BTreeMap` for the same rewrite determinism as
-    /// `scripts`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub hooks: BTreeMap<String, String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_excludes: Vec<String>,
@@ -343,9 +339,10 @@ impl WsConfig {
     }
 
     /// The command for `event`: the declared `scripts` entry, else the container
-    /// default (see [`default_script`]) when `is_container`. The bare-string
-    /// counterpart to [`crate::hooks::resolve`], for the paths that dispatch a
-    /// command rather than an `Action` (remote scripts over SSH, host supervision).
+    /// default (see [`default_script`]) when `is_container`. The same answer
+    /// [`crate::hooks::resolve`] gives, minus the removed-hook-file migration
+    /// check — for the paths that never ran a hook file anyway (remote scripts
+    /// over SSH, host supervision).
     pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
         self.script_command(repo, event)
             .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
@@ -388,9 +385,9 @@ impl RepoEntry {
 }
 
 /// The compose command a **container** repo falls back to for a lifecycle event
-/// when it declares no script and has no legacy `.ws-hooks` file. `ws` already
-/// knows the runtime and injects `COMPOSE_FILE` + `COMPOSE_PROJECT_NAME`, so the
-/// obvious command needs no restating in every project's config.
+/// when it declares no script. `ws` already knows the runtime and injects
+/// `COMPOSE_FILE` + `COMPOSE_PROJECT_NAME`, so the obvious command needs no
+/// restating in every project's config.
 ///
 /// `post-create` gets no default — there's no generic "set this project up" step.
 /// `post-remove` reaps the worktree's volumes: they're `ws`-namespaced artifacts
@@ -449,7 +446,9 @@ fn runtime_looks_safe(runtime: &str) -> bool {
 
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
-    let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
+    let path = root.join(".ws.json");
+    let cfg: WsConfig = read_json(&path)?;
+    refuse_legacy_hooks_field(&path)?;
     // Reject a dangerous SSH destination at the single choke point every op
     // shares. `.ws.json` is only convention-per-machine — it isn't gitignored, so
     // a cloned repo could carry a hostile `remote.connection` like
@@ -494,6 +493,51 @@ pub fn load(root: &Path) -> Result<WsConfig> {
     }
     Ok(cfg)
 }
+
+// --- Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. ------------
+//
+// `RepoConfig.hooks` was a per-event path override for the removed hook-file
+// mechanism. The field is gone, and `WsConfig` has no `deny_unknown_fields`, so a
+// leftover block would parse silently AND then be dropped the next time
+// `ws remote set` rewrites `.ws.json` — the user's config edited out from under
+// them. Name it at load instead. This never participates in resolution.
+
+/// Refuse a `.ws.json` still carrying a repo's `hooks` override map.
+fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    // Cheap gate: `".ws-hooks/…"` script values don't match (the quote before
+    // `hooks` is what a bare key has), so the reparse below is the rare path.
+    if !raw.contains("\"hooks\"") {
+        return Ok(());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(
+        raw.strip_prefix('\u{feff}').unwrap_or(&raw),
+    ) else {
+        return Ok(()); // Not our error to report — `read_json` already did.
+    };
+    let stale: Vec<&str> = v["repos"]
+        .as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .filter(|r| r["hooks"].is_object())
+                .filter_map(|r| r["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`hooks` in {} ({}) points at the hook-file mechanism removed in ws 0.6 — move each \
+         entry into that repo's `scripts` block instead. The contract changed with it: a script \
+         runs with cwd = the worktree (not the workspace root), and the worktree path arrives as \
+         $WS_WORKTREE (not $1).",
+        path.display(),
+        stale.join(", "),
+    )
+}
+// --- end migration shim ------------------------------------------------------
 
 /// The machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
 /// Holds cross-workspace state (the global config, the pinned Caddy boot config,
@@ -705,6 +749,23 @@ mod tests {
             );
             assert!(load(dir.path()).is_ok(), "expected {good:?} accepted");
         }
+    }
+
+    /// The migration shim (delete with it): a leftover `hooks` override map must
+    /// be named, not parsed away — `ws remote set` rewrites this file, so a
+    /// silently-ignored block would be silently deleted.
+    #[test]
+    fn load_refuses_a_leftover_hooks_override_map() {
+        let dir = tempfile::tempdir().unwrap();
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".ws-hooks/api/up"}}]}"#);
+        let err = load(dir.path()).err().expect("a `hooks` block must be refused").to_string();
+        assert!(err.contains("`hooks`") && err.contains("api"), "{err}");
+        assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
+
+        // A `.ws-hooks/…` *script* value is the supported lane — never mistaken
+        // for the removed field by the cheap substring gate.
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#);
+        assert!(load(dir.path()).is_ok());
     }
 
     #[test]

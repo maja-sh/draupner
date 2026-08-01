@@ -5,7 +5,11 @@ use std::path::{Path, PathBuf};
 use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
 use crate::compose;
 
-const HOOK_EVENTS: &[&str] = &["post-create", "up", "down", "post-remove", "status", "test"];
+/// The lifecycle events `ws` dispatches, in the order they happen. `ws init`
+/// scaffolds one starter script per repo per event; declaring one under a repo's
+/// `scripts` is what turns it on.
+const HOOK_EVENTS: &[&str] =
+    &["prepare", "post-create", "up", "down", "post-remove", "status"];
 
 pub fn run(
     refresh_schema: bool,
@@ -232,28 +236,49 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Scaffold a starter shell script per repo per event under `.ws-hooks/`, as
+/// `<repo>-<event>.sh`. They're inert until a repo's `scripts` block names one —
+/// `ws` runs only what `.ws.json` declares — so the template body says how.
+/// Written executable, because a `scripts` entry invokes the file directly.
 fn write_hook_templates(dir: &Path, repos: &[String]) -> Result<()> {
     fs::create_dir_all(dir)?;
     for repo in repos {
-        let repo_dir = dir.join(repo);
-        fs::create_dir_all(&repo_dir)?;
         for event in HOOK_EVENTS {
-            let path = repo_dir.join(event);
+            let path = dir.join(hook_template_name(repo, event));
             if !path.exists() {
                 fs::write(&path, hook_template(repo, event))?;
+                make_executable(&path)?;
             }
         }
     }
     Ok(())
 }
 
+fn hook_template_name(repo: &str, event: &str) -> String {
+    format!("{repo}-{event}.sh")
+}
+
 fn hook_template(repo: &str, event: &str) -> String {
+    let name = hook_template_name(repo, event);
     format!(
         "#!/usr/bin/env bash\n\
-         # {repo}/{event} — runs from workspace root, worktree path is $1.\n\
-         # `chmod +x` this file to enable it; ws skips non-executable hooks.\n\
+         # {repo}'s {event} script. Runs from the worktree; its path is $WS_WORKTREE.\n\
+         # Enable it by adding to {repo}'s `scripts` in .ws.json:\n\
+         #   \"{event}\": \".ws-hooks/{name}\"\n\
          set -euo pipefail\n\
          \n\
-         echo \"{repo}-{event}: worktree=$1\"\n"
+         echo \"{repo}-{event}: worktree=$WS_WORKTREE\"\n"
     )
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod +x {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }

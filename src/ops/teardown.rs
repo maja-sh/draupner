@@ -173,14 +173,21 @@ fn teardown_local(
     // Resource teardown hooks — best-effort. A failing hook is reported
     // but doesn't stop removal (the user wants the worktree gone).
     for event in ["down", "post-remove"] {
-        if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
-            let step = crate::ui::step(repo, &format!("{event} hook"));
-            match hooks::run_action(root, wt, repo, sanitized, event, &action, &extra_env) {
-                Ok(()) => step.ok(),
-                Err(e) => {
-                    step.fail(&format!("{e}"));
-                    *hook_failed = true;
-                }
+        let cmd = match hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => continue,
+            Err(e) => {
+                crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
+                *hook_failed = true;
+                continue;
+            }
+        };
+        let step = crate::ui::step(repo, &format!("{event} hook"));
+        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &extra_env) {
+            Ok(()) => step.ok(),
+            Err(e) => {
+                step.fail(&format!("{e}"));
+                *hook_failed = true;
             }
         }
     }

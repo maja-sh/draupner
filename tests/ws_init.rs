@@ -24,12 +24,19 @@ fn init_local_writes_config_and_hook_templates() {
     assert!(cfg.contains("\"app\""));
     assert!(cfg.contains("$schema"));
 
+    // Starter scripts, one per repo per lifecycle event, named so a `scripts`
+    // entry can point at them. Each body says which entry turns it on — `ws`
+    // runs only what `.ws.json` declares.
     for repo in ["api", "app"] {
-        for event in ["post-create", "up", "down", "post-remove", "status", "test"] {
-            let p = ws.path().join(".ws-hooks").join(repo).join(event);
+        for event in ["prepare", "post-create", "up", "down", "post-remove", "status"] {
+            let p = ws.path().join(".ws-hooks").join(format!("{repo}-{event}.sh"));
             assert!(p.is_file(), "expected hook template {p:?}");
             let body = std::fs::read_to_string(&p).unwrap();
-            assert!(body.contains(&format!("{repo}/{event}")), "template body mismatch: {body}");
+            assert!(
+                body.contains(&format!("\"{event}\": \".ws-hooks/{repo}-{event}.sh\"")),
+                "template should name the `scripts` entry that enables it: {body}"
+            );
+            assert!(!body.contains("$1"), "the removed $1 contract must not be taught: {body}");
         }
     }
 }
