@@ -74,8 +74,9 @@ ws remote check
 
 Read-only. It probes SSH reachability and `mutagen` locally, then in a single
 round trip on the server: `mutagen`, rootless podman, whether the routing Caddy
-is running, and whether the workspace directory exists and is writable. `-v`
-shows the exact command behind each probe.
+is running, whether the workspace directory exists and is writable, and — when
+the workspace has a `domain` — whether the server resolves `*.<domain>` to
+itself. `-v` shows the exact command behind each probe.
 
 ### Coming back
 
@@ -117,6 +118,31 @@ privilege). For that to work from your machine:
   dnsmasq setup `server-setup/debian.sh` installs and wires.
 - The CA that signs those certificates has to be trusted by your browser. `ws
   setup` on your own machine reports whether it is.
+
+### Two resolvers, not one
+
+There are two separate "resolve `*.<domain>`" requirements, and they fail in
+completely different ways. Keeping them apart is worth the paragraph:
+
+**The client must resolve `*.<domain>` to the server's address.** Everyone who
+routes anything needs this — it's how your browser finds a worktree at all.
+`ws setup` on your own machine reports on it and walks you through fixing it.
+
+**The server must resolve `*.<domain>` to itself.** Only needed when something
+*running on the server* dials a routed hostname. In practice that means a
+`kind: host` repo — a dev server running directly on the box, proxying `/api` to
+a routed container. A pure container stack never needs it: containers reach each
+other by compose service name, and Caddy reaches them by container name on
+`ws-net`, so the server is never a client of its own routing. Step 2b of
+`server-setup/debian.sh` wires it.
+
+The server-side half is the one that breaks quietly. `/etc/resolv.conf` belongs
+to whatever configures the interface, so a DHCP lease renewal can drop the
+loopback nameserver hours or days after setup: dnsmasq stays up and answers
+correctly when queried directly, but nothing queries it, and the host-side dev
+server starts failing every proxy hop with `getaddrinfo ENOTFOUND`. The setup
+script now defends against that (step 2c), and `ws remote check` probes it, so
+it reads as one red line instead of an hour of confusion.
 
 By default the server's Caddy publishes on all interfaces, because the entire
 point is that another machine reaches it. On a box with a public interface, pin

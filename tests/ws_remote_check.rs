@@ -27,7 +27,7 @@ fn remote_check_all_green_reports_ready() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(remote_ws_json());
-    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\n");
+    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\ndns:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
     let out = f.run_with_env(
@@ -50,7 +50,7 @@ fn remote_check_flags_a_failing_server_probe() {
     f.add_repo("api");
     f.write_ws_json(remote_ws_json());
     // Server reachable, but podman is down.
-    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:fail\\ncaddy:ok\\nworkspace:ok\\n");
+    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:fail\\ncaddy:ok\\nworkspace:ok\\ndns:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
     let out = f.run_with_env(
@@ -61,6 +61,49 @@ fn remote_check_flags_a_failing_server_probe() {
     assert_eq!(out.status.code(), Some(1), "a failing probe must exit 1:\n{err}");
     assert!(err.contains("rootless podman is up"), "expected the podman probe line:\n{err}");
     assert!(err.contains("MISSING") || err.contains("✗"), "podman should read as failed:\n{err}");
+}
+
+// The whole point of the DNS probe: a server that can't resolve its own routed
+// hostnames fails the check, loudly, with the fix in the line.
+#[test]
+fn remote_check_flags_a_server_that_cannot_resolve_its_own_domain() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(remote_ws_json());
+    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\ndns:fail\\n");
+    let mutagen = f.stub("mutagen-fake", "exit 0");
+
+    let out = f.run_with_env(
+        &["remote", "check"],
+        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+    );
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "unresolvable domain must exit 1:\n{err}");
+    assert!(err.contains("ws-probe.myapp.test"), "expected the name that failed:\n{err}");
+    assert!(err.contains("server-setup/debian.sh"), "expected the pointer at the fix:\n{err}");
+}
+
+// No `domain` — nothing routes, so the DNS check must be absent rather than
+// present-and-passing.
+#[test]
+fn remote_check_without_a_domain_omits_the_dns_probe() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(
+        r#"{"runtime":"podman","remote":{"connection":"srv","workspace_path":"myapp"},"repos":["api"]}"#,
+    );
+    // The server reports only the unconditional keys; a missing `dns` must not
+    // fail a workspace that never asked for routing.
+    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\n");
+    let mutagen = f.stub("mutagen-fake", "exit 0");
+
+    let out = f.run_with_env(
+        &["remote", "check"],
+        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+    );
+    let err = stderr(&out);
+    assert!(out.status.success(), "a domainless remote must still pass:\n{err}");
+    assert!(!err.contains("dns"), "the DNS probe must not appear at all:\n{err}");
 }
 
 #[test]
@@ -87,7 +130,7 @@ fn remote_check_host_flag_overrides_and_defaults_the_path() {
     f.add_repo("api");
     // No remote block; the workspace dir name becomes the default worktree base.
     f.write_ws_json(r#"{"domain":"myapp.test","repos":["api"]}"#);
-    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\n");
+    let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\ndns:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
     let out = f.run_with_env(
