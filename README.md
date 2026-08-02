@@ -140,7 +140,7 @@ shared Caddy, so any number of branches share one HTTPS port. That split is why
 | `ws exec [repo] -- <cmd>` | Run a command where that repo's stack lives (over SSH when offloaded) |
 | `ws setup` | Ready this machine for routing; reports the gaps it can't close itself |
 | `ws remote check` | Read-only health check of the offload server (or of local routing) |
-| `ws remote set/unset` | Move this workspace to a server, or bring it back |
+| `ws remote set/unset` | Move this workspace to a server, or bring it back; refuses while a stack is running |
 | `ws config get/set/unset` | Machine-global defaults in `~/.config/ws/config.toml` |
 | `ws claude` | Install Claude Code skills for the `ws` workflow |
 

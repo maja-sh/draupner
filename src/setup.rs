@@ -74,9 +74,10 @@ pub struct Report {
     /// offloading. Carried on the report so every rendered line, generated
     /// command and probe agrees on one value.
     pub address: String,
-    /// `*.<domain>` resolves to [`Report::address`] (browser can find worktree
-    /// hosts).
-    pub dns_ok: bool,
+    /// What `*.<domain>` resolves to, measured against [`Report::address`] — so a
+    /// wildcard pointing at the *wrong* machine is a distinct finding from one
+    /// that doesn't resolve at all.
+    pub dns: crate::caddy::Dns,
     /// Caddy's internal root CA is trusted by the system store (no cert warning).
     pub ca_ok: bool,
     /// Rootless bind to the configured port is permitted. Always true unless the
@@ -89,18 +90,23 @@ impl Report {
     /// `ws up` auto-offer). The rootless Caddy bit isn't counted — `ws` fixes
     /// that itself without a prompt.
     pub fn privileged_gaps(&self) -> bool {
-        !self.dns_ok || !self.ca_ok || !self.port_ok
+        !self.dns.is_ok() || !self.ca_ok || !self.port_ok
     }
 }
 
 /// Render a probe report as readiness status lines — shared by `ws setup` and
 /// `ws remote check`'s local mode so the two never drift.
 pub fn render_report(report: &Report, domain: &str) {
-    crate::ui::status_line(
-        report.dns_ok,
-        "wildcard DNS",
-        &format!("*.{domain} → {}", report.address),
-    );
+    // Say what the wildcard *does* answer when it answers wrongly: "→ 127.0.0.1"
+    // with a cross beside it reads as "not wired yet", which is the opposite of
+    // what a stale entry pointing at another machine needs you to know.
+    let detail = match &report.dns {
+        crate::caddy::Dns::Wrong { got, .. } => {
+            format!("*.{domain} → {} (resolves to {got})", report.address)
+        }
+        _ => format!("*.{domain} → {}", report.address),
+    };
+    crate::ui::status_line(report.dns.is_ok(), "wildcard DNS", &detail);
     crate::ui::status_line(report.ca_ok, "CA trust", "Caddy root CA in the system store");
     if report.port < 1024 {
         crate::ui::status_line(
@@ -120,19 +126,25 @@ pub fn render_report(report: &Report, domain: &str) {
 /// hot path doesn't resolve DNS a second time; `None` resolves it here. The
 /// single owner of "what counts as ready" — the auto-offer and `ws setup` both
 /// read the resulting `Report`.
+///
+/// The DNS check here is the **precise** one: `address` is the address this
+/// machine must reach Caddy at, so it's exactly what the wildcard should answer
+/// with. That closes the gap where a remote workspace's wildcard pointing at some
+/// other non-loopback IP read as ready.
 pub fn probe(
     site: &Site,
     runtime: &str,
     domain: &str,
     address: &str,
-    known_dns: Option<bool>,
+    known_dns: Option<crate::caddy::Dns>,
 ) -> Report {
     let port = crate::caddy::https_port();
     // CA trust only means something once Caddy is up to serve a cert to test.
     let caddy_up = crate::caddy::is_running(site, runtime);
     Report {
         port,
-        dns_ok: known_dns.unwrap_or_else(|| crate::caddy::domain_resolves(site, domain)),
+        dns: known_dns
+            .unwrap_or_else(|| crate::caddy::resolve_domain(site, domain, Some(address))),
         ca_ok: caddy_up && ca_trusted(domain, port, address),
         port_ok: crate::caddy::port_bindable(site, port),
         address: address.to_string(),
@@ -210,15 +222,32 @@ fn valid_address(address: &str) -> bool {
 /// setup after a local↔remote flip (the wildcard file says the server, dnsmasq
 /// still says loopback). `restart` reloads a running instance and starts a stopped
 /// one, so it's correct either way.
+///
+/// The install is **guarded and auto-update-free**. A bare `brew install dnsmasq`
+/// on a machine that already has it triggers a full Homebrew auto-update — taps
+/// refreshed, a wall of unrelated new formulae and casks printed — before
+/// concluding "already installed and up-to-date". That noise lands in the middle
+/// of a walk whose entire purpose is that the user *reads* the privileged commands
+/// before approving them. `brew list` does not auto-update, so the common case is
+/// silent, and `HOMEBREW_NO_AUTO_UPDATE=1` keeps approving a setup step from
+/// turning into an unrelated tap refresh on the machines that do need the install.
+/// `server-setup/debian.sh` has always done this correctly via its `have_bin()`
+/// helper; the macOS path in Rust simply never got the same care.
 fn dns_step_macos(domain: &str, address: &str) -> Step {
     let conf = "\"$(brew --prefix)/etc/dnsmasq.conf\"";
     // Dots are regex metacharacters; the domain is `[a-z0-9.-]`-validated, so
     // escaping them is the only quoting the pattern needs.
     let pattern = domain.replace('.', "\\.");
     Step {
-        what: format!("resolve `*.{domain}` → {address} (dnsmasq + /etc/resolver)"),
+        // Spell out the install's conditions: a user approving a command should
+        // see what it actually does, including what it declines to do.
+        what: format!(
+            "resolve `*.{domain}` → {address} (dnsmasq + /etc/resolver; \
+             installs dnsmasq only if missing, without a Homebrew auto-update)"
+        ),
         commands: vec![
-            "brew install dnsmasq".to_string(),
+            "brew list dnsmasq >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install dnsmasq"
+                .to_string(),
             format!("sed -i.ws-bak '/^address=\\/{pattern}\\//d' {conf}"),
             format!("echo 'address=/{domain}/{address}' >> {conf}"),
             "sudo brew services restart dnsmasq".to_string(),
@@ -362,7 +391,7 @@ pub fn run(
 /// The macOS privileged gaps as consentable steps.
 fn macos_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
-    if !report.dns_ok {
+    if !report.dns.is_ok() {
         steps.push(dns_step_macos(domain, &report.address));
     }
     if !report.ca_ok {
@@ -470,7 +499,7 @@ fn run_commands(commands: &[String]) -> Result<()> {
 /// ([`linux_client_steps`]).
 fn guide_linux_gaps(domain: &str, report: &Report) {
     let mut needs = Vec::new();
-    if !report.dns_ok {
+    if !report.dns.is_ok() {
         needs.push(format!("wildcard DNS (*.{domain} → {})", report.address));
     }
     if !report.ca_ok {
@@ -505,7 +534,7 @@ fn guide_linux_gaps(domain: &str, report: &Report) {
 /// is honest about the ambiguity rather than guessing with `sudo`.
 fn linux_client_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
     let mut steps = Vec::new();
-    if !report.dns_ok {
+    if !report.dns.is_ok() {
         match dns_step_linux(domain, &report.address) {
             Some(step) => steps.push(step),
             None => {
@@ -666,7 +695,7 @@ fn which(bin: &str) -> Option<()> {
 /// resolver can't be identified, and what `guide_linux_gaps` prints for a
 /// non-interactive read. Pure, so it's testable without a network.
 fn linux_client_commands(report: &Report, domain: &str) -> Vec<String> {
-    if report.dns_ok {
+    if report.dns.is_ok() {
         return Vec::new();
     }
     // One line per entry: `command_block` indents each element, so an embedded
@@ -754,7 +783,7 @@ mod tests {
         let report = Report {
             port: 8443,
             address: "100.64.1.2".to_string(),
-            dns_ok: false,
+            dns: crate::caddy::Dns::Unresolved,
             ca_ok: true, // skip the CA branch: it would try to reach a Caddy
             port_ok: true,
         };
@@ -808,13 +837,36 @@ mod tests {
         let mut r = Report {
             port: 8443,
             address: "127.0.0.1".to_string(),
-            dns_ok: true,
+            dns: crate::caddy::Dns::Correct,
             ca_ok: true,
             port_ok: true,
         };
         assert!(!r.privileged_gaps(), "caddy_up is rootless, not a privileged gap");
-        r.dns_ok = false;
+        r.dns = crate::caddy::Dns::Unresolved;
         assert!(r.privileged_gaps());
+        // A wildcard pointing at the wrong machine is a gap too — it used to be
+        // indistinguishable from "not wired yet", and on a remote workspace it
+        // read as ready.
+        r.dns = crate::caddy::Dns::Wrong {
+            got: "100.64.1.3".to_string(),
+            expected: Some("127.0.0.1".to_string()),
+        };
+        assert!(r.privileged_gaps());
+    }
+
+    #[test]
+    fn macos_dns_step_does_not_reinstall_dnsmasq_it_already_has() {
+        // A bare `brew install` on a machine that has dnsmasq triggers a full
+        // Homebrew auto-update and prints a wall of unrelated formulae — in the
+        // middle of a walk whose point is that the user reads each privileged
+        // command before approving it. `brew list` does not auto-update.
+        let step = dns_step_macos("myapp.test", "127.0.0.1");
+        let install = &step.commands[0];
+        assert!(install.starts_with("brew list dnsmasq"), "install must be guarded: {install}");
+        assert!(install.contains("|| HOMEBREW_NO_AUTO_UPDATE=1 brew install dnsmasq"), "{install}");
+        // And the step text says so, since that's what consent is given against.
+        assert!(step.what.contains("only if missing"), "{}", step.what);
+        assert!(step.what.contains("auto-update"), "{}", step.what);
     }
 
     #[test]

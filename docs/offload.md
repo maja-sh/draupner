@@ -87,6 +87,11 @@ ws remote unset
 Removes the `remote` block and terminates the sync sessions. The worktrees stay
 where they are.
 
+Both directions of the flip change what `*.<domain>` should resolve to, and
+neither one touches your resolver — that stays a consented step. So each prints
+the old and new answers and points at `ws setup`. Re-run it, or the wildcard keeps
+aiming at the machine you just stopped using.
+
 ---
 
 ## Where things live on the server
@@ -127,6 +132,16 @@ completely different ways. Keeping them apart is worth the paragraph:
 **The client must resolve `*.<domain>` to the server's address.** Everyone who
 routes anything needs this — it's how your browser finds a worktree at all.
 `ws setup` on your own machine reports on it and walks you through fixing it.
+
+The *correct* answer here is derived from where the stacks live: loopback for a
+local workspace, the server's address for an offloaded one. Flipping between them
+therefore invalidates it, which is why both flips say so. `ws setup` and `ws up`
+report what the wildcard actually resolves to when it disagrees — a wildcard
+pointing at some other machine reads as `resolves to <address>, expected
+<address>`, not as "doesn't resolve yet". They are different problems: one is a
+DNS entry you never made, the other is one you made for a different workspace
+shape, and it will happily send requests to a host you thought you'd stopped
+using.
 
 **The server must resolve `*.<domain>` to itself.** Only needed when something
 *running on the server* dials a routed hostname. In practice that means a
@@ -181,11 +196,18 @@ Your scripts see `WS_REMOTE=1` and `WS_CONNECTION`, and their `WS_WORKSPACE_ROOT
 
 ## Things worth knowing
 
-**Don't flip while a stack is running.** After `ws remote set`, a stack still
-running locally is beyond the reach of `ws down` — every command now dispatches
-to the server. After `ws remote unset`, the server's containers and routes are
-similarly stranded. Both commands print the recovery sequence: flip back,
-`ws down`, flip again. `ws` doesn't currently refuse the flip.
+**A flip is refused while a stack is running.** `ws down` follows the config, not
+the containers: after `ws remote set` a stack still running locally is beyond its
+reach, and after `ws remote unset` so are the server's containers and routes. So
+both commands check first — host processes via their supervision record, compose
+projects via `compose ps` — and refuse, naming the branches that are up and the
+`ws down <branch>` that clears them. The working order is stop, flip, start again.
+
+If liveness can't be determined — `ws remote unset` on a workspace whose server
+has gone away, say — that is also a refusal, not a shrug. Assuming "nothing is
+running" is how a stack ends up somewhere nothing will look for it. `--force`
+overrides either refusal, and prints the recovery sequence (flip back, `ws down`,
+flip again) for whatever it left behind.
 
 **`ws remote set/unset` rewrites `.ws.json`** through its own types, so any keys
 it doesn't model are dropped. Everything documented in the schema round-trips.
