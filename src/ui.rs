@@ -510,13 +510,21 @@ pub fn command_block(commands: &[String]) {
     }
 }
 
+/// Whether stdin can carry an answer — the precondition [`ask`] tests before it
+/// prompts. Exposed so a caller can decide not to *offer* something at all,
+/// rather than print a question it already knows can't be answered.
+pub fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
 /// Ask an interactive question and read a line from stdin. Returns `None` when
 /// stdin isn't a terminal or hits EOF — the caller then falls back to a
 /// non-interactive path (print-and-bail) rather than blocking. The prompt has no
 /// trailing newline so the answer echoes on the same line.
 pub fn ask(prompt: &str) -> Option<String> {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
+    use std::io::Write;
+    if !interactive() {
         return None;
     }
     if tty() {

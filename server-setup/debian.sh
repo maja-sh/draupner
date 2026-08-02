@@ -13,6 +13,7 @@
 #   2. Wildcard DNS  *.<domain> → <address>  → per-worktree hostnames resolve.
 #   2b. Local resolver  → this box resolves them too, which a `kind: host` repo
 #       needs to reach a routed container from a dev server running here.
+#   2c. Defend that wiring  → a DHCP lease renewal otherwise rewrites it away.
 #   3. (opt-in) Rootless :443  → drop the `:8443` suffix from URLs.
 #   4. Linger  → `systemd --user` host-process units survive logout.
 #   5. Podman API socket  → what `podman compose` talks to.
@@ -389,6 +390,11 @@ local_resolver() {
 
   if getent hosts "ws-probe.${domain}" >/dev/null 2>&1; then
     note "already resolves here — nothing to do."
+    # Resolving *now* says nothing about surviving the next lease renewal, and an
+    # earlier run of this script wired the file without defending it. Re-running
+    # is how that box gets the guard, so don't skip the step just because the
+    # lookup works at this moment.
+    persist_resolver
     return 0
   fi
 
@@ -457,15 +463,93 @@ local_resolver() {
   [ "$external_ok" = 0 ] || getent hosts "$canary" >/dev/null 2>&1 || ok=0
   if [ "$ok" = 1 ]; then
     note "resolver now consults dnsmasq (backup at $backup)."
-    if [ -f /etc/dhcp/dhclient.conf ] || pgrep -x dhclient >/dev/null 2>&1; then
-      note "warning: dhclient may rewrite /etc/resolv.conf on lease renewal."
-      note "  make it stick with: sudo chattr +i /etc/resolv.conf"
-    fi
+    persist_resolver
   else
     sudo cp "$backup" /etc/resolv.conf
     note "verification FAILED — restored the previous /etc/resolv.conf."
     note "  dnsmasq keeps $up_conf; resolve *.${domain} by hand before retrying."
   fi
+}
+
+# ---------------------------------------------------------------------------
+# 2c. Keep that wiring across a DHCP lease renewal
+# ---------------------------------------------------------------------------
+# /etc/resolv.conf is not ours to own. Whatever configures the interface rewrites
+# it whenever the lease renews, and writing the file once then walking away looks
+# permanent for exactly as long as the lease lasts.
+#
+# From a real incident: dhclient renewed an ~11h lease, replaced the file with
+# the router's nameserver, and dropped the loopback line. dnsmasq stayed up and
+# answered correctly when asked directly — but nothing asked it, so a `kind: host`
+# dev server on this box started failing every proxy hop to a routed container
+# with `getaddrinfo ENOTFOUND`. Twice a day, self-inflicted, silent.
+#
+# Each network manager wants a different mechanism, so detect which one is in
+# play rather than assume. Where it isn't determinable, or where the fix means
+# editing a profile only the operator can pick, print the exact thing to do
+# instead of guessing at someone else's network config.
+persist_resolver() {
+  # systemd-resolved owns the file and the drop-in written above is persistent
+  # config, not a file DHCP rewrites — nothing to defend.
+  if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
+    return 0
+  fi
+  # Only meaningful once this box points at its own dnsmasq through that file.
+  grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' /etc/resolv.conf 2>/dev/null || return 0
+
+  say "Keep /etc/resolv.conf pointing at dnsmasq across DHCP renewals"
+
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    # NetworkManager uses its own internal DHCP client by default, which doesn't
+    # read /etc/dhcp/dhclient.conf — the fix belongs on the connection profile
+    # instead. Not applied here: which profile owns this box's route is a choice,
+    # and modifying the wrong one takes the network down.
+    note "NetworkManager is managing this box's networking, and it rewrites"
+    note "  /etc/resolv.conf on renewal. Pin the resolver on the connection —"
+    note "  a manual DNS entry sorts ahead of the DHCP-supplied ones, which stay"
+    note "  behind it as fallback:"
+    local conn
+    conn="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -n1 || true)"
+    note "    sudo nmcli connection modify '${conn:-<connection>}' +ipv4.dns 127.0.0.1"
+    note "    sudo nmcli connection up     '${conn:-<connection>}'"
+    return 0
+  fi
+
+  # dhclient (Debian's default with ifupdown). `prepend` is applied every time
+  # dhclient regenerates the file, which is exactly the event that broke it.
+  if [ -f /etc/dhcp/dhclient.conf ] &&
+     { pgrep -x dhclient >/dev/null 2>&1 ||
+       PATH="$PATH:/usr/sbin:/sbin" command -v dhclient >/dev/null 2>&1; }; then
+    local dh="/etc/dhcp/dhclient.conf"
+    if grep -qE '^[[:space:]]*prepend[[:space:]]+domain-name-servers[[:space:]]+127\.0\.0\.1[[:space:]]*;' "$dh"; then
+      note "dhclient already prepends 127.0.0.1 ($dh)."
+    else
+      { echo
+        echo "# ws: put dnsmasq first every time dhclient rewrites resolv.conf."
+        echo "# The DHCP-supplied servers stay behind it as fallback."
+        echo "prepend domain-name-servers 127.0.0.1;"
+      } | sudo tee -a "$dh" >/dev/null
+      note "added \`prepend domain-name-servers 127.0.0.1;\` to $dh."
+      note "  takes effect on the next renewal; the file is correct until then."
+    fi
+    return 0
+  fi
+
+  if systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+    note "systemd-networkd is managing the interfaces. Pin the resolver in the"
+    note "  matching /etc/systemd/network/*.network file — a static DNS= is used"
+    note "  ahead of the DHCP-supplied servers, which remain as fallback:"
+    note "    [Network]"
+    note "    DNS=127.0.0.1"
+    note "  then: sudo systemctl restart systemd-networkd"
+    return 0
+  fi
+
+  note "couldn't tell what rewrites /etc/resolv.conf here — no NetworkManager,"
+  note "  dhclient or systemd-networkd found. If this box takes a DHCP lease,"
+  note "  the renewal will drop the line just written."
+  note "  check the file after the next renewal; if nothing owns it, freeze it:"
+  note "    sudo chattr +i /etc/resolv.conf"
 }
 
 # ---------------------------------------------------------------------------

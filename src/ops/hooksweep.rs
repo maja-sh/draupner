@@ -131,13 +131,13 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // routing is load-bearing instead: an HTTP container whose `ws-net` is missing
     // fails its own `compose up`, and one whose route won't install is failed
     // below (its host publish is `!reset` away, so an uninstalled route ⇒
-    // unreachable). `ensure_routing` owns the Caddy-side sequencing + the
-    // DNS-not-ready hint; we only surface what it returns.
+    // unreachable). `ensure_routing` owns the Caddy-side sequencing and the DNS
+    // verdict; we only surface what it returns.
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
-            // `ensure_routing` already probes DNS; its result *is* the answer
-            // (`Some(hint)` ⇒ wildcard doesn't resolve). Reuse it so the auto-offer
-            // below doesn't resolve DNS a second time.
+            // `ensure_routing` already probes DNS, and its `Dns` *is* the verdict —
+            // `resolve_hint` only phrases it. Reuse it so the auto-offer below
+            // doesn't resolve DNS a second time.
             let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
             let publish = crate::caddy::publish_address(&site, configured);
             // Say it out loud. The default is right (offload is pointless if the
@@ -154,16 +154,19 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                      the server's networks; pin one with `remote.publish_address` in .ws.json",
                 );
             }
-            let dns_ok = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
-                Ok(hint) => {
-                    if let Some(h) = &hint {
-                        crate::ui::note(h);
+            let dns = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
+                Ok(state) => {
+                    if let Some(h) = crate::caddy::resolve_hint(&site, domain, &state) {
+                        crate::ui::note(&h);
                     }
-                    hint.is_none()
+                    state
                 }
                 Err(e) => {
+                    // Caddy never came up, so nothing was resolved. Treat DNS as
+                    // unwired rather than inventing a verdict — the nudge below is
+                    // the right outcome either way.
                     crate::ui::note(&format!("routing infra not ready: {e:#}"));
-                    false
+                    crate::caddy::Dns::Unresolved
                 }
             };
             // Auto-offer setup when a privileged bit (DNS / CA trust / :443) is
@@ -173,13 +176,13 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             // `ws setup` handles a remote workspace too (the client's DNS + the
             // server's CA), but the full probe isn't worth its cost on the remote
             // up path: it would need the server address resolved and its CA check
-            // dials the server. `dns_ok` is already in hand for free and is the bit
-            // that usually isn't wired, so remote nudges on that alone.
+            // dials the server. The `dns` verdict is already in hand for free and is
+            // the bit that usually isn't wired, so remote nudges on that alone.
             if !crate::caddy::externally_managed() {
                 let incomplete = if site.is_remote() {
-                    !dns_ok
+                    !dns.is_ok()
                 } else {
-                    crate::setup::probe(&site, cfg.runtime(), domain, "127.0.0.1", Some(dns_ok))
+                    crate::setup::probe(&site, cfg.runtime(), domain, "127.0.0.1", Some(dns))
                         .privileged_gaps()
                 };
                 if incomplete {

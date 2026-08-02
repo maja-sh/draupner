@@ -76,13 +76,46 @@ const SERVER_CHECKS: &[(&str, &str)] = &[
     ("workspace", "the workspace dir exists and is writable"),
 ];
 
+/// The `dns` check isn't in `SERVER_CHECKS` because it only exists when the
+/// workspace routes at all — with no `domain` there is nothing to resolve, and a
+/// check that can't fail shouldn't be printed.
+const DNS_CHECK: &str = "dns";
+
+/// A name that only a wildcard entry can answer for. Any label works — the point
+/// is that `*.<domain>` resolves — and at check time there's no branch or service
+/// to name, so use a fixed synthetic one. Same name `server-setup/debian.sh`
+/// verifies with, so the two agree on what "wired" means.
+const DNS_PROBE_LABEL: &str = "ws-probe";
+
+/// Whether the server resolves `*.<domain>` to itself, phrased for a status line.
+///
+/// The failure text carries the whole value of this probe, so it says what didn't
+/// resolve, why anyone cares, and where the fix lives. Real incident: a dhclient
+/// lease renewal rewrote `/etc/resolv.conf` and dropped the loopback nameserver,
+/// leaving dnsmasq healthy but unqueried — a `kind: host` vite server then failed
+/// every proxy hop with `getaddrinfo ENOTFOUND`, and nothing in `ws` noticed.
+fn dns_detail(domain: &str, ok: bool) -> String {
+    if ok {
+        format!("the server resolves *.{domain} to itself")
+    } else {
+        format!(
+            "can't resolve {DNS_PROBE_LABEL}.{domain} on the server — a `kind: host` repo \
+             there can't reach a routed container (re-run server-setup/debian.sh; a DHCP \
+             renewal can overwrite /etc/resolv.conf)"
+        )
+    }
+}
+
 /// A read-only shell script that probes each server prerequisite and prints one
 /// `<key>:<ok|fail>` line each. Pure observation — no install, mutate, or sudo.
 /// One round trip rather than an SSH connection per check. Also the exact string
 /// surfaced under `-v`.
-pub fn server_script(workspace_path: &str) -> String {
+///
+/// `domain` adds the wildcard-resolution check; `None` (no routing configured)
+/// leaves it out entirely rather than emitting a check that always passes.
+pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
     let wp = remote::shell_quote(workspace_path);
-    [
+    let mut lines = vec![
         "command -v mutagen >/dev/null 2>&1 && echo mutagen:ok || echo mutagen:fail".to_string(),
         "podman info >/dev/null 2>&1 && echo podman:ok || echo podman:fail".to_string(),
         // `-f name=` is an unanchored substring match, so anchor it (`^…$`) —
@@ -94,27 +127,38 @@ pub fn server_script(workspace_path: &str) -> String {
             crate::caddy::CADDY_CONTAINER
         ),
         format!("test -d {wp} && test -w {wp} && echo workspace:ok || echo workspace:fail"),
-    ]
-    .join("; ")
+    ];
+    if let Some(d) = domain {
+        // `getent hosts` asks the server's own resolver stack, which is exactly
+        // what a dev server running there would ask — not dnsmasq directly, which
+        // answers fine even while nothing is pointed at it.
+        let host = remote::shell_quote(&format!("{DNS_PROBE_LABEL}.{d}"));
+        lines.push(format!(
+            "getent hosts {host} >/dev/null 2>&1 && echo {DNS_CHECK}:ok || echo {DNS_CHECK}:fail"
+        ));
+    }
+    lines.join("; ")
 }
 
 /// Run the server probes over SSH. Returns the per-check `Probe`s, or `None` when
 /// SSH itself couldn't reach the server (so the caller reports "unreachable"
 /// rather than a wall of failures).
-pub fn server_probes(connection: &str, workspace_path: &str) -> Option<Vec<Probe>> {
-    let script = server_script(workspace_path);
+pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str>) -> Option<Vec<Probe>> {
+    let script = server_script(workspace_path, domain);
     let out = remote::ssh_capture(connection, &script)?;
     let results = parse_server(&out);
-    Some(
-        SERVER_CHECKS
-            .iter()
-            .map(|(key, desc)| {
-                // A key missing from the output (older server, partial run) reads
-                // as a failure, not a silent pass.
-                Probe::server(key, results.get(*key).copied().unwrap_or(false), *desc)
-            })
-            .collect(),
-    )
+    // A key missing from the output (older server, partial run) reads as a
+    // failure, not a silent pass.
+    let verdict = |key: &str| results.get(key).copied().unwrap_or(false);
+    let mut probes: Vec<Probe> = SERVER_CHECKS
+        .iter()
+        .map(|(key, desc)| Probe::server(key, verdict(key), *desc))
+        .collect();
+    if let Some(d) = domain {
+        let ok = verdict(DNS_CHECK);
+        probes.push(Probe::server(DNS_CHECK, ok, dns_detail(d, ok)));
+    }
+    Some(probes)
 }
 
 /// Parse the `<key>:<ok|fail>` lines the server script prints.
@@ -129,13 +173,17 @@ fn parse_server(stdout: &str) -> std::collections::BTreeMap<String, bool> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn server_script_is_read_only_and_covers_every_check() {
-        let s = server_script("workspace");
-        // No mutating verb / sudo — the read-only contract.
+    /// The read-only contract — no mutating verb, no sudo.
+    fn assert_read_only(s: &str) {
         for banned in ["sudo", "rm ", "install", "systemctl start", "podman run", "create"] {
             assert!(!s.contains(banned), "server script must stay read-only, found {banned:?}: {s}");
         }
+    }
+
+    #[test]
+    fn server_script_is_read_only_and_covers_every_check() {
+        let s = server_script("workspace", None);
+        assert_read_only(&s);
         // Every advertised key is probed.
         for (key, _) in SERVER_CHECKS {
             assert!(s.contains(&format!("echo {key}:ok")), "missing probe for {key}: {s}");
@@ -144,17 +192,47 @@ mod tests {
 
     #[test]
     fn server_script_quotes_the_workspace_path() {
-        let s = server_script("weird dir; rm -rf");
+        let s = server_script("weird dir; rm -rf", None);
         assert!(s.contains("'weird dir; rm -rf'"), "workspace path must be shell-quoted: {s}");
     }
 
     #[test]
     fn server_script_probes_the_container_caddy_actually_names() {
-        let s = server_script("workspace");
+        let s = server_script("workspace", None);
         assert!(
             s.contains(&format!("-f name='^{}$'", crate::caddy::CADDY_CONTAINER)),
             "caddy probe must use caddy::CADDY_CONTAINER, anchored: {s}"
         );
+    }
+
+    #[test]
+    fn server_script_probes_dns_only_with_a_domain() {
+        let without = server_script("workspace", None);
+        assert!(!without.contains("dns:"), "no domain must mean no DNS check at all: {without}");
+
+        let with = server_script("workspace", Some("myapp.test"));
+        assert!(with.contains("getent hosts ws-probe.myapp.test"), "expected the wildcard lookup: {with}");
+        assert!(with.contains("echo dns:ok"), "expected the dns key: {with}");
+        assert!(with.contains("echo dns:fail"), "expected the dns failure branch: {with}");
+        // Still observation only, and still one round trip.
+        assert_read_only(&with);
+    }
+
+    #[test]
+    fn server_script_quotes_the_domain() {
+        let s = server_script("workspace", Some("evil; reboot"));
+        assert!(s.contains("'ws-probe.evil; reboot'"), "the probe host must be shell-quoted: {s}");
+    }
+
+    #[test]
+    fn dns_detail_names_the_host_and_the_fix() {
+        let ok = dns_detail("myapp.test", true);
+        assert!(ok.contains("*.myapp.test"), "pass line should name the domain: {ok}");
+
+        let bad = dns_detail("myapp.test", false);
+        assert!(bad.contains("ws-probe.myapp.test"), "failure must name what didn't resolve: {bad}");
+        assert!(bad.contains("server-setup/debian.sh"), "failure must point at the fix: {bad}");
+        assert!(bad.contains("resolv.conf"), "failure should name the usual cause: {bad}");
     }
 
     #[test]
