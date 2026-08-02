@@ -96,7 +96,9 @@ and swap the distro-specific pieces:
 - package install (`apt-get` → `dnf`/`pacman`/…),
 - the CA trust-store path + refresh command (`update-ca-certificates` →
   `update-ca-trust`/`trust anchor`),
-- the resolver wiring (systemd-resolved vs plain `resolv.conf` vs NetworkManager).
+- the resolver wiring (systemd-resolved vs plain `resolv.conf` vs NetworkManager),
+  including how that wiring is kept when the DHCP lease renews — whatever
+  configures the interface rewrites `/etc/resolv.conf` on its own schedule.
 
 Keep it readable and idempotent — someone is going to read the whole thing
 before they run it as root.
