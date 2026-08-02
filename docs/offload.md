@@ -88,9 +88,13 @@ Removes the `remote` block and terminates the sync sessions. The worktrees stay
 where they are.
 
 Both directions of the flip change what `*.<domain>` should resolve to, and
-neither one touches your resolver — that stays a consented step. So each prints
-the old and new answers and points at `ws setup`. Re-run it, or the wildcard keeps
-aiming at the machine you just stopped using.
+neither one touches your resolver on its own — that stays a consented step. So
+each **offers** to re-point it right there, with the same `[R]un / [S]kip /
+show-me` prompt `ws setup` uses and the same commands; you see them before
+anything runs, and `sudo` still prompts for itself. Skip it, or run the flip from
+a script (no terminal to prompt at), and you get the old and new answers plus a
+pointer to `ws setup` instead — re-run that, or the wildcard keeps aiming at the
+machine you just stopped using.
 
 ---
 
@@ -135,13 +139,13 @@ routes anything needs this — it's how your browser finds a worktree at all.
 
 The *correct* answer here is derived from where the stacks live: loopback for a
 local workspace, the server's address for an offloaded one. Flipping between them
-therefore invalidates it, which is why both flips say so. `ws setup` and `ws up`
-report what the wildcard actually resolves to when it disagrees — a wildcard
-pointing at some other machine reads as `resolves to <address>, expected
-<address>`, not as "doesn't resolve yet". They are different problems: one is a
-DNS entry you never made, the other is one you made for a different workspace
-shape, and it will happily send requests to a host you thought you'd stopped
-using.
+therefore invalidates it, which is why both flips offer to re-point it (and say
+what's stale when you decline). `ws setup` and `ws up` report what the wildcard
+actually resolves to when it disagrees — a wildcard pointing at some other
+machine reads as `resolves to <address>, expected <address>`, not as "doesn't
+resolve yet". They are different problems: one is a DNS entry you never made,
+the other is one you made for a different workspace shape, and it will happily
+send requests to a host you thought you'd stopped using.
 
 **The server must resolve `*.<domain>` to itself.** Only needed when something
 *running on the server* dials a routed hostname. In practice that means a
