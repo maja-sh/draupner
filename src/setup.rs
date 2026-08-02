@@ -39,6 +39,10 @@
 //!
 //! The probe is non-mutating and also drives the auto-offer on `ws up` (a nudge
 //! when a privileged bit is missing).
+//!
+//! One step of the walk is reachable on its own: [`offer_dns_step`], which a
+//! local↔remote flip uses to re-point the wildcard it just invalidated. Same
+//! step, same prompt, same consent — only the entry point differs.
 
 use anyhow::{bail, Context, Result};
 use std::process::Command;
@@ -427,12 +431,65 @@ fn fetch_root_ca(site: &Site) -> Option<String> {
     }
 }
 
+/// Offer the wildcard-DNS step on its own, outside a full `ws setup` — what a
+/// local↔remote flip calls once it has invalidated the wildcard's correct answer
+/// (`ops::remote_set`). Returns whether the commands actually ran, so the caller
+/// can fall back to saying what's now stale.
+///
+/// This is deliberately the *same* walk `ws setup` performs, one step of it: the
+/// step is built by the same per-platform builders, shown before it runs, and
+/// consented with the same `[R]un / [S]kip / show-me` prompt. `offloading` says
+/// whether the workspace points at a server *after* the flip, which is what
+/// decides the Linux branch — a client of an offload server gets the interactive
+/// treatment, while a Linux box that runs the stacks itself defers to
+/// `server-setup/<distro>.sh` and so is not offered anything here.
+///
+/// Offering this at all is narrower than it looks, and worth being explicit
+/// about: two of the three macOS commands only rewrite a config file the user
+/// already owns (`$(brew --prefix)/etc/dnsmasq.conf`), which needs no privilege —
+/// but restarting dnsmasq to make that file take effect does. The contract `ws`
+/// keeps is that nothing *privileged* happens invisibly, so the whole step stays
+/// behind a keypress rather than being split into a silent half and a consented
+/// one. What changes is only that the flip asks now instead of assigning
+/// `ws setup` as homework.
+///
+/// Nothing is offered when stdin isn't a terminal: the prompt could not be
+/// answered, and a scripted flip must keep printing the stale-DNS note it always
+/// has rather than gaining a wall of commands.
+pub fn offer_dns_step(domain: &str, address: &str, offloading: bool) -> Result<bool> {
+    if !crate::ui::interactive() {
+        return Ok(false);
+    }
+    // The same guards `run` applies before building any consented command line:
+    // both values reach an `sh -c`, and both come from a possibly-cloned
+    // `.ws.json` (or, for the address, from `ssh -G`). A derivation that failed
+    // hands us the server's *name* rather than an address, which `valid_address`
+    // rejects — so the caller falls back to the note.
+    if !valid_domain(domain) || !valid_address(address) {
+        return Ok(false);
+    }
+    let step = match platform() {
+        Platform::MacOs => Some(dns_step_macos(domain, address)),
+        Platform::Linux if offloading => dns_step_linux(domain, address),
+        Platform::Linux | Platform::Other => None,
+    };
+    let Some(step) = step else { return Ok(false) };
+    crate::ui::note("the wildcard's correct answer just changed — this re-points it:");
+    match apply_step(&step, false)? {
+        Outcome::Ran => {
+            crate::ui::note(&format!("`*.{domain}` now answers {address}"));
+            Ok(true)
+        }
+        Outcome::Skipped | Outcome::Printed => Ok(false),
+    }
+}
+
 /// Walk a set of privileged gaps interactively (or unattended with `--yes`).
 /// Platform-agnostic: the steps carry the platform-specific commands.
 fn walk_gaps(steps: Vec<Step>, yes: bool) -> Result<()> {
     let mut printed = false;
     for step in &steps {
-        printed |= apply_step(step, yes)?;
+        printed |= matches!(apply_step(step, yes)?, Outcome::Printed);
     }
 
     if printed {
@@ -445,27 +502,49 @@ fn walk_gaps(steps: Vec<Step>, yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// What became of one offered step. `Printed` is the non-interactive bail (the
+/// commands were shown, nothing was run) — distinct from `Skipped`, which is a
+/// user who read them and declined. Callers act on all three: the setup walk
+/// closes with a different line when anything was merely printed, and a caller
+/// offering a single step (see [`offer_dns_step`]) needs to know whether the fix
+/// actually landed.
+enum Outcome {
+    Ran,
+    Skipped,
+    Printed,
+}
+
 /// Handle one macOS step: `--yes` runs it; otherwise prompt `[R]un/[S]kip/?`.
-/// Returns whether the commands were *printed* (the non-interactive bail) rather
-/// than run or skipped — the caller uses that to decide the closing nudge.
-fn apply_step(step: &Step, yes: bool) -> Result<bool> {
-    crate::ui::status_line(false, &step.what, "needs one privileged command");
+fn apply_step(step: &Step, yes: bool) -> Result<Outcome> {
+    // Count what the step actually escalates rather than asserting "one". The DNS
+    // step is six commands, three of them `sudo` — telling the user to expect one
+    // privileged command and then prompting them three times for a password is the
+    // kind of small untruth that makes a consent prompt worth less than it looks.
+    // Two of that step's commands write a user-owned file under the brew prefix and
+    // need nothing at all, which is worth being able to see.
+    let privileged = step.commands.iter().filter(|c| c.contains("sudo ")).count();
+    let detail = match privileged {
+        0 => format!("{} command(s), none privileged", step.commands.len()),
+        1 => format!("{} command(s), 1 privileged", step.commands.len()),
+        n => format!("{} command(s), {n} privileged", step.commands.len()),
+    };
+    crate::ui::status_line(false, &step.what, &detail);
     if yes {
         run_commands(&step.commands)?;
-        return Ok(false);
+        return Ok(Outcome::Ran);
     }
     loop {
         let Some(ans) = crate::ui::ask("[R]un / [S]kip / show-me? (r/s/?)") else {
             // Non-TTY: print and bail rather than hang on a sudo prompt.
             crate::ui::command_block(&step.commands);
-            return Ok(true);
+            return Ok(Outcome::Printed);
         };
         match ans.to_lowercase().as_str() {
             "r" | "run" | "y" | "yes" | "" => {
                 run_commands(&step.commands)?;
-                return Ok(false);
+                return Ok(Outcome::Ran);
             }
-            "s" | "skip" | "n" | "no" => return Ok(false),
+            "s" | "skip" | "n" | "no" => return Ok(Outcome::Skipped),
             "?" | "show" | "show-me" => crate::ui::command_block(&step.commands),
             _ => {} // re-prompt
         }
@@ -890,6 +969,29 @@ mod tests {
         // can't be shown — the step must print its commands and report `Printed`
         // (never block on a sudo prompt), and must NOT try to run anything.
         let step = ca_step_macos("/tmp/x.crt");
-        assert!(apply_step(&step, false).unwrap(), "non-interactive step must print (bail), not run");
+        assert!(
+            matches!(apply_step(&step, false).unwrap(), Outcome::Printed),
+            "non-interactive step must print (bail), not run"
+        );
+    }
+
+    #[test]
+    fn dns_step_is_not_offered_without_a_tty() {
+        // The flip's offer must be a no-op for a scripted run: no prompt it can't
+        // finish, no command block, and — the reason this matters — no hang. The
+        // caller then prints the stale-DNS note exactly as it always did.
+        // Under `cargo test` stdin isn't a terminal, so this is the real path.
+        assert!(!offer_dns_step("myapp.test", "100.64.1.2", true).unwrap());
+        assert!(!offer_dns_step("myapp.test", "127.0.0.1", false).unwrap());
+    }
+
+    #[test]
+    fn dns_step_is_not_offered_for_values_that_cant_be_shell_safe() {
+        // Same guards `run` applies: a hand-edited `.ws.json` must not be able to
+        // smuggle anything into a consented `sudo` line by way of the flip, and a
+        // failed address derivation hands over the server's *name*, which is not a
+        // usable dnsmasq answer.
+        assert!(!offer_dns_step("myapp.test; rm -rf /", "127.0.0.1", true).unwrap());
+        assert!(!offer_dns_step("myapp.test", "the server `srv`", true).unwrap());
     }
 }
