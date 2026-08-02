@@ -115,9 +115,16 @@ enum RemoteCmd {
         /// Skip the SSH reachability check (set refuses an unreachable host by default)
         #[arg(long)]
         no_verify: bool,
+        /// Flip even with a stack running (it stays where ws can no longer reach it)
+        #[arg(long)]
+        force: bool,
     },
     /// Make this workspace local again (removes the remote block + sync sessions)
-    Unset,
+    Unset {
+        /// Flip even with a stack running on the server (it stays there, unreachable)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -145,9 +152,9 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
         Cmd::Remote{cmd}             => match cmd {
             RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
-            RemoteCmd::Set{connection,path,domain,no_verify} =>
-                crate::ops::remote_set::set(connection.as_deref(), path, domain, no_verify),
-            RemoteCmd::Unset             => crate::ops::remote_set::unset(),
+            RemoteCmd::Set{connection,path,domain,no_verify,force} =>
+                crate::ops::remote_set::set(connection.as_deref(), path, domain, no_verify, force),
+            RemoteCmd::Unset{force}      => crate::ops::remote_set::unset(force),
         },
         Cmd::Config{cmd}             => match cmd {
             ConfigCmd::Get{key}          => crate::ops::config::get(&key),

@@ -291,6 +291,249 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
 }
 
+// --- the flip is refused while a stack is running -------------------------
+//
+// Flipping a live workspace strands it: after `set` a locally-running stack is
+// beyond `ws down` (every op dispatches to the server from then on); after
+// `unset` the server's containers and routes are equally out of reach. These
+// assert the pre-flight that enforces stop → flip → start instead.
+
+/// A `kind: host` repo whose `up` is a long sleep — a genuinely running,
+/// `ws`-supervised process for the pre-flight to find. `$HOME` is the fixture, so
+/// the pid file under `~/.ws-run` is isolated.
+fn running_host_workspace() -> WorkspaceFixture {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    ws.write_ws_json(r#"{"repos":[{"name":"api","kind":"host","scripts":{"up":"exec sleep 40"}}]}"#);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    ws.run_ok(&["up", "feat/x"]);
+    ws
+}
+
+/// Kill the supervised process directly, whatever state the config ended in —
+/// `ws rm` would dispatch to a server the test never had.
+fn kill_host_proc(ws: &WorkspaceFixture) {
+    let Ok(contents) = std::fs::read_to_string(ws.path().join(".ws-run/ws-feat-x-api.pid")) else {
+        return;
+    };
+    if let Some(pid) = contents.lines().next() {
+        let _ = std::process::Command::new("kill").args(["-9", pid.trim()]).status();
+    }
+}
+
+#[test]
+fn remote_set_refuses_while_a_stack_is_running() {
+    let ws = running_host_workspace();
+
+    let out = ws.run(&["remote", "set", "srv", "--no-verify"]);
+    kill_host_proc(&ws);
+
+    assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
+    let err = stderr(&out);
+    // Name what's up and the exact command that clears it.
+    assert!(err.contains("still running: feat/x (api)"), "{err}");
+    assert!(err.contains("`ws down feat/x`"), "{err}");
+    assert!(err.contains("--force"), "the override must be discoverable:\n{err}");
+    // A refusal must not have written the block it refused to act on.
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(!cfg.contains("srv"), "refusal must leave .ws.json untouched:\n{cfg}");
+}
+
+#[test]
+fn remote_set_force_flips_past_a_running_stack() {
+    let ws = running_host_workspace();
+    let ok = ws.stub("ok", "exit 0");
+    let rec = ws.arg_recorder("mutagen-rec");
+    let args_file = ws.path().join("mutagen-args");
+
+    let out = ws.run_with_env(
+        &["remote", "set", "srv", "--no-verify", "--force"],
+        &[
+            ("WS_SSH", ok.to_str().unwrap()),
+            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    kill_host_proc(&ws);
+
+    assert!(out.status.success(), "--force must flip anyway:\n{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("--force"), "the override should say what it carried past:\n{err}");
+    // The recovery sequence is printed precisely when something really was left
+    // behind — it's noise on a flip that had nothing running.
+    assert!(err.contains("ws remote unset"), "recovery sequence expected:\n{err}");
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("\"connection\": \"srv\""), "{cfg}");
+}
+
+#[test]
+fn remote_set_refuses_while_a_container_stack_is_running() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    // A compose project in the worktree, plus a runtime stub reporting one
+    // container — the `compose ps -q` half of the pre-flight.
+    std::fs::write(
+        ws.path().join(".worktrees/feat-x/api/docker-compose.yml"),
+        "services: {}\n",
+    )
+    .unwrap();
+    let runtime = ws.stub(
+        "runtime-stub",
+        "if [ \"$1\" = compose ] && [ \"$2\" = ps ]; then echo 9f1c0deadbee; fi\nexit 0",
+    );
+    ws.write_ws_json(&format!(
+        r#"{{"repos":["api"],"runtime":"{}"}}"#,
+        runtime.display()
+    ));
+
+    let out = ws.run(&["remote", "set", "srv", "--no-verify"]);
+    assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
+    assert!(stderr(&out).contains("still running: feat/x (api)"), "{}", stderr(&out));
+}
+
+#[test]
+fn remote_set_proceeds_when_the_container_stack_is_down() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    std::fs::write(
+        ws.path().join(".worktrees/feat-x/api/docker-compose.yml"),
+        "services: {}\n",
+    )
+    .unwrap();
+    // Same shape, but `compose ps -q` reports nothing running.
+    let runtime = ws.stub("runtime-stub", "exit 0");
+    ws.write_ws_json(&format!(
+        r#"{{"repos":["api"],"runtime":"{}"}}"#,
+        runtime.display()
+    ));
+
+    let ok = ws.stub("ok", "exit 0");
+    let rec = ws.arg_recorder("mutagen-rec");
+    let args_file = ws.path().join("mutagen-args");
+    let out = ws.run_with_env(
+        &["remote", "set", "srv", "--no-verify"],
+        &[
+            ("WS_SSH", ok.to_str().unwrap()),
+            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "an idle stack must not block the flip:\n{}", stderr(&out));
+    // And nothing was stranded, so the recovery note stays out of the way.
+    assert!(
+        !stderr(&out).contains("ws remote unset"),
+        "recovery note is for stranded stacks only:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn remote_unset_refuses_when_it_cannot_tell_what_is_running() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    std::fs::write(
+        ws.path().join(".worktrees/feat-x/api/docker-compose.yml"),
+        "services: {}\n",
+    )
+    .unwrap();
+    ws.write_ws_json(r#"{"repos":["api"],"remote":{"connection":"srv"}}"#);
+
+    // The server is unreachable, so the stack there is unknowable. Reading that
+    // as "nothing is running" is exactly how a stack gets stranded.
+    let bad = ws.stub("bad", "exit 255");
+    let out = ws.run_with_env(&["remote", "unset"], &[("WS_SSH", bad.to_str().unwrap())]);
+    assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("can't tell whether anything is still running"), "{err}");
+    assert!(err.contains("isn't reachable over SSH"), "{err}");
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("srv"), "refusal must leave the remote block in place:\n{cfg}");
+}
+
+#[test]
+fn remote_unset_force_flips_when_liveness_is_unknown() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.run_ok(&["new", "api", "feat/x"]);
+    std::fs::write(
+        ws.path().join(".worktrees/feat-x/api/docker-compose.yml"),
+        "services: {}\n",
+    )
+    .unwrap();
+    ws.write_ws_json(r#"{"repos":["api"],"remote":{"connection":"srv"}}"#);
+
+    let bad = ws.stub("bad", "exit 255");
+    let rec = ws.arg_recorder("mutagen-rec");
+    let args_file = ws.path().join("mutagen-args");
+    let out = ws.run_with_env(
+        &["remote", "unset", "--force"],
+        &[
+            ("WS_SSH", bad.to_str().unwrap()),
+            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "--force must go local anyway:\n{}", stderr(&out));
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
+    // Unknown liveness counts as possibly-stranded, so the recovery route is shown.
+    assert!(stderr(&out).contains("ws remote set srv"), "{}", stderr(&out));
+}
+
+// --- the flip invalidates the wildcard's correct answer --------------------
+
+#[test]
+fn remote_set_says_the_wildcard_answer_is_now_stale() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    ws.write_ws_json(r#"{"repos":["api"],"domain":"myapp.test"}"#);
+    // `ssh -G` (config parsing only, never a connection) is how the client's
+    // address for the server is derived.
+    let sshg = ws.stub(
+        "ssh-g",
+        "for a in \"$@\"; do\n  if [ \"$a\" = -G ]; then echo 'hostname 127.0.0.2'; exit 0; fi\ndone\nexit 0",
+    );
+
+    let out = ws.run_with_env(
+        &["remote", "set", "srv", "--no-verify"],
+        &[("WS_SSH", sshg.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("`*.myapp.test`"), "{err}");
+    assert!(err.contains("should resolve to 127.0.0.2, not 127.0.0.1"), "{err}");
+    // A nudge, not an action: rewriting a resolver stays user-consented.
+    assert!(err.contains("ws setup"), "{err}");
+    assert!(err.contains("never edits your resolver"), "{err}");
+}
+
+#[test]
+fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    // The incident's exact shape: the wildcard was pointed at the offload
+    // server's address, and going local leaves it aimed at a machine this
+    // workspace no longer uses.
+    ws.write_ws_json(
+        r#"{"repos":["api"],"domain":"myapp.test",
+            "remote":{"connection":"srv","publish_address":"100.64.1.3"}}"#,
+    );
+    let rec = ws.arg_recorder("mutagen-rec");
+    let args_file = ws.path().join("mutagen-args");
+
+    let out = ws.run_with_env(
+        &["remote", "unset"],
+        &[
+            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("ARGS_FILE", args_file.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("should resolve to 127.0.0.1, not 100.64.1.3"),
+        "{err}"
+    );
+    assert!(err.contains("ws setup"), "{err}");
+}
+
 #[test]
 fn remote_unset_on_a_local_workspace_is_a_quiet_no_op() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
