@@ -503,6 +503,11 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
     // A nudge, not an action: rewriting a resolver stays user-consented.
     assert!(err.contains("ws setup"), "{err}");
     assert!(err.contains("never edits your resolver"), "{err}");
+    // On a tty the flip offers `ws setup`'s DNS step instead of this note. Here
+    // stdin isn't one, so nothing is offered: no prompt that can't be answered,
+    // no command block, and above all no wait for a keypress that never comes.
+    assert!(!err.contains("[R]un"), "no unanswerable prompt in a scripted flip: {err}");
+    assert!(!err.contains("dnsmasq"), "no command block in a scripted flip: {err}");
 }
 
 #[test]
@@ -532,6 +537,7 @@ fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
         "{err}"
     );
     assert!(err.contains("ws setup"), "{err}");
+    assert!(!err.contains("[R]un"), "no unanswerable prompt in a scripted flip: {err}");
 }
 
 #[test]
