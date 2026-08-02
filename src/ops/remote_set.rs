@@ -8,9 +8,10 @@
 //!
 //! Two things guard the flip, because both of the states it changes are derived
 //! rather than declared. [`refuse_if_running`] refuses while a stack is up, since
-//! `ws down` follows the config and not the containers. [`note_dns_flip`] says
-//! that the wildcard's correct answer just changed — it never rewrites DNS, which
-//! stays a consented step.
+//! `ws down` follows the config and not the containers. [`settle_dns_flip`]
+//! handles the wildcard's correct answer having just changed — it offers `ws
+//! setup`'s own DNS step and falls back to saying what's stale, so DNS is still
+//! only ever rewritten with consent.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -154,7 +155,7 @@ pub fn set(
              `ws remote unset`, `ws down`, then `ws remote set` again to stop them",
         );
     }
-    note_dns_flip(cfg.domain.as_deref(), &old_answer, &new_answer);
+    settle_dns_flip(cfg.domain.as_deref(), &old_answer, &new_answer, true);
     crate::ui::nudge("run `ws remote check` once the server's set up for full validation");
 
     if failed {
@@ -230,7 +231,7 @@ pub fn unset(force: bool) -> Result<()> {
             old.connection, old.connection
         ));
     }
-    note_dns_flip(cfg.domain.as_deref(), &old_answer, "127.0.0.1");
+    settle_dns_flip(cfg.domain.as_deref(), &old_answer, "127.0.0.1", false);
     Ok(())
 }
 
@@ -256,7 +257,8 @@ fn expected_wildcard(remote: Option<&RemoteConfig>) -> String {
         .unwrap_or_else(|| format!("the server `{}`", r.connection))
 }
 
-/// Say that the wildcard's correct answer just changed.
+/// Settle the wildcard's correct answer after a flip changed it: offer the DNS
+/// step, and say what's stale if it wasn't taken.
 ///
 /// The right answer is *derived* from where the stacks live — loopback when local,
 /// the server's address when remote — so a flip silently invalidates it while
@@ -266,13 +268,29 @@ fn expected_wildcard(remote: Option<&RemoteConfig>) -> String {
 /// the user believed she had stopped using, and its Caddy answered with the
 /// "No stack is running here" page.
 ///
-/// A note, never an action. Rewriting a resolver is a privileged host change, and
-/// those stay user-consented in `ws`: `ws setup` prompts per command, and
-/// `server-setup/` is a script you read and run yourself.
-fn note_dns_flip(domain: Option<&str>, old: &str, new: &str) {
+/// Never an action taken silently — but a consented one is fine, and this is a
+/// place where a `[R]un / [S]kip` beats homework: re-pointing the wildcard is the
+/// same step `ws setup` walks, and having to re-run the whole setup command every
+/// time you switch sides is friction with no transparency dividend.
+/// [`crate::setup::offer_dns_step`] runs *that* step, prompt and all; `ws` still
+/// never edits a resolver on its own account. When it isn't offered (no tty, a
+/// platform whose privileged bits live in `server-setup/`) or is declined, the
+/// note is what it always was, so a scripted flip is unchanged.
+///
+/// `offloading` is where the workspace points *after* the flip — `set` true,
+/// `unset` false — which is what decides the platform branch inside the offer.
+fn settle_dns_flip(domain: Option<&str>, old: &str, new: &str, offloading: bool) {
     let Some(domain) = domain else { return };
     if old == new {
         return; // re-pointing at the same address changes nothing to re-point
+    }
+    // A failure here is the DNS commands failing, not the flip: the config is
+    // already written and the syncs are already backfilled. Report it and fall
+    // through to the note, which is now exactly the advice the user needs.
+    match crate::setup::offer_dns_step(domain, new, offloading) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => crate::ui::note(&format!("re-pointing DNS didn't complete ({e:#})")),
     }
     crate::ui::note(&format!(
         "DNS is now stale: `*.{domain}` should resolve to {new}, not {old} — \
