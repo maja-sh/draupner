@@ -439,41 +439,73 @@ pub fn port_bindable(site: &Site, port: u16) -> bool {
 }
 
 /// Bring up the shared routing infra for a workspace whose `domain` is set:
-/// create `ws-net`, start Caddy, then probe DNS. Returns a user-facing hint when
-/// `*.<domain>` doesn't resolve yet (routes are live, but a browser won't find
-/// them until `ws setup` (slice 6.3) wires the wildcard), or `None` when DNS is
-/// ready. Both infra steps are **fatal** on failure: since the override drops
-/// HTTP host-ports (`!reset`), Caddy is the only path to an HTTP service, so a
-/// stack brought "up" without it would be a lie. The one owner of the routing
-/// bring-up sequence — callers decide only whether to surface the returned hint.
-pub fn ensure_routing(
-    site: &Site,
-    runtime: &str,
-    domain: &str,
-    publish_addr: &str,
-) -> Result<Option<String>> {
+/// create `ws-net`, start Caddy, then probe DNS. Returns what `*.<domain>`
+/// currently answers ([`Dns`]) — routes are live either way, but a browser won't
+/// find them until the wildcard points at the right machine. Both infra steps are
+/// **fatal** on failure: since the override drops HTTP host-ports (`!reset`),
+/// Caddy is the only path to an HTTP service, so a stack brought "up" without it
+/// would be a lie. The one owner of the routing bring-up sequence — callers decide
+/// only whether to surface [`resolve_hint`].
+pub fn ensure_routing(site: &Site, runtime: &str, domain: &str, publish_addr: &str) -> Result<Dns> {
     ensure_net(site, runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
     ensure_running(site, runtime, publish_addr)
         .context("caddy must be running to route HTTP services")?;
-    Ok((!domain_resolves(site, domain)).then(|| resolve_hint(site, domain)))
+    Ok(resolve_domain(site, domain, expected_answer(publish_addr).as_deref()))
 }
 
-/// The recipe for reaching a route before `*.<domain>` resolves — the single
-/// owner of this user-facing string (also referenced in the module doc). For a
-/// remote stack the wildcard must point at an address the server is reachable at,
-/// not loopback, so the hint differs.
-fn resolve_hint(site: &Site, domain: &str) -> String {
+/// What `*.<domain>` should answer with, when it's cheaply known — derived from
+/// where Caddy publishes. Loopback for a local workspace; the pinned
+/// `remote.publish_address` for a remote one (a concrete pin is both the bind
+/// address and the address the client dials, see `ops::setup::routing_address`).
+///
+/// `None` for the bind-any default (`0.0.0.0` / `::`), where working the client's
+/// address out costs an `ssh -G` — too much for the `ws up` hot path, so those
+/// callers fall back to the coarse loopback/not-loopback question.
+pub fn expected_answer(publish_addr: &str) -> Option<String> {
+    publish_addr
+        .trim()
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .filter(|ip| !ip.is_unspecified())
+        .map(|ip| ip.to_string())
+}
+
+/// The recipe for reaching a route when the wildcard isn't answering the way this
+/// site needs — the single owner of these user-facing strings (also referenced in
+/// the module doc). `None` when DNS is already right.
+///
+/// The two failure shapes are kept apart deliberately: "no answer" and "the wrong
+/// answer" need different advice, and conflating them is what made a stale
+/// offload-server address read as `doesn't resolve yet` on a workspace that had
+/// been flipped back to local.
+pub fn resolve_hint(site: &Site, domain: &str, dns: &Dns) -> Option<String> {
     let port = https_port();
-    match site {
-        Site::Local => format!(
-            "`*.{domain}` doesn't resolve yet — reach a route with \
-             `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
-        ),
-        Site::Remote { .. } => format!(
-            "`*.{domain}` doesn't resolve yet — point it at an address this server \
-             is reachable at (see `server-setup/<distro>.sh --address`), then reach a \
-             route on `https://<host>:{port}`"
-        ),
+    match dns {
+        Dns::Correct => None,
+        Dns::Unresolved => Some(match site {
+            Site::Local => format!(
+                "`*.{domain}` doesn't resolve yet — reach a route with \
+                 `curl --resolve <host>:{port}:127.0.0.1 https://<host>:{port}`"
+            ),
+            Site::Remote { .. } => format!(
+                "`*.{domain}` doesn't resolve yet — point it at an address this server \
+                 is reachable at (see `server-setup/<distro>.sh --address`), then reach a \
+                 route on `https://<host>:{port}`"
+            ),
+        }),
+        Dns::Wrong { got, expected: Some(want) } => Some(format!(
+            "`*.{domain}` resolves to {got}, expected {want} — the wildcard points at the \
+             wrong machine, so requests leave for a host this workspace no longer uses. \
+             Re-run `ws setup` to re-point it."
+        )),
+        // Only reachable on a remote workspace with a bind-any publish address, where
+        // the exact answer isn't cheaply knowable — so the wildcard resolved to
+        // loopback and the stacks are on the server.
+        Dns::Wrong { got, expected: None } => Some(format!(
+            "`*.{domain}` resolves to {got}, but this workspace's stacks run on the server — \
+             point the wildcard at an address the server is reachable at \
+             (see `server-setup/<distro>.sh --address`)"
+        )),
     }
 }
 
@@ -549,40 +581,84 @@ fn wait_admin_ready(site: &Site) -> Result<()> {
     bail!("{CADDY_CONTAINER} started but its admin API never answered within 5s — it may be crash-looping (check the {CADDY_CONTAINER} container logs)")
 }
 
-/// Whether the wildcard `*.<domain>` resolves to loopback on this host. The
-/// setup readiness signal for the DNS bit, and used to warn on `ws up`: routing
-/// works via `curl --resolve` regardless, and wiring
-/// `*.<domain>` → `127.0.0.1` into the resolver is a privileged one-time step
-/// that `ws setup` (slice 6.3) owns. A `false` here means "routes are live but a
-/// browser won't find them yet".
+/// What `*.<domain>` currently answers, measured against what the site needs.
 ///
-/// Resolution is checked against `site`: a **local** stack wants the wildcard to
-/// point at loopback (`127.0.0.1`); a **remote** stack wants it to point at the
-/// server (any non-loopback address it's reachable at). Requiring the right *kind*
-/// of address, not
-/// just any answer, means a resolver that synthesizes a public IP for every
-/// unknown name (ISP NXDOMAIN hijacking, a captive portal) can't read as
-/// "resolved" and wrongly suppress the hint locally.
+/// The distinction a bare boolean could not make. `ws` used to ask only "loopback
+/// or not-loopback", so a wildcard still pointing at a former offload server read
+/// as **doesn't resolve yet** on a workspace that had been flipped back to local —
+/// while the browser (and a vite `/api` proxy) happily kept reaching that server,
+/// which answered with Caddy's "No stack is running here" page. It resolved fine;
+/// it resolved to the wrong machine, and that is a different problem with
+/// different advice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dns {
+    /// The name doesn't resolve at all: NXDOMAIN, no resolver, or the lookup
+    /// exceeded the probe deadline.
+    Unresolved,
+    /// It resolves to an address this site is served at.
+    Correct,
+    /// It resolves, but somewhere else. `got` is the first answer; `expected` is
+    /// the address we wanted, when one was cheaply known (see [`expected_answer`]).
+    Wrong { got: String, expected: Option<String> },
+}
+
+impl Dns {
+    /// Whether a browser on this machine would find the site's routes.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Dns::Correct)
+    }
+}
+
+/// Resolve the wildcard `*.<domain>` and judge the answer. The setup readiness
+/// signal for the DNS bit, and the warning on `ws up`: routing works via
+/// `curl --resolve` regardless, and wiring the wildcard into the resolver is a
+/// privileged one-time step `ws setup` owns.
 ///
-/// The probe name normally does *not* resolve (that's what fires the warning),
-/// so it's run on a scratch thread with a short deadline: a slow or unreachable
-/// resolver must not stall every `ws up` for seconds just to print a hint. A
-/// timeout counts as "doesn't resolve" — the safe default (show the hint).
-pub fn domain_resolves(site: &Site, domain: &str) -> bool {
+/// `expected` is the exact address the answer should carry when the caller knows
+/// it cheaply. Without one, the check falls back to the right *kind* of address —
+/// a **local** stack wants loopback, a **remote** stack wants anything else — which
+/// still keeps a resolver that synthesizes an IP for every unknown name (ISP
+/// NXDOMAIN hijacking, a captive portal) from reading as "resolved" locally.
+///
+/// The probe name often does *not* resolve (that's what fires the warning), so it
+/// runs on a scratch thread with a short deadline: a slow or unreachable resolver
+/// must not stall every `ws up` for seconds just to print a hint. A timeout counts
+/// as [`Dns::Unresolved`] — the safe default (show the hint).
+pub fn resolve_domain(site: &Site, domain: &str, expected: Option<&str>) -> Dns {
     // A label a real service is unlikely to shadow, so a hit means the wildcard
     // (not a coincidental host) resolves. The port is irrelevant to resolution.
     let probe = format!("ws-dns-probe.{domain}:{}", https_port());
-    let want_loopback = !site.is_remote();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
-        let ok = probe
+        let addrs: Vec<std::net::IpAddr> = probe
             .to_socket_addrs()
-            .map(|mut a| a.any(|s| s.ip().is_loopback() == want_loopback))
-            .unwrap_or(false);
-        let _ = tx.send(ok); // receiver may have already timed out; ignore
+            .map(|a| a.map(|s| s.ip()).collect())
+            .unwrap_or_default();
+        let _ = tx.send(addrs); // receiver may have already timed out; ignore
     });
-    rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or(false)
+    let answers = rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or_default();
+    let Some(first) = answers.first() else { return Dns::Unresolved };
+
+    let want = expected.and_then(|a| a.trim().parse::<std::net::IpAddr>().ok());
+    if answers.iter().any(|a| answer_ok(a, want, !site.is_remote())) {
+        return Dns::Correct;
+    }
+    Dns::Wrong { got: first.to_string(), expected: expected.map(str::to_string) }
+}
+
+/// Whether one resolved address is an acceptable answer for the wildcard.
+///
+/// A loopback expectation is satisfied by *any* loopback answer: `::1` and
+/// `127.0.0.1` are the same machine, and "the machine you're on" is the whole of
+/// what a local workspace asks for. A concrete non-loopback expectation is exact —
+/// that's the point of threading it through.
+fn answer_ok(got: &std::net::IpAddr, expected: Option<std::net::IpAddr>, want_loopback: bool) -> bool {
+    match expected {
+        Some(e) if e.is_loopback() => got.is_loopback(),
+        Some(e) => *got == e,
+        None => got.is_loopback() == want_loopback,
+    }
 }
 
 /// Whether the singleton Caddy is currently running (for the setup readiness
@@ -855,7 +931,7 @@ mod tests {
         let cfg = Some("100.97.195.105");
         assert_eq!(publish_address(&remote_site(), cfg), "100.97.195.105");
         // Local ignores it: `ws setup`'s CA probe, `resolve_hint` and
-        // `domain_resolves` all assume a local Caddy is on loopback, so honouring
+        // `resolve_domain` all assume a local Caddy is on loopback, so honouring
         // it here would half-wire a workspace rather than configure it.
         assert_eq!(publish_address(&Site::Local, cfg), "127.0.0.1");
     }
@@ -1005,6 +1081,74 @@ mod tests {
         // TCP on the admin port (a unix socket can't cross the macOS podman VM),
         // bound to the routable interface so the loopback-scoped publish reaches it.
         assert_eq!(boot_config()["admin"]["listen"], format!("0.0.0.0:{DEFAULT_ADMIN_PORT}"));
+    }
+
+    #[test]
+    fn expected_answer_is_known_for_a_concrete_publish_address_only() {
+        // Local always publishes loopback, so the exact answer is free.
+        assert_eq!(expected_answer("127.0.0.1").as_deref(), Some("127.0.0.1"));
+        // A pinned remote publish address is both the bind and the dial address.
+        assert_eq!(expected_answer("100.97.195.105").as_deref(), Some("100.97.195.105"));
+        // Bind-any is not an address anything resolves *to*; deriving the real one
+        // needs an `ssh -G`, which must not land on the `ws up` hot path.
+        assert_eq!(expected_answer("0.0.0.0"), None);
+        assert_eq!(expected_answer("::"), None);
+        assert_eq!(expected_answer(""), None);
+    }
+
+    #[test]
+    fn a_loopback_expectation_accepts_any_loopback_answer() {
+        use std::net::IpAddr;
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        // `::1` and `127.0.0.1` are the same machine — a local workspace asks for
+        // no more than that, so requiring literal equality would report a gap
+        // where there is none.
+        assert!(answer_ok(&v6, Some(v4), true));
+        assert!(answer_ok(&v4, Some(v6), true));
+        // A concrete non-loopback expectation is exact: that precision is the
+        // whole reason the address is threaded through.
+        let srv: IpAddr = "100.97.195.105".parse().unwrap();
+        let other: IpAddr = "100.64.1.2".parse().unwrap();
+        assert!(answer_ok(&srv, Some(srv), false));
+        assert!(!answer_ok(&other, Some(srv), false));
+        // With nothing expected, only the *kind* of address is checked.
+        assert!(answer_ok(&v4, None, true));
+        assert!(!answer_ok(&srv, None, true));
+        assert!(answer_ok(&srv, None, false));
+    }
+
+    #[test]
+    fn the_hint_says_what_it_resolved_to_not_merely_that_it_didnt() {
+        // The incident: a workspace flipped back to local while `*.<domain>` still
+        // answered with the offload server's tailnet address. The old wording
+        // ("doesn't resolve yet") sent the reader looking for a missing DNS entry
+        // instead of a stale one.
+        let dns = Dns::Wrong {
+            got: "100.97.195.105".to_string(),
+            expected: Some("127.0.0.1".to_string()),
+        };
+        let hint = resolve_hint(&Site::Local, "safetyamp.test", &dns).expect("a wrong answer hints");
+        assert!(hint.contains("resolves to 100.97.195.105"), "{hint}");
+        assert!(hint.contains("expected 127.0.0.1"), "{hint}");
+        assert!(!hint.contains("doesn't resolve"), "wrong answer is not a missing one: {hint}");
+
+        // Not resolving at all keeps its own, distinct advice.
+        let missing = resolve_hint(&Site::Local, "safetyamp.test", &Dns::Unresolved).unwrap();
+        assert!(missing.contains("doesn't resolve yet"), "{missing}");
+        assert!(missing.contains("curl --resolve"), "{missing}");
+
+        // And a correct wildcard says nothing at all.
+        assert_eq!(resolve_hint(&Site::Local, "safetyamp.test", &Dns::Correct), None);
+    }
+
+    #[test]
+    fn a_name_that_cannot_resolve_reads_as_unresolved_not_wrong() {
+        // `.invalid` is reserved by RFC 2606, so this is deterministic offline.
+        assert_eq!(
+            resolve_domain(&Site::Local, "ws-no-such-domain.invalid", Some("127.0.0.1")),
+            Dns::Unresolved
+        );
     }
 
     #[test]
