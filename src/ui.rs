@@ -172,8 +172,8 @@ impl Drop for Step {
     }
 }
 
-/// Hook stderr is styled identically to stdout by design, hence the unused flag.
-pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
+/// Hook stderr is styled identically to stdout by design — one channel, one look.
+pub fn hook_line(tag: &str, line: &str) {
     let cleaned = strip_control(line);
     emit_around_spinner(|| {
         if tty() {
@@ -258,11 +258,13 @@ pub struct ListGroup {
     pub rows: Vec<ListRow>,
 }
 
-pub fn list_empty() {
+/// Shared by every op whose enumeration came up empty; named for the shape, not
+/// the op, so the next op reuses it instead of adding a sibling.
+pub fn empty(msg: &str) {
     if tty() {
-        eprintln!("\n{}", style("no worktrees").dim());
+        eprintln!("\n{}", style(msg).dim());
     } else {
-        eprintln!("\nno worktrees");
+        eprintln!("\n{msg}");
     }
 }
 
@@ -349,14 +351,6 @@ pub fn clean_verdict(task: &str, removal: bool, reason: &str, dry: bool) {
     }
 }
 
-pub fn clean_empty() {
-    if tty() {
-        eprintln!("\n{}", style("nothing to clean").dim());
-    } else {
-        eprintln!("\nnothing to clean");
-    }
-}
-
 /// The one channel scripts consume, hence stdout and no styling ever, tty or not;
 /// everything human-facing goes to stderr via the helpers above.
 pub fn value(text: &str) {
@@ -383,7 +377,7 @@ pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
     if rows.is_empty() {
         return;
     }
-    let w = key_width(rows);
+    let w = col_width(rows.iter().map(|(k, _)| k.as_str()));
     emit_around_spinner(|| {
         if tty() {
             eprintln!("  {} {}", style(pad_tag(tag)).green().bold(), style(title).dim());
@@ -404,10 +398,6 @@ pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
 /// non-ASCII entry.
 fn col_width<'a>(items: impl Iterator<Item = &'a str>) -> usize {
     items.map(|s| s.chars().count()).max().unwrap_or(0)
-}
-
-fn key_width(rows: &[(String, String)]) -> usize {
-    col_width(rows.iter().map(|(k, _)| k.as_str()))
 }
 
 /// Must be applied to the raw string, never a styled one: a width specifier counts
@@ -553,7 +543,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let w = key_width(&rows);
+        let w = col_width(rows.iter().map(|(k, _)| k.as_str()));
         assert_eq!(w, "elasticsearch".len());
 
         let cols: Vec<usize> = rows

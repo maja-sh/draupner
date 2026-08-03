@@ -139,7 +139,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         // The reason a dev server refused to start is the whole content of this
         // failure, so it goes where the user is already looking.
         for line in tail.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            crate::ui::hook_line(name, line, true);
+            crate::ui::hook_line(name, line);
         }
         bail!("exited immediately — see {}", log_hint(name));
     }

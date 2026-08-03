@@ -138,8 +138,8 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let tag_out = tag.to_string();
     let tag_err = tag.to_string();
 
-    let out_h = thread::spawn(move || pipe(stdout, &tag_out, false));
-    let err_h = thread::spawn(move || pipe(stderr, &tag_err, true));
+    let out_h = thread::spawn(move || pipe(stdout, &tag_out));
+    let err_h = thread::spawn(move || pipe(stderr, &tag_err));
 
     let status = child.wait()?;
     let _ = out_h.join();
@@ -219,8 +219,8 @@ fn for_each_line<R: Read>(r: R, mut f: impl FnMut(&str)) {
     }
 }
 
-fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
-    for_each_line(r, |line| ui::hook_line(tag, line, stderr));
+fn pipe<R: Read>(r: R, tag: &str) {
+    for_each_line(r, |line| ui::hook_line(tag, line));
 }
 
 /// Migration shim — delete a release after 0.6, together with its tests.

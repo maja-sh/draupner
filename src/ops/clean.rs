@@ -66,7 +66,7 @@ pub fn run(force: bool) -> Result<()> {
 
     if removed + removable + kept == 0 {
         if orphans.is_empty() {
-            crate::ui::clean_empty();
+            crate::ui::empty("nothing to clean");
         }
         return Ok(());
     }

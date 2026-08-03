@@ -329,19 +329,16 @@ pub enum Script {
 }
 
 impl Script {
-    pub fn commands(&self) -> &[String] {
-        match self {
-            Script::One(s) => std::slice::from_ref(s),
-            Script::Many(v) => v,
-        }
-    }
-
     /// The commands as one fail-fast shell command (`cmd1 && cmd2`), with
     /// `.ws-hooks/…` references anchored (see [`anchor_ws_hooks`]). Resolved once
     /// by [`crate::hooks::resolve`] and dispatched to either site from there, so
     /// the anchoring can't differ between local and server.
     pub fn joined(&self) -> String {
-        self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
+        let cmds = match self {
+            Script::One(s) => std::slice::from_ref(s),
+            Script::Many(v) => v,
+        };
+        cmds.iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
     }
 }
 

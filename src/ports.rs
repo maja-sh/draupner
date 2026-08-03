@@ -51,10 +51,6 @@ fn read_meta(path: &Path) -> Meta {
         .unwrap_or_default()
 }
 
-fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
-    crate::config::write_json_pretty(path, meta)
-}
-
 /// Read-only counterpart to `resolve`: never allocates, empty when nothing has
 /// been allocated yet.
 pub fn load(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, u16> {
@@ -79,7 +75,7 @@ pub fn record_services(
     let path = meta_file(root, branch_sanitized, repo);
     let mut meta = read_meta(&path);
     meta.services = services.clone();
-    write_meta(&path, &meta)
+    crate::config::write_json_pretty(&path, &meta)
 }
 
 /// Ensure every service in `needs` has a host port at `site`. Returns the full
@@ -120,7 +116,7 @@ pub fn resolve(
         used.insert(port);
         meta.ports.insert(svc.clone(), port);
     }
-    write_meta(&path, &meta)?;
+    crate::config::write_json_pretty(&path, &meta)?;
     Ok(meta.ports)
 }
 

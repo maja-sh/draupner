@@ -97,7 +97,7 @@ pub fn run() -> Result<()> {
     }
 
     if tasks.is_empty() {
-        crate::ui::list_empty();
+        crate::ui::empty("no worktrees");
         return Ok(());
     }
 
