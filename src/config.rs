@@ -20,8 +20,96 @@ pub struct WsConfig {
     /// than in a separate overlay file.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub remote: Option<RemoteConfig>,
-    #[serde(default)]
-    pub repos: Vec<RepoEntry>,
+    // Not a doc comment: this text would ship in the schema, where the per-entry
+    // description from `repo_entries_schema` already covers it. Both spellings
+    // deserialize to a full `RepoConfig` — see `deserialize_repos` for why a bare
+    // name must not be a distinct state.
+    #[serde(default, deserialize_with = "deserialize_repos", serialize_with = "serialize_repos")]
+    #[schemars(schema_with = "repo_entries_schema")]
+    pub repos: Vec<RepoConfig>,
+}
+
+/// A **bare-name** entry (`"api"`) is not an opt-out — it means the object entry
+/// with no overrides, and everything downstream (derive, project name, override,
+/// routes) must treat the two spellings alike. When a bare name deserialized to a
+/// distinct state, a bare-name compose repo ran with no `COMPOSE_PROJECT_NAME`,
+/// a second worktree's `up` adopted the first's containers, and `ws rm`'s
+/// `compose down -v` wiped the sibling's volumes. Collapsing the spelling here,
+/// at the parse, is what keeps that state unrepresentable.
+fn deserialize_repos<'de, D>(d: D) -> Result<Vec<RepoConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Name(String),
+        Extended(RepoConfig),
+    }
+    Ok(Vec::<Entry>::deserialize(d)?
+        .into_iter()
+        .map(|e| match e {
+            Entry::Name(name) => RepoConfig { name, ..Default::default() },
+            Entry::Extended(rc) => rc,
+        })
+        .collect())
+}
+
+/// The write half of the shorthand: an entry that is all defaults serializes back
+/// to its bare name, so `ws remote set/unset`'s full-file rewrite round-trips a
+/// hand-written `"repos": ["api"]`. The comparison is against a default-plus-name
+/// value rather than a hand-kept field list, so a new `RepoConfig` field can't
+/// silently stop bare names from round-tripping.
+fn serialize_repos<S>(repos: &[RepoConfig], s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Entry<'a> {
+        Name(&'a str),
+        Extended(&'a RepoConfig),
+    }
+    s.collect_seq(repos.iter().map(|rc| {
+        if *rc == (RepoConfig { name: rc.name.clone(), ..Default::default() }) {
+            Entry::Name(&rc.name)
+        } else {
+            Entry::Extended(rc)
+        }
+    }))
+}
+
+/// The schema the derive would have produced for the deleted two-variant entry
+/// enum: an array whose items are a bare string or a full [`RepoConfig`]. Editor
+/// completion for `"repos": ["api"]` depends on the string arm staying offered.
+fn repo_entries_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    use schemars::schema::*;
+    let entry = SchemaObject {
+        metadata: Some(Box::new(Metadata {
+            description: Some(
+                "A repo entry is either a bare name (convention-only) or an object with overrides."
+                    .to_string(),
+            ),
+            ..Default::default()
+        })),
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![
+                SchemaObject { instance_type: Some(InstanceType::String.into()), ..Default::default() }.into(),
+                gen.subschema_for::<RepoConfig>(),
+            ]),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    SchemaObject {
+        instance_type: Some(InstanceType::Array.into()),
+        array: Some(Box::new(ArrayValidation {
+            items: Some(SingleOrVec::Single(Box::new(entry.into()))),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
 }
 
 /// Remote-offload block. When present, every repo's stack runs on the server and
@@ -84,15 +172,7 @@ pub fn default_worktree_base(ws_root: &Path) -> String {
         .unwrap_or_else(|| "workspace".to_string())
 }
 
-/// A repo entry is either a bare name (convention-only) or an object with overrides.
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum RepoEntry {
-    Name(String),
-    Extended(RepoConfig),
-}
-
-#[derive(Deserialize, Serialize, schemars::JsonSchema, Default)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Default, PartialEq)]
 pub struct RepoConfig {
     pub name: String,
     /// How `ws` launches and de-conflicts this repo's stack. `None` → inferred
@@ -164,7 +244,7 @@ pub enum RepoKind {
 }
 
 /// A single service within a repo: its port and whether it's HTTP-routed.
-#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, PartialEq)]
 pub struct ServiceConfig {
     /// HTTP routing. A string is the subdomain (`"api"` → `<branch>.api.<domain>`);
     /// `true` routes it using the service name as the subdomain; absent or `false`
@@ -221,7 +301,7 @@ impl ServiceConfig {
 }
 
 /// How a service participates in HTTP routing.
-#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum HttpDecl {
     /// Explicit subdomain label.
@@ -231,7 +311,7 @@ pub enum HttpDecl {
 }
 
 /// A lifecycle command: one shell command, or several run in order.
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum Script {
     One(String),
@@ -256,7 +336,7 @@ impl Script {
 }
 
 /// A format-blind config template: render `src` → `dest` with `${WS_*}` tokens.
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, PartialEq)]
 pub struct Template {
     pub src: String,
     pub dest: String,
@@ -273,17 +353,19 @@ impl WsConfig {
         self.runtime.as_deref().unwrap_or("podman")
     }
 
-    /// The extended config for `repo`, if it's an object entry (not a bare name).
+    /// The config for `repo`. `None` only when `repo` isn't an entry in this
+    /// workspace at all — a bare-name entry is a full all-defaults config, not a
+    /// `None` (see [`deserialize_repos`]).
     pub fn repo_config(&self, repo: &str) -> Option<&RepoConfig> {
-        self.repos.iter().find(|r| r.name() == repo).and_then(|r| r.config())
+        self.repos.iter().find(|r| r.name == repo)
     }
 
     pub fn is_host_repo(&self, repo: &str) -> bool {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
 
-    /// A bare-name repo is inferred from the compose file the same way an
-    /// extended one with no `kind` is.
+    /// A repo with no entry at all still gets the compose-file inference, so an
+    /// op pointed at an unlisted repo behaves like one listed with no `kind`.
     pub fn is_container_repo(&self, repo: &str, worktree: &Path) -> bool {
         let has = || crate::compose::has_compose_file(worktree);
         match self.repo_config(repo) {
@@ -301,30 +383,6 @@ impl WsConfig {
 
     pub fn routing_active(&self) -> bool {
         self.domain.is_some()
-    }
-}
-
-impl RepoEntry {
-    pub fn name(&self) -> &str {
-        match self {
-            RepoEntry::Name(s) => s,
-            RepoEntry::Extended(c) => &c.name,
-        }
-    }
-
-    pub fn config(&self) -> Option<&RepoConfig> {
-        match self {
-            RepoEntry::Name(_) => None,
-            RepoEntry::Extended(c) => Some(c),
-        }
-    }
-
-    pub fn worktree_excludes(&self) -> &[String] {
-        self.config().map_or(&[], |c| c.worktree_excludes.as_slice())
-    }
-
-    pub fn copy(&self) -> &[String] {
-        self.config().map_or(&[], |c| c.copy.as_slice())
     }
 }
 
@@ -781,7 +839,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        let repo = cfg.repos[0].config().expect("extended repo");
+        let repo = &cfg.repos[0];
         assert_eq!(repo.kind, Some(RepoKind::Container));
 
         let app = &repo.services["app"];
@@ -807,10 +865,33 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.repos[0].name(), "web");
-        assert!(cfg.repos[0].config().is_none());
-        let app = &cfg.repos[1].config().unwrap().services["app"];
+        assert_eq!(cfg.repos[0].name, "web");
+        // The bare name is a full all-defaults config, not a distinct state.
+        assert!(cfg.repos[0].kind.is_none() && cfg.repos[0].services.is_empty());
+        let app = &cfg.repos[1].services["app"];
         assert!(matches!(app.http, Some(HttpDecl::Enabled(true))));
+    }
+
+    #[test]
+    fn repos_round_trip_keeps_each_entrys_spelling() {
+        // `ws remote set/unset` rewrite the whole file, so an all-defaults entry
+        // must come back out as the bare string it went in as — whichever
+        // spelling it went in as.
+        let json = r#"{"repos":["web",{"name":"api","copy":[".env"]},{"name":"db"}]}"#;
+        let cfg: WsConfig = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(out, r#"{"repos":["web",{"name":"api","copy":[".env"]},"db"]}"#);
+    }
+
+    #[test]
+    fn repos_schema_still_offers_the_bare_string_form() {
+        // The generated `.ws.schema.json` ships to users; editor completion for
+        // `"repos": ["api"]` depends on the string arm staying offered.
+        let schema = serde_json::to_value(schemars::schema_for!(WsConfig)).unwrap();
+        let items = &schema["properties"]["repos"]["items"];
+        let arms = items["anyOf"].as_array().expect("repos items should stay a string-or-object choice");
+        assert!(arms.iter().any(|a| a["type"] == "string"));
+        assert!(arms.iter().any(|a| a["$ref"] == "#/definitions/RepoConfig"));
     }
 
     #[test]

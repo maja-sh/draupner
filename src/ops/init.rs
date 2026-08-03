@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
+use crate::config::{RemoteConfig, RepoConfig, WsConfig};
 use crate::compose;
 
 /// The lifecycle events `ws` dispatches, in the order they happen.
@@ -165,7 +165,7 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
 /// Scaffolds the derived `services` block so the routing is visible in `.ws.json`
 /// from day one. Best-effort: with no compose file or no runtime to run `compose
 /// config`, it stays a bare-name entry and `ws up` re-derives live regardless.
-fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
+fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoConfig {
     let repo_dir = root.join(name);
     // The workspace is being created, so there is no server yet to derive on.
     let services = compose::has_compose_file(&repo_dir)
@@ -174,12 +174,9 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
         })
         .flatten()
         .filter(|s| !s.is_empty());
-    match services {
-        Some(services) => {
-            RepoEntry::Extended(RepoConfig { name: name.to_string(), services, ..Default::default() })
-        }
-        None => RepoEntry::Name(name.to_string()),
-    }
+    // With nothing derived this is all defaults, which serializes back to the
+    // bare-name spelling.
+    RepoConfig { name: name.to_string(), services: services.unwrap_or_default(), ..Default::default() }
 }
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {

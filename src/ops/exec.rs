@@ -39,7 +39,7 @@ pub fn run(
             super::preflight("can't infer the repo; pass it: `ws exec [--branch <b>] <repo> -- …`")
         })?,
     };
-    if !cfg.repos.iter().any(|e| e.name() == repo) {
+    if !cfg.repos.iter().any(|e| e.name == repo) {
         return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
     }
     // Checked before any SSH: `ws new` creates the local `.worktrees/<task>/<repo>`

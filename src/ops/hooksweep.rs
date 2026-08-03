@@ -89,7 +89,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     let targets: Vec<(String, std::path::PathBuf)> = cfg
         .repos
         .iter()
-        .map(|r| r.name())
+        .map(|r| r.name.as_str())
         .filter_map(|name| {
             workspace::worktree_for(&ws.root, branch, name).map(|wt| (name.to_string(), wt))
         })

@@ -98,11 +98,11 @@ pub fn set(
         }
 
         // Always found — `worktrees` only walks configured repos.
-        let Some(entry) = cfg.repos.iter().find(|r| r.name() == repo) else {
+        let Some(entry) = cfg.repos.iter().find(|r| r.name == repo) else {
             continue;
         };
         let remote_path = remote::worktree_path(&base, &task, &repo);
-        let ignores = mutagen::sync_ignores(entry.worktree_excludes(), &wt.path);
+        let ignores = mutagen::sync_ignores(&entry.worktree_excludes, &wt.path);
         let step = crate::ui::step(&format!("{task}/{repo}"), "Sync created");
         match mutagen::create(&session, &wt.path, &connection, &remote_path, &ignores) {
             Ok(()) => {

@@ -17,7 +17,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let site = remote::Site::resolve(&cfg)?;
 
     let requested = parse_repos(repos_arg);
-    let known: Vec<&str> = cfg.repos.iter().map(|r| r.name()).collect();
+    let known: Vec<&str> = cfg.repos.iter().map(|r| r.name.as_str()).collect();
     validate_repos(&requested, &known)?;
 
     let sanitized = workspace::sanitize_branch(branch);
@@ -59,7 +59,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     for repo_name in &requested {
         super::bail_if_interrupted()?;
 
-        let repo_entry = cfg.repos.iter().find(|r| r.name() == repo_name).unwrap();
+        let repo_entry = cfg.repos.iter().find(|r| r.name == *repo_name).unwrap();
         let repo_path = ws.root.join(repo_name);
         let wt_path = task_dir.join(repo_name);
 
@@ -91,7 +91,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             let step = crate::ui::step(repo_name, "Sync created");
             let session = mutagen::session_name(branch, repo_name);
             let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
-            let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
+            let ignores = mutagen::sync_ignores(&repo_entry.worktree_excludes, &wt_path);
             let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
                 // Settle the initial push before we derive/render against the server.
                 .and_then(|()| {
@@ -240,12 +240,12 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
 /// Every failure propagates plainly; the caller owns the rollback, so all four
 /// steps unwind the same way.
 fn seed_worktree(
-    repo_entry: &config::RepoEntry,
+    repo_entry: &config::RepoConfig,
     repo_name: &str,
     repo_path: &Path,
     wt_path: &Path,
 ) -> Result<()> {
-    let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
+    let mut excludes: Vec<String> = repo_entry.worktree_excludes.clone();
 
     // The `!exists` guard is load-bearing: a repo that *commits* vendor/ already
     // has it from `git worktree add`, and `cp -R src dst` onto an existing dst
@@ -272,7 +272,7 @@ fn seed_worktree(
     // Ordered before the exclude registration below so the copied paths join it:
     // a `copy` entry is by definition not in git, and one that isn't gitignored
     // either would leave the worktree reading permanently dirty.
-    let copies = repo_entry.copy();
+    let copies = &repo_entry.copy;
     if !copies.is_empty() {
         let step = crate::ui::step(repo_name, "files copied");
         let dests = seed_copies(repo_path, wt_path, copies)
@@ -384,7 +384,7 @@ fn remove_worktree(repo: &Path, wt: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{seed_copies, seed_worktree};
-    use crate::config::{RepoConfig, RepoEntry};
+    use crate::config::RepoConfig;
     use std::fs;
     use std::path::Path;
 
@@ -430,12 +430,12 @@ mod tests {
         touch(&repo.join("node_modules/pkg/index.js"), "n");
         touch(&repo.join(".env"), "e");
 
-        let entry = RepoEntry::Extended(RepoConfig {
+        let entry = RepoConfig {
             name: "api".into(),
             copy: vec![".env".into()],
             worktree_excludes: vec!["/.venv".into()],
             ..Default::default()
-        });
+        };
 
         seed_worktree(&entry, "api", &repo, &wt).unwrap();
 
@@ -469,11 +469,11 @@ mod tests {
         git_init(&repo);
         git_init(&wt);
 
-        let entry = RepoEntry::Extended(RepoConfig {
+        let entry = RepoConfig {
             name: "api".into(),
             copy: vec!["../secret".into()],
             ..Default::default()
-        });
+        };
 
         assert!(seed_worktree(&entry, "api", &repo, &wt).is_err());
         assert!(wt.is_dir(), "the half-seeded worktree is left for the caller to remove");

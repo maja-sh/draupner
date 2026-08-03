@@ -106,7 +106,7 @@ pub fn remove_task(
     // sibling branch is untouched.
     let torn_down: std::collections::HashSet<&str> =
         worktrees.iter().map(|(r, _)| r.as_str()).collect();
-    for repo in cfg.repos.iter().map(|r| r.name()).filter(|r| !torn_down.contains(r)) {
+    for repo in cfg.repos.iter().map(|r| r.name.as_str()).filter(|r| !torn_down.contains(r)) {
         ports::forget(root, &sanitized, repo);
     }
 

@@ -70,7 +70,7 @@ pub fn prepare(
 ) -> Result<Vec<(String, String)>> {
     // A repo that isn't in this workspace still gets the workspace context.
     let context = workspace_context(cfg);
-    let Some(rc) = repo_config(cfg, repo) else { return Ok(context) };
+    let Some(rc) = cfg.repo_config(repo) else { return Ok(context) };
 
     let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
 
@@ -104,7 +104,7 @@ pub fn prepare(
     // `"DOCKER_COMMAND": "${WS_RUNTIME}"` in `.ws.json` rather than learn ws's
     // vocabulary in a codebase that shouldn't know ws exists.
     subst.extend(context.iter().cloned());
-    for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
+    for peer in cfg.repos.iter().map(|r| r.name.as_str()).filter(|&n| n != repo) {
         subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
     }
 
@@ -130,27 +130,6 @@ pub fn prepare(
     }
     env.extend(context);
     Ok(env)
-}
-
-/// The config to apply to `repo`. `None` only when `repo` isn't an entry in this
-/// workspace at all.
-///
-/// A **bare-name** entry (`"api"`) is not an opt-out — it means the object entry
-/// with no overrides, and everything downstream (derive, project name, override,
-/// routes) must treat the two spellings alike. Turning it back into a `None`
-/// leaves such a repo with no `COMPOSE_PROJECT_NAME`, so parallel worktrees
-/// collide on the compose default project name.
-fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
-    let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
-    match entry.config() {
-        Some(rc) => Some(rc),
-        // One shared all-defaults config serves every bare entry — nothing here
-        // reads `name`.
-        None => {
-            static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
-            Some(BARE.get_or_init(RepoConfig::default))
-        }
-    }
 }
 
 /// The service set for a read-only path. The record wins over the declared block
@@ -303,7 +282,7 @@ pub fn routes(
     branch_sanitized: &str,
     repo: &str,
 ) -> Vec<crate::caddy::RouteSpec> {
-    let (Some(rc), Some(domain)) = (repo_config(cfg, repo), cfg.domain.as_deref()) else {
+    let (Some(rc), Some(domain)) = (cfg.repo_config(repo), cfg.domain.as_deref()) else {
         return Vec::new();
     };
     let services = recorded_or_declared(root, branch_sanitized, repo, rc);
@@ -432,7 +411,7 @@ fn peer_vars(
     peer: &str,
     phase: Phase,
 ) -> Result<BTreeMap<String, String>> {
-    let Some(rc) = repo_config(cfg, peer) else { return Ok(BTreeMap::new()) };
+    let Some(rc) = cfg.repo_config(peer) else { return Ok(BTreeMap::new()) };
     let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 

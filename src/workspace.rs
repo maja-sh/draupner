@@ -85,7 +85,7 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
 
     let mut out = Vec::new();
     for entry in &cfg.repos {
-        let repo = entry.name();
+        let repo = entry.name.as_str();
         let repo_path = root.join(repo);
         if !is_git_repo(&repo_path) {
             continue;
