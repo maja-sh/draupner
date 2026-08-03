@@ -61,9 +61,7 @@ pub fn remove_task(
 
         // Before `ports::forget` wipes the record the forwards are derived from.
         if cfg.remote.is_some() {
-            for (_, port) in ports::load(root, &sanitized, repo) {
-                let _ = mutagen::forward_terminate(&mutagen::forward_session_name(branch, repo, port));
-            }
+            mutagen::terminate_forwards(root, branch, &sanitized, repo);
         }
 
         // Before the worktree removal, so a failed `git worktree remove` (which

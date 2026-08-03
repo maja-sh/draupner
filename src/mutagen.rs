@@ -65,6 +65,16 @@ fn forward_endpoints(connection: &str, port: u16) -> (String, String) {
     (format!("tcp:localhost:{port}"), format!("{connection}:tcp:localhost:{port}"))
 }
 
+/// Terminate every port forward recorded for a worktree, best-effort — the
+/// callers (teardown, a server re-point, `ws down`) must not be blockable by a
+/// dead session. Must run while the `.ws-meta` port record still exists: the
+/// forwards are re-derived from it, so a record wiped first strands them.
+pub fn terminate_forwards(root: &std::path::Path, branch: &str, sanitized: &str, repo: &str) {
+    for (_, port) in crate::ports::load(root, sanitized, repo) {
+        let _ = forward_terminate(&forward_session_name(branch, repo, port));
+    }
+}
+
 /// Best-effort: an absent session is success.
 pub fn forward_terminate(session: &str) -> Result<()> {
     terminate_session("forward", session)

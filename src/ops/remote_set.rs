@@ -81,10 +81,7 @@ pub fn set(
         // but its name carries no host, so the next `ws up` "succeeds" at
         // re-creating it and prints `svc → localhost:<port>` while the socket
         // still tunnels to the old server. Terminate so `up` rebuilds them.
-        let sanitized = workspace::sanitize_branch(&task);
-        for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
-            let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
-        }
+        mutagen::terminate_forwards(&ws.root, &task, &workspace::sanitize_branch(&task), &repo);
 
         // `create` masks a name collision as success, so a surviving session
         // pointing at an older endpoint would report ok while the files kept
@@ -182,11 +179,8 @@ pub fn unset(force: bool) -> Result<()> {
             Err(e) => step.fail(&format!("{e}")),
         }
         // Also before the flip, which makes every future path skip them (they're
-        // guarded on `cfg.remote.is_some()`), and while the port record still exists.
-        let sanitized = workspace::sanitize_branch(&task);
-        for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
-            let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
-        }
+        // guarded on `cfg.remote.is_some()`).
+        mutagen::terminate_forwards(&ws.root, &task, &workspace::sanitize_branch(&task), &repo);
     }
 
     super::write_ws_json(&ws.root, &cfg)?;
