@@ -192,3 +192,24 @@ fn leftover_file_in_task_dir_does_not_fail() {
     // Worktree removed even though the task dir couldn't be pruned.
     assert!(!f.path().join(".worktrees/feat-leftover/api").exists());
 }
+
+// `ws list` enumerates from git, so a registration whose directory is gone shows
+// up there; `rm` has to be able to reach the same thing.
+#[test]
+fn rm_clears_a_registration_whose_directory_is_gone() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/stale"]);
+
+    // Delete the working tree behind git's back, leaving the registration.
+    std::fs::remove_dir_all(f.path().join(".worktrees/feat-stale/api")).unwrap();
+    let registered = |f: &WorkspaceFixture| {
+        String::from_utf8_lossy(&f.git_out("api", &["worktree", "list", "--porcelain"]).stdout)
+            .contains("feat-stale")
+    };
+    assert!(registered(&f), "setup: git must still know the worktree");
+    assert!(stderr(&f.run_ok(&["list"])).contains("feat-stale"), "setup: list must show it");
+
+    let err = stderr(&f.run_ok(&["rm", "feat/stale"]));
+    assert!(err.contains("Removed worktrees"), "expected success summary in:\n{err}");
+    assert!(!registered(&f), "the stale registration must be pruned");
+}

@@ -143,7 +143,18 @@ impl WorkspaceFixture {
     /// as `add_repo`. Panics on failure. Lets tests drive git directly to set
     /// up scenarios (commits, upstreams, dirty state).
     pub fn git(&self, repo_rel: &str, args: &[&str]) {
-        let out = Command::new("git")
+        let out = self.git_out(repo_rel, args);
+        assert!(
+            out.status.success(),
+            "git {args:?} in {repo_rel} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Like `git`, but hands back the output instead of asserting success — for
+    /// tests that read git's own view of a repo rather than driving it.
+    pub fn git_out(&self, repo_rel: &str, args: &[&str]) -> Output {
+        Command::new("git")
             .args(args)
             .current_dir(self.path().join(repo_rel))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -153,12 +164,7 @@ impl WorkspaceFixture {
             .env("GIT_COMMITTER_NAME", "test")
             .env("GIT_COMMITTER_EMAIL", "test@example.com")
             .output()
-            .expect("git");
-        assert!(
-            out.status.success(),
-            "git {args:?} in {repo_rel} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+            .expect("git")
     }
 
     /// Add a repo with a real bare `origin` remote (under `.origins/`) and its
