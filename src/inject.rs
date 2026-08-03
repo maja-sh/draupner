@@ -38,16 +38,11 @@ impl Phase {
     fn allocates(self) -> bool {
         matches!(self, Phase::Activate | Phase::Exec)
     }
-    fn renders(self) -> bool {
-        matches!(self, Phase::Activate)
-    }
-    /// Deriving shells out to the container runtime, too heavy for the read-only
-    /// `ws list`/exec paths — they use the declared `services` and the ports
-    /// already recorded.
-    fn derives(self) -> bool {
-        matches!(self, Phase::Activate)
-    }
-    fn writes_override(self) -> bool {
+    /// Deriving services, rendering templates and writing the compose override
+    /// all ride this one bit: each shells out or rewrites files, too heavy for
+    /// the read-only `ws list`/exec paths — those use the declared `services`
+    /// and the ports already recorded.
+    fn activating(self) -> bool {
         matches!(self, Phase::Activate)
     }
 }
@@ -75,7 +70,7 @@ pub fn prepare(
     let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
 
     let (services, all_services): (BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>) =
-        if phase.derives() {
+        if phase.activating() {
             effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
         } else {
             let s = recorded_or_declared(root, branch_sanitized, repo, rc);
@@ -91,7 +86,7 @@ pub fn prepare(
 
     // Recorded at `up` so the read-only phases can reconstruct hosts and ports
     // for services that were derived from compose and never declared.
-    if phase.derives() {
+    if phase.activating() {
         ports::record_services(root, branch_sanitized, repo, &services)?;
     }
 
@@ -108,7 +103,7 @@ pub fn prepare(
         subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
     }
 
-    if phase.renders() {
+    if phase.activating() {
         render_all(worktree, rc, &subst)?;
     }
 
@@ -261,7 +256,7 @@ fn compose_env(
     }
 
     let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
-    if phase.writes_override()
+    if phase.activating()
         && compose::write_override(site, override_path, services, all_services, port_map, declared, join_ws_net)?
     {
         let mut files: Vec<String> = base.to_vec();

@@ -166,7 +166,7 @@ Then, per repo:
    - `workspace_context` → `WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`.
    - `Site::worktree_at` → the worktree path *at the execution site* (here, the
      local one).
-   - `Phase::derives()` ⇒ **`effective_services`** runs
+   - `Phase::activating()` ⇒ **`effective_services`** runs
      `compose::derive` = `<runtime> compose config --format json` at the site,
      one `ServiceConfig` per published `(service, port)`, HTTP only for container
      port 80/443. The declared `services` block is overlaid on top, key by key.
@@ -181,7 +181,7 @@ Then, per repo:
    - **`ws_vars`** builds `WS_HOST_<svc>` = `<branch>.<subdomain>.<domain>` and
      `WS_PORT_<svc>`. `peer_vars` adds every *other* repo's, re-keyed
      `WS_PORT_<peer>.<svc>`, for substitution only.
-   - `Phase::renders()` ⇒ **`render_all`** renders each declared template
+   - `Phase::activating()` ⇒ **`render_all`** renders each declared template
      (`ensure_within_worktree` on both paths, refuse a git-tracked dest,
      `substitute`), then registers the dests in `.git/info/exclude`.
    - `declared_env` applies the repo's `env` map with `${WS_*}` substituted.
@@ -253,14 +253,13 @@ construction. Both variants honour one contract, which is why `caddy`, `compose`
 `ports` and `supervise` take a `&Site` and never ask whether they are local.
 Resolved exactly once per op. See *Local and remote are one path* below.
 
-**`Phase`** (`inject.rs`) — what an event is allowed to do to the world. Three
-values, four predicates:
-
-| | `allocates` | `derives` | `renders` | `writes_override` |
-|---|---|---|---|---|
-| `Activate` (`up`, `post-create`) | ✓ | ✓ | ✓ | ✓ |
-| `Exec` (local `ws exec`) | ✓ | | | |
-| `Inspect` (`down`, `post-remove`, `status`, `list`, remote `exec`) | | | | |
+**`Phase`** (`inject.rs`) — what an event is allowed to do to the world, as a
+ladder: `Activate` (`up`, `post-create`) does everything; `Exec` (local
+`ws exec`) only allocates ports; `Inspect` (`down`, `post-remove`, `status`,
+`list`, remote `exec`) does nothing but read. Two predicates: `allocates()` is
+true for `Activate` and `Exec`, `activating()` only for `Activate` — and
+`activating` is the one that gates deriving services, rendering templates and
+writing the compose override, because all three shell out or touch the tree.
 
 It exists so callers state intent rather than remembering to pair a render call
 with an env call. `Exec` is the interesting one: it needs `WS_PORT_*` present, so
