@@ -16,9 +16,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // rather than part-way through creating worktrees.
     let site = remote::Site::resolve(&cfg)?;
 
-    let requested = parse_repos(repos_arg);
-    let known: Vec<&str> = cfg.repos.iter().map(|r| r.name.as_str()).collect();
-    validate_repos(&requested, &known)?;
+    let requested = resolve_repos(repos_arg, &cfg)?;
 
     let sanitized = workspace::sanitize_branch(branch);
     if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
@@ -54,7 +52,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     std::fs::create_dir_all(&task_dir)
         .with_context(|| format!("create {}", task_dir.display()))?;
 
-    let mut wt_paths = Vec::new();
+    let mut summary = Vec::new();
 
     for repo_name in &requested {
         super::bail_if_interrupted()?;
@@ -122,13 +120,9 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         };
         run_post_create(&ctx, &extra_env)?;
 
-        wt_paths.push((repo_name.clone(), wt_path));
+        summary.push(format!("{repo_name}: {}", wt_path.display()));
     }
 
-    let summary: Vec<String> = wt_paths
-        .iter()
-        .map(|(name, path)| format!("{name}: {}", path.display()))
-        .collect();
     crate::ui::summary_ok(&summary);
 
     // Delegates to the op `ws up` runs, header and failure semantics included,
@@ -160,30 +154,30 @@ fn run_post_create(ctx: &crate::lifecycle::Ctx, extra_env: &[(String, String)]) 
     }
 }
 
-fn parse_repos(s: &str) -> Vec<String> {
+/// The comma-separated repo list, deduplicated, each name checked against
+/// `.ws.json`.
+fn resolve_repos(arg: &str, cfg: &config::WsConfig) -> Result<Vec<String>> {
     let mut seen = std::collections::HashSet::new();
-    s.split(',')
+    let requested: Vec<String> = arg
+        .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter(|s| seen.insert(s.to_string()))
         .map(String::from)
-        .collect()
-}
-
-fn validate_repos(requested: &[String], known: &[&str]) -> Result<()> {
+        .collect();
     let unknown: Vec<&str> = requested
         .iter()
-        .filter(|r| !known.contains(&r.as_str()))
+        .filter(|r| !cfg.repos.iter().any(|k| k.name == **r))
         .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
         return Err(super::preflight(format!(
             "unknown repo(s): {}. Known repos: {}",
             unknown.join(", "),
-            known.join(", "),
+            cfg.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
         )));
     }
-    Ok(())
+    Ok(requested)
 }
 
 fn fetch_origin(repo: &Path) {
@@ -256,7 +250,7 @@ fn seed_worktree(
         && !wt_path.join("vendor").exists()
     {
         let step = crate::ui::step(repo_name, "vendor/ copied");
-        copy_vendor(repo_path, wt_path).context("vendor/ copy failed")?;
+        cp_r(&repo_path.join("vendor"), &wt_path.join("vendor")).context("vendor/ copy failed")?;
         excludes.push("/vendor".to_string());
         step.ok();
     }
@@ -264,7 +258,10 @@ fn seed_worktree(
     #[cfg(unix)]
     if repo_path.join("node_modules").is_dir() {
         let step = crate::ui::step(repo_name, "node_modules symlinked");
-        symlink_node_modules(repo_name, wt_path)?;
+        let target = PathBuf::from("../../..").join(repo_name).join("node_modules");
+        let link = wt_path.join("node_modules");
+        std::os::unix::fs::symlink(&target, &link)
+            .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
         excludes.push("/node_modules".to_string());
         step.ok();
     }
@@ -290,10 +287,6 @@ fn seed_worktree(
     // this the worktree reads as permanently dirty.
     git::add_worktree_excludes(wt_path, &excludes)
         .with_context(|| format!("register worktree excludes for {repo_name}"))
-}
-
-fn copy_vendor(repo: &Path, wt: &Path) -> Result<()> {
-    cp_r(&repo.join("vendor"), &wt.join("vendor")).context("cp vendor/")
 }
 
 /// Shells out to `cp` rather than walking the tree in Rust so macOS `-c` gives a
@@ -360,15 +353,6 @@ fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Re
     // Anchored to the worktree root; an unanchored pattern would match the same
     // name at any depth.
     excludes.push(format!("/{}", rel.display()));
-    Ok(())
-}
-
-#[cfg(unix)]
-fn symlink_node_modules(repo_name: &str, wt: &Path) -> Result<()> {
-    let target = PathBuf::from("../../..").join(repo_name).join("node_modules");
-    let link = wt.join("node_modules");
-    std::os::unix::fs::symlink(&target, &link)
-        .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))?;
     Ok(())
 }
 
