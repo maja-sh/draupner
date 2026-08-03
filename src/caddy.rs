@@ -1032,6 +1032,16 @@ mod tests {
     }
 
     #[test]
+    fn covers_matches_exact_or_wildcard_only() {
+        assert!(covers("127.0.0.1", "127.0.0.1"));
+        assert!(covers("0.0.0.0", "127.0.0.1"));
+        assert!(covers("::", "100.64.0.5"));
+        assert!(!covers("100.64.0.5", "127.0.0.1"));
+        // The narrow side never covers the wide one.
+        assert!(!covers("127.0.0.1", "0.0.0.0"));
+    }
+
+    #[test]
     fn port_suffix_is_empty_only_for_443() {
         assert_eq!(port_suffix(443), "");
         assert_eq!(port_suffix(8443), ":8443");
