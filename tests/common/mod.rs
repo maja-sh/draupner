@@ -279,7 +279,11 @@ impl WorkspaceFixture {
     }
 
     pub fn run_ok(&self, args: &[&str]) -> Output {
-        let out = self.run(args);
+        self.run_env_ok(args, &[])
+    }
+
+    pub fn run_env_ok(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        let out = self.run_with_env(args, extra_env);
         assert!(
             out.status.success(),
             "ws {args:?} failed (exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -289,6 +293,43 @@ impl WorkspaceFixture {
         );
         out
     }
+}
+
+/// The isolated git env is not optional here: a developer's global
+/// `core.excludesFile` listing `node_modules` makes cleanliness assertions pass
+/// even with the worktree-exclude write removed.
+pub fn git_status_cmd(wt: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(wt).args(["status", "--porcelain"]);
+    git_env(&mut cmd);
+    cmd
+}
+
+/// Panics if git itself failed: a git that dies writes nothing to stdout, which
+/// an stdout-only check happily reads as "clean".
+pub fn git_status(wt: &Path) -> String {
+    let out = git_status_cmd(wt).output().expect("run git status");
+    assert!(
+        out.status.success(),
+        "git status in {} failed (exit {:?}):\n{}",
+        wt.display(),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Every assertion about a supervised process races the detached work that
+/// satisfies it, so they all share one polling budget rather than inventing one
+/// per call site.
+pub fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..40 {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 pub fn stderr(o: &Output) -> String {

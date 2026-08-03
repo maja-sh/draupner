@@ -193,11 +193,6 @@ fn raw_tcp_only_up_makes_no_route_call() {
     );
     f.run_ok(&["new", "api", "feat/db"]);
 
-    let out = f.run_with_env(&["up", "feat/db"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
-    assert!(
-        out.status.success(),
-        "a raw-TCP-only stack must not need Caddy:\n{}",
-        stderr(&out)
-    );
+    let out = f.run_env_ok(&["up", "feat/db"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
     assert!(!stderr(&out).contains("routed"), "no route should be attempted:\n{}", stderr(&out));
 }

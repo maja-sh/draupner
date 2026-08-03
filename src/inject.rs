@@ -471,21 +471,8 @@ mod tests {
         ServiceConfig { http, port, shared: false, wildcard: false }
     }
 
-    fn repo_with(services: &[(&str, ServiceConfig)]) -> RepoConfig {
-        RepoConfig {
-            name: "api".into(),
-            kind: None,
-            services: services.iter().map(|(n, s)| ((*n).into(), s.clone())).collect(),
-            scripts: Default::default(),
-            env: Default::default(),
-            templates: Vec::new(),
-            worktree_excludes: Vec::new(),
-            copy: Vec::new(),
-        }
-    }
-
-    fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
-        rc.services.clone()
+    fn services(entries: &[(&str, ServiceConfig)]) -> BTreeMap<String, ServiceConfig> {
+        entries.iter().map(|(n, s)| ((*n).into(), s.clone())).collect()
     }
 
     #[test]
@@ -542,7 +529,7 @@ mod tests {
         let root = tmp.path();
         let cfg: WsConfig =
             serde_json::from_str(r#"{"domain":"myapp.test","repos":["api"]}"#).unwrap();
-        let recorded = services(&repo_with(&[("web", svc(Some(HttpDecl::Enabled(true)), 80))]));
+        let recorded = services(&[("web", svc(Some(HttpDecl::Enabled(true)), 80))]);
         ports::record_services(root, "feat-a", "api", &recorded).unwrap();
 
         let specs = routes(&cfg, root, "feat-a", "api");
@@ -633,11 +620,11 @@ mod tests {
 
     #[test]
     fn route_specs_container_upstreams_and_http_filter() {
-        let services = services(&repo_with(&[
+        let services = services(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("admin", svc(Some(HttpDecl::Enabled(true)), 8080)),
             ("mysql", svc(None, 3306)),
-        ]));
+        ]);
         let specs = route_specs(
             &services, &BTreeMap::new(), false, "feat-x-api", "feat-x", "api", "myapp.test",
         );
@@ -652,10 +639,10 @@ mod tests {
 
     #[test]
     fn route_specs_host_upstreams_and_drop_when_no_port() {
-        let services = services(&repo_with(&[
+        let services = services(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 8080)),
             ("api", svc(Some(HttpDecl::Enabled(true)), 9000)),
-        ]));
+        ]);
         // Only `web` has an allocation, so `api` is dropped rather than routed to
         // a port it never got.
         let ports = [("web".to_string(), 20001u16)].into_iter().collect();
@@ -672,7 +659,7 @@ mod tests {
         // tells Caddy to also match every tenant label in front of it.
         let mut app = svc(Some(HttpDecl::Subdomain("app".into())), 3000);
         app.wildcard = true;
-        let services = services(&repo_with(&[("app", app)]));
+        let services = services(&[("app", app)]);
         let ports = [("app".to_string(), 20005u16)].into_iter().collect();
         let specs = route_specs(&services, &ports, true, "", "feat-x", "app", "myapp.test");
         assert_eq!(specs.len(), 1);
@@ -686,7 +673,7 @@ mod tests {
         // never a hostname-less or bogus route.
         let mut db = svc(None, 5432);
         db.wildcard = true;
-        let services = services(&repo_with(&[("db", db)]));
+        let services = services(&[("db", db)]);
         let ports = [("db".to_string(), 20009u16)].into_iter().collect();
         assert!(route_specs(&services, &ports, false, "proj", "feat-x", "api", "myapp.test").is_empty());
     }
@@ -722,7 +709,7 @@ mod tests {
 
     #[test]
     fn ws_vars_maps_http_to_host_and_tcp_to_port() {
-        let rc = repo_with(&[
+        let svcs = services(&[
             ("app", svc(Some(HttpDecl::Subdomain("api".into())), 80)),
             ("admin", svc(Some(HttpDecl::Enabled(true)), 8080)),
             ("mysql", svc(None, 3306)),
@@ -731,7 +718,7 @@ mod tests {
         ports.insert("mysql".to_string(), 54321u16);
 
         // Container repo: HTTP services get no WS_PORT.
-        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
+        let vars = ws_vars(&svcs, "feat-x", Some("myapp.test"), &ports, false);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_HOST_admin"], "feat-x.admin.myapp.test");
         assert_eq!(vars["WS_PORT_mysql"], "54321");
@@ -740,11 +727,11 @@ mod tests {
 
     #[test]
     fn ws_vars_host_repo_gives_http_service_both_host_and_port() {
-        let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 8080))]);
+        let svcs = services(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 8080))]);
         let mut ports = BTreeMap::new();
         ports.insert("app".to_string(), 20001u16);
         // Host repo: an HTTP service gets WS_HOST *and* the port to bind.
-        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, true);
+        let vars = ws_vars(&svcs, "feat-x", Some("myapp.test"), &ports, true);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_PORT_app"], "20001");
     }
@@ -753,17 +740,17 @@ mod tests {
     fn ws_vars_container_http_ignores_stale_port() {
         // A now-HTTP service with a lingering `.ws-meta` port must not leak
         // WS_PORT on a container repo.
-        let rc = repo_with(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
+        let svcs = services(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         let mut ports = BTreeMap::new();
         ports.insert("web".to_string(), 20001u16); // stale allocation from a raw-TCP era
-        let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
+        let vars = ws_vars(&svcs, "feat-x", Some("myapp.test"), &ports, false);
         assert!(!vars.contains_key("WS_PORT_web"), "stale port must not leak: {vars:?}");
     }
 
     #[test]
     fn ws_vars_skips_host_without_domain() {
-        let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
-        let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new(), false);
+        let svcs = services(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
+        let vars = ws_vars(&svcs, "feat-x", None, &BTreeMap::new(), false);
         assert!(vars.is_empty(), "no domain ⇒ no WS_HOST var: {vars:?}");
     }
 
@@ -801,7 +788,7 @@ mod tests {
 
     #[test]
     fn declared_env_substitutes_declared_mappings() {
-        let mut rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
+        let mut rc = RepoConfig { name: "api".into(), ..Default::default() };
         rc.env.insert("APP_URL".into(), "https://${WS_HOST_app}".into());
         let mut vars = BTreeMap::new();
         vars.insert("WS_HOST_app".to_string(), "feat-x.api.myapp.test".to_string());

@@ -1,35 +1,7 @@
 mod common;
 
-use common::{stderr, WorkspaceFixture};
+use common::{git_status, git_status_cmd, stderr, wait_until, WorkspaceFixture};
 use std::path::Path;
-use std::process::Command;
-
-/// The isolated git env is not optional here: a developer's global
-/// `core.excludesFile` listing `node_modules` makes the cleanliness tests below
-/// pass even with the worktree-exclude write removed.
-fn git_status_cmd(wt: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(wt)
-        .args(["status", "--porcelain"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null");
-    cmd
-}
-
-/// Panics if git itself failed: a git that dies writes nothing to stdout, which
-/// an stdout-only check happily reads as "clean".
-fn git_status(wt: &Path) -> String {
-    let out = git_status_cmd(wt).output().expect("run git status");
-    assert!(
-        out.status.success(),
-        "git status in {} failed (exit {:?}):\n{}",
-        wt.display(),
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
 
 #[test]
 fn new_on_a_remote_workspace_creates_a_sync_session() {
@@ -44,7 +16,7 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     // answer that probe or the op dials a real host.
     let ssh = f.stub("fake-ssh", "printf /home/test");
 
-    let out = f.run_with_env(
+    f.run_env_ok(
         &["new", "api", "feat/foo"],
         &[
             ("WS_MUTAGEN", mg.to_str().unwrap()),
@@ -52,7 +24,6 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
             ("WS_SSH", ssh.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("mutagen was invoked");
     assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
@@ -76,11 +47,10 @@ fn new_without_a_remote_block_does_not_sync() {
     let mg = f.arg_recorder("fake-mutagen");
     let args = f.path().join("mutagen-args.txt");
 
-    let out = f.run_with_env(
+    f.run_env_ok(
         &["new", "api", "feat/foo"],
         &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     assert!(!args.exists(), "no mutagen calls without a remote block");
 }
 
@@ -440,18 +410,6 @@ echo "WS_WORKSPACE_ROOT=$WS_WORKSPACE_ROOT""#,
     );
 }
 
-/// `supervise::up` returns as soon as the process is launched, so its marker
-/// write races the assertion.
-fn wait_for(p: &std::path::Path) -> bool {
-    for _ in 0..40 {
-        if p.exists() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    false
-}
-
 fn up_marker_fixture() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
@@ -475,7 +433,7 @@ fn new_with_up_brings_the_stack_up_in_one_command() {
     assert!(err.contains("ws-new"), "should still do the create:\n{err}");
     assert!(err.contains("ws-up"), "should chain into up:\n{err}");
     assert!(
-        wait_for(&f.path().join(".worktrees/feat-foo/api/up-ran")),
+        wait_until(|| f.path().join(".worktrees/feat-foo/api/up-ran").exists()),
         "up script should have run:\n{err}"
     );
     assert!(!err.contains("next: ws up"), "nudge should be suppressed:\n{err}");

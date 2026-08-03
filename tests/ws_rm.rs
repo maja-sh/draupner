@@ -15,7 +15,7 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
     let ssh = f.stub("fake-ssh", "printf /home/test");
 
     let create_args = f.path().join("create-args.txt");
-    f.run_with_env(
+    f.run_env_ok(
         &["new", "api", "feat/foo"],
         &[
             ("WS_MUTAGEN", mg.to_str().unwrap()),
@@ -25,7 +25,7 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
     );
 
     let term_args = f.path().join("term-args.txt");
-    let out = f.run_with_env(
+    f.run_env_ok(
         &["rm", "feat/foo"],
         &[
             ("WS_MUTAGEN", mg.to_str().unwrap()),
@@ -33,7 +33,6 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
             ("WS_SSH", ssh.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws rm failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&term_args).expect("mutagen was invoked on rm");
     assert!(rec.contains("terminate"), "expected `sync terminate`:\n{rec}");

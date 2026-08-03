@@ -431,16 +431,6 @@ mod tests {
         !sh_capture(&format!("command -v {bin} 2>/dev/null")).is_empty()
     }
 
-    fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let uniq = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ws-supervise-{tag}-{}-{uniq}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
-    }
-
     /// Whether `pid` is a *live* process — not merely one `kill -0` accepts. A
     /// process the test itself spawned is a zombie until reaped, and signalling a
     /// zombie succeeds, so liveness is read off the process state.
@@ -548,8 +538,8 @@ mod tests {
             eprintln!("skipping: no `zsh` to stand in for a non-POSIX login shell");
             return;
         }
-        let dir = scratch_dir("down");
-        let pid_path = dir.join("tree.pid");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("tree.pid");
 
         // Two pids: a wrapper `sh` that can't `exec` its child because something
         // follows it, plus the `sleep` itself — the shape `tree_fn` exists for.
@@ -590,7 +580,6 @@ mod tests {
             .status();
         let _ = wrapper.wait();
         let pid_file_gone = !pid_path.exists();
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(status.success(), "the down script must exit 0, got {status}");
         assert!(
@@ -609,8 +598,8 @@ mod tests {
         // over as a single word, so a host process with more than one pid never matched
         // and `ws list` reported "held by another process" for its own server.
         use std::os::unix::fs::PermissionsExt;
-        let dir = scratch_dir("owner");
-        let bin = dir.join("bin");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).expect("bin dir");
         // Stand-in `ss`: one listening socket held by two pids, as a forked dev
         // server reports. Deterministic, and it needs no real listener.
@@ -654,6 +643,5 @@ mod tests {
                 "{shell}: a port nobody listens on must read as free"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

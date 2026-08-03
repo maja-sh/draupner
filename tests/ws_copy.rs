@@ -1,6 +1,6 @@
 mod common;
 
-use common::{stderr, WorkspaceFixture};
+use common::{git_status, stderr, WorkspaceFixture};
 use std::fs;
 
 #[test]
@@ -52,15 +52,6 @@ fn copied_files_do_not_leave_the_worktree_dirty() {
     let wt = f.path().join(".worktrees/feat-foo/api");
     assert!(wt.join("dev-secrets.txt").is_file(), "file was seeded");
 
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&wt)
-        .args(["status", "--porcelain"])
-        .output()
-        .expect("git status");
-    assert_eq!(
-        String::from_utf8_lossy(&status.stdout).trim(),
-        "",
-        "worktree must read clean after copy"
-    );
+    let status = git_status(&wt);
+    assert_eq!(status.trim(), "", "worktree must read clean after copy");
 }

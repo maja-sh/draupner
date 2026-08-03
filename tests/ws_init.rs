@@ -46,7 +46,7 @@ fn init_remote_writes_the_remote_block() {
     // Passes the client-readiness check: mutagen "installed", host reachable.
     let ok = ws.stub("ok", "exit 0");
 
-    let out = ws.run_with_env(
+    ws.run_env_ok(
         &["init", "--remote"],
         &[
             ("WS_REMOTE_HOST", "srv"),
@@ -54,7 +54,6 @@ fn init_remote_writes_the_remote_block() {
             ("WS_MUTAGEN", ok.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws init --remote failed:\n{}", stderr(&out));
 
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
@@ -103,11 +102,10 @@ fn init_remote_no_verify_skips_the_checks() {
     ws.add_repo("api");
     let bad = ws.stub("bad", "exit 1");
 
-    let out = ws.run_with_env(
+    ws.run_env_ok(
         &["init", "--remote", "srv", "--no-verify"],
         &[("WS_SSH", bad.to_str().unwrap()), ("WS_MUTAGEN", bad.to_str().unwrap())],
     );
-    assert!(out.status.success(), "--no-verify should skip the checks:\n{}", stderr(&out));
     assert!(ws.path().join(".ws.json").exists(), "config written with --no-verify");
 }
 

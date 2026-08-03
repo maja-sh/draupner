@@ -79,11 +79,10 @@ fn init_remote_falls_back_to_the_global_default_host() {
     let ok = ws.stub("ok", "exit 0");
     ws.run_ok(&["config", "set", "remote.host", "global-host"]);
 
-    let out = ws.run_with_env(
+    ws.run_env_ok(
         &["init", "--remote"],
         &[("WS_SSH", ok.to_str().unwrap()), ("WS_MUTAGEN", ok.to_str().unwrap())],
     );
-    assert!(out.status.success(), "init should use the global default:\n{}", stderr(&out));
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("global-host"), "global default host expected:\n{cfg}");
 }
@@ -95,7 +94,7 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let ok = ws.stub("ok", "exit 0");
     ws.run_ok(&["config", "set", "remote.host", "global-host"]);
 
-    let out = ws.run_with_env(
+    ws.run_env_ok(
         &["init", "--remote"],
         &[
             ("WS_REMOTE_HOST", "env-host"),
@@ -103,7 +102,6 @@ fn env_beats_the_global_default_and_flag_beats_env() {
             ("WS_MUTAGEN", ok.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("env-host") && !cfg.contains("global-host"), "env wins:\n{cfg}");
 
@@ -111,7 +109,7 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let ws2 = WorkspaceFixture::empty();
     ws2.add_repo("api");
     let ok2 = ws2.stub("ok", "exit 0");
-    let out = ws2.run_with_env(
+    ws2.run_env_ok(
         &["init", "--remote", "flag-host"],
         &[
             ("WS_REMOTE_HOST", "env-host"),
@@ -119,7 +117,6 @@ fn env_beats_the_global_default_and_flag_beats_env() {
             ("WS_MUTAGEN", ok2.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     let cfg = std::fs::read_to_string(ws2.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("flag-host") && !cfg.contains("env-host"), "flag wins:\n{cfg}");
 }

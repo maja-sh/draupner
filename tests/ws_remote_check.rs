@@ -30,12 +30,11 @@ fn remote_check_all_green_reports_ready() {
     let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\ndns:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
-    let out = f.run_with_env(
+    let out = f.run_env_ok(
         &["remote", "check"],
         &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
-    assert!(out.status.success(), "healthy remote must exit 0:\n{err}");
     assert!(err.contains("remote looks ready"), "expected ready summary:\n{err}");
     assert!(
         err.contains("srv:myapp/<task>/<repo>"),
@@ -91,12 +90,11 @@ fn remote_check_without_a_domain_omits_the_dns_probe() {
     let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
-    let out = f.run_with_env(
+    let out = f.run_env_ok(
         &["remote", "check"],
         &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
-    assert!(out.status.success(), "a domainless remote must still pass:\n{err}");
     assert!(!err.contains("dns"), "the DNS probe must not appear at all:\n{err}");
 }
 
@@ -126,12 +124,11 @@ fn remote_check_host_flag_overrides_and_defaults_the_path() {
     let ssh = ssh_stub(&f, "mutagen:ok\\npodman:ok\\ncaddy:ok\\nworkspace:ok\\ndns:ok\\n");
     let mutagen = f.stub("mutagen-fake", "exit 0");
 
-    let out = f.run_with_env(
+    let out = f.run_env_ok(
         &["remote", "check", "--host", "otherbox"],
         &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
-    assert!(out.status.success(), "--host healthy check must pass:\n{err}");
     assert!(err.contains("otherbox:"), "expected the --host target in the path echo:\n{err}");
 }
 

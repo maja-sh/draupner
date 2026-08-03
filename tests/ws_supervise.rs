@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{stderr, WorkspaceFixture};
+use common::{stderr, wait_until, WorkspaceFixture};
 use std::path::PathBuf;
 
 fn host_fixture() -> WorkspaceFixture {
@@ -35,19 +35,6 @@ fn proc_alive(f: &WorkspaceFixture) -> bool {
     // The pid file is two lines: the pid, then the start-time identity.
     let pid = contents.lines().next().unwrap_or("").trim();
     !pid.is_empty() && alive(pid)
-}
-
-/// Every assertion about a supervised process races the detached work that
-/// satisfies it, so they all share one polling budget rather than inventing one
-/// per call site.
-fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
-    for _ in 0..40 {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    false
 }
 
 fn stop(f: &WorkspaceFixture) {

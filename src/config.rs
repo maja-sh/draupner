@@ -592,21 +592,20 @@ mod tests {
 
     use super::*;
 
-    fn write_cfg(dir: &Path, json: &str) {
-        std::fs::write(dir.join(".ws.json"), json).unwrap();
+    /// `load` only reads from a directory, so parse-behavior tests go through a
+    /// scratch file; tests about the file boundary itself write their own.
+    fn load_str(json: &str) -> Result<WsConfig> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".ws.json"), json).unwrap();
+        load(dir.path())
     }
 
     #[test]
     fn load_refuses_a_publish_address_that_isnt_an_address() {
         for bad in ["localhost", "1.2.3.4:8443", "0.0.0.0/0", "not-an-ip", "224.0.0.1"] {
-            let dir = tempfile::tempdir().unwrap();
-            write_cfg(
-                dir.path(),
-                &format!(
-                    r#"{{"repos":[],"remote":{{"connection":"h","publish_address":"{bad}"}}}}"#
-                ),
-            );
-            let err = match load(dir.path()) {
+            let err = match load_str(&format!(
+                r#"{{"repos":[],"remote":{{"connection":"h","publish_address":"{bad}"}}}}"#
+            )) {
                 Err(e) => e.to_string(),
                 Ok(_) => panic!("expected {bad:?} to be refused"),
             };
@@ -620,27 +619,21 @@ mod tests {
     #[test]
     fn load_accepts_ipv4_ipv6_and_an_absent_publish_address() {
         for good in [r#","publish_address":"100.64.1.3""#, r#","publish_address":"fd7a::1""#, ""] {
-            let dir = tempfile::tempdir().unwrap();
-            write_cfg(
-                dir.path(),
-                &format!(r#"{{"repos":[],"remote":{{"connection":"h"{good}}}}}"#),
-            );
-            assert!(load(dir.path()).is_ok(), "expected {good:?} accepted");
+            let ok = load_str(&format!(r#"{{"repos":[],"remote":{{"connection":"h"{good}}}}}"#));
+            assert!(ok.is_ok(), "expected {good:?} accepted");
         }
     }
 
     /// Delete with the migration shim it covers.
     #[test]
     fn load_refuses_a_leftover_hooks_override_map() {
-        let dir = tempfile::tempdir().unwrap();
-        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".ws-hooks/api/up"}}]}"#);
-        let err = load(dir.path()).err().expect("a `hooks` block must be refused").to_string();
+        let err = load_str(r#"{"repos":[{"name":"api","hooks":{"up":".ws-hooks/api/up"}}]}"#)
+            .err().expect("a `hooks` block must be refused").to_string();
         assert!(err.contains("`hooks`") && err.contains("api"), "{err}");
         assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
 
         // A `.ws-hooks/…` *script* value must not trip the cheap substring gate.
-        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#);
-        assert!(load(dir.path()).is_ok());
+        assert!(load_str(r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#).is_ok());
     }
 
     #[test]
@@ -653,13 +646,10 @@ mod tests {
 
     #[test]
     fn parses_top_level_domain_runtime_and_remote() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".ws.json"),
+        let cfg = load_str(
             r#"{"domain":"myapp.test","repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
         )
         .unwrap();
-        let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.domain.as_deref(), Some("myapp.test"));
         assert_eq!(cfg.runtime(), "podman");
         let remote = cfg.remote.expect("remote block");
@@ -670,13 +660,8 @@ mod tests {
     #[test]
     fn load_rejects_an_option_shaped_remote_connection() {
         // A hostile `.ws.json` can arrive via a clone (it isn't gitignored).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".ws.json"),
-            r#"{"remote":{"connection":"-oProxyCommand=touch /tmp/pwned"},"repos":[]}"#,
-        )
-        .unwrap();
-        let err = load(dir.path()).err().expect("load should reject the connection");
+        let err = load_str(r#"{"remote":{"connection":"-oProxyCommand=touch /tmp/pwned"},"repos":[]}"#)
+            .err().expect("load should reject the connection");
         assert!(
             err.to_string().contains("unsafe remote.connection"),
             "expected the load to reject an option-shaped connection: {err}"
@@ -685,9 +670,7 @@ mod tests {
 
     #[test]
     fn runtime_override_is_read() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".ws.json"), r#"{"runtime":"docker","repos":[]}"#).unwrap();
-        assert_eq!(load(dir.path()).unwrap().runtime(), "docker");
+        assert_eq!(load_str(r#"{"runtime":"docker","repos":[]}"#).unwrap().runtime(), "docker");
     }
 
     #[test]
@@ -705,9 +688,7 @@ mod tests {
             "podman --remote",
             "",
         ] {
-            let dir = tempfile::tempdir().unwrap();
-            write_cfg(dir.path(), &format!(r#"{{"runtime":"{bad}","repos":[]}}"#));
-            let err = match load(dir.path()) {
+            let err = match load_str(&format!(r#"{{"runtime":"{bad}","repos":[]}}"#)) {
                 Err(e) => e.to_string(),
                 Ok(_) => panic!("expected runtime {bad:?} to be refused"),
             };
@@ -719,9 +700,7 @@ mod tests {
     fn load_accepts_any_bare_or_absolute_runtime() {
         // Not an allow-list of two names — people do run other runtimes.
         for good in ["podman", "docker", "nerdctl", "podman-remote", "/usr/local/bin/podman"] {
-            let dir = tempfile::tempdir().unwrap();
-            write_cfg(dir.path(), &format!(r#"{{"runtime":"{good}","repos":["api"]}}"#));
-            let cfg = match load(dir.path()) {
+            let cfg = match load_str(&format!(r#"{{"runtime":"{good}","repos":["api"]}}"#)) {
                 Ok(c) => c,
                 Err(e) => panic!("expected runtime {good:?} accepted: {e}"),
             };
@@ -731,9 +710,7 @@ mod tests {
 
     #[test]
     fn parses_extended_repo_with_services_scripts_env_templates() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".ws.json"),
+        let cfg = load_str(
             r#"{"repos":[{
                 "name":"api","kind":"container",
                 "services":{"app":{"http":"api","port":80},"mysql":{"port":3306},"redis":{"port":6379,"shared":true}},
@@ -743,7 +720,6 @@ mod tests {
             }]}"#,
         )
         .unwrap();
-        let cfg = load(dir.path()).unwrap();
         let repo = &cfg.repos[0];
         assert_eq!(repo.kind, Some(RepoKind::Container));
 
@@ -763,13 +739,9 @@ mod tests {
 
     #[test]
     fn http_true_and_bare_name_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".ws.json"),
-            r#"{"repos":["web",{"name":"api","services":{"app":{"http":true,"port":8080}}}]}"#,
-        )
-        .unwrap();
-        let cfg = load(dir.path()).unwrap();
+        let cfg =
+            load_str(r#"{"repos":["web",{"name":"api","services":{"app":{"http":true,"port":8080}}}]}"#)
+                .unwrap();
         assert_eq!(cfg.repos[0].name, "web");
         // The bare name is a full all-defaults config, not a distinct state.
         assert!(cfg.repos[0].kind.is_none() && cfg.repos[0].services.is_empty());

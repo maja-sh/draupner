@@ -231,8 +231,7 @@ fn remote_set_falls_back_to_env_then_global_config_for_the_host() {
     assert!(cfg.contains("global-host"), "{cfg}");
 
     // env beats global on the next re-point.
-    let out = ws.run_with_env(&["remote", "set", "--no-verify"], &[("WS_REMOTE_HOST", "env-host")]);
-    assert!(out.status.success(), "{}", stderr(&out));
+    ws.run_env_ok(&["remote", "set", "--no-verify"], &[("WS_REMOTE_HOST", "env-host")]);
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("env-host") && !cfg.contains("global-host"), "env wins:\n{cfg}");
 }
@@ -256,14 +255,13 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
 
     let rec = ws.arg_recorder("mutagen-rec");
     let args_file = ws.path().join("mutagen-args");
-    let out = ws.run_with_env(
+    ws.run_env_ok(
         &["remote", "unset"],
         &[
             ("WS_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
 
     let calls = recorded(&args_file);
     assert!(
@@ -386,7 +384,7 @@ fn remote_set_proceeds_when_the_container_stack_is_down() {
     let ok = ws.stub("ok", "exit 0");
     let rec = ws.arg_recorder("mutagen-rec");
     let args_file = ws.path().join("mutagen-args");
-    let out = ws.run_with_env(
+    let out = ws.run_env_ok(
         &["remote", "set", "srv", "--no-verify"],
         &[
             ("WS_SSH", ok.to_str().unwrap()),
@@ -394,7 +392,6 @@ fn remote_set_proceeds_when_the_container_stack_is_down() {
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "an idle stack must not block the flip:\n{}", stderr(&out));
     assert!(
         !stderr(&out).contains("ws remote unset"),
         "recovery note is for stranded stacks only:\n{}",
@@ -439,7 +436,7 @@ fn remote_unset_force_flips_when_liveness_is_unknown() {
     let bad = ws.stub("bad", "exit 255");
     let rec = ws.arg_recorder("mutagen-rec");
     let args_file = ws.path().join("mutagen-args");
-    let out = ws.run_with_env(
+    let out = ws.run_env_ok(
         &["remote", "unset", "--force"],
         &[
             ("WS_SSH", bad.to_str().unwrap()),
@@ -447,7 +444,6 @@ fn remote_unset_force_flips_when_liveness_is_unknown() {
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "--force must go local anyway:\n{}", stderr(&out));
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
     // Unknown liveness counts as possibly-stranded, so the recovery route is shown.
@@ -465,11 +461,10 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
         "for a in \"$@\"; do\n  if [ \"$a\" = -G ]; then echo 'hostname 127.0.0.2'; exit 0; fi\ndone\nexit 0",
     );
 
-    let out = ws.run_with_env(
+    let out = ws.run_env_ok(
         &["remote", "set", "srv", "--no-verify"],
         &[("WS_SSH", sshg.to_str().unwrap())],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     let err = stderr(&out);
     assert!(err.contains("`*.myapp.test`"), "{err}");
     assert!(err.contains("should resolve to 127.0.0.2, not 127.0.0.1"), "{err}");
@@ -493,14 +488,13 @@ fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
     let rec = ws.arg_recorder("mutagen-rec");
     let args_file = ws.path().join("mutagen-args");
 
-    let out = ws.run_with_env(
+    let out = ws.run_env_ok(
         &["remote", "unset"],
         &[
             ("WS_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     let err = stderr(&out);
     assert!(
         err.contains("should resolve to 127.0.0.1, not 100.64.1.3"),

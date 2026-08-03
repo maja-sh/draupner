@@ -1,7 +1,6 @@
 mod common;
 
-use common::{stderr, WorkspaceFixture};
-use std::process::Command;
+use common::{git_status, stderr, WorkspaceFixture};
 
 fn port_in(haystack: &str) -> u16 {
     common::port_after(haystack, "PORT=[")
@@ -289,16 +288,4 @@ fn exec_local_gets_ws_port_env() {
     let combined = format!("{}{}", common::stdout(&out), stderr(&out));
     let port = port_in(&combined);
     assert!((20000..40000).contains(&port), "exec should inject WS_PORT: {port}");
-}
-
-fn git_status(wt: &std::path::Path) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["status", "--porcelain"])
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .output()
-        .expect("git status");
-    String::from_utf8_lossy(&out.stdout).into_owned()
 }

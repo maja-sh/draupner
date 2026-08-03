@@ -27,8 +27,13 @@ esac"#,
 }
 
 /// Mutagen isn't installed on CI, and sync is best-effort, so a no-op stands in.
-fn mutagen_noop(f: &WorkspaceFixture) -> PathBuf {
-    f.stub("fake-mutagen", "exit 0")
+fn remote_fixture(repo: &str, ws_json: &str) -> (WorkspaceFixture, PathBuf, PathBuf) {
+    let f = WorkspaceFixture::empty();
+    f.add_repo(repo);
+    f.write_ws_json(ws_json);
+    let ssh = ssh_stub(&f);
+    let mg = f.stub("fake-mutagen", "exit 0");
+    (f, ssh, mg)
 }
 
 fn remote_env<'a>(ssh: &'a Path, mg: &'a Path, args: &'a Path) -> [(&'a str, &'a str); 3] {
@@ -49,24 +54,26 @@ fn remote_container_ws() -> &'static str {
     }"#
 }
 
+fn host_repo_ws() -> &'static str {
+    r#"{
+        "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
+                  "scripts":{"up":"run --port $WS_PORT_web"}}],
+        "remote":{"connection":"srv","workspace_path":"ws"}
+    }"#
+}
+
 fn new_remote(f: &WorkspaceFixture, repo: &str, ssh: &Path, mg: &Path) {
     let args = f.path().join("new-ssh.txt");
-    let out = f.run_with_env(&["new", repo, "feat/foo"], &remote_env(ssh, mg, &args));
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+    f.run_env_ok(&["new", repo, "feat/foo"], &remote_env(ssh, mg, &args));
 }
 
 #[test]
 fn up_runs_the_script_on_the_server_over_ssh() {
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(remote_container_ws());
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
+    let (f, ssh, mg) = remote_fixture("api", remote_container_ws());
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    f.run_env_ok(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -99,16 +106,11 @@ fn dashed_service_ws() -> &'static str {
 fn a_dashed_service_name_keeps_the_up_script_runnable() {
     // A bare `WS_PORT_redis-cache=20001` word isn't an assignment to the shell —
     // it's the command, and the whole remote script dies with exit 127.
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(dashed_service_ws());
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
+    let (f, ssh, mg) = remote_fixture("api", dashed_service_ws());
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    f.run_env_ok(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -125,16 +127,11 @@ fn a_dashed_service_name_keeps_the_status_probe_runnable() {
     // Same key as above, but here the exit 127 was silent — `ssh_capture` returned
     // `None` and the status column showed its missing-value dash. Hence the final
     // assertion that the server's answer actually reaches the listing.
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(dashed_service_ws());
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
+    let (f, ssh, mg) = remote_fixture("api", dashed_service_ws());
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("list-ssh.txt");
-    let out = f.run_with_env(&["list"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+    let out = f.run_env_ok(&["list"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -149,16 +146,11 @@ fn a_dashed_service_name_keeps_the_status_probe_runnable() {
 
 #[test]
 fn down_runs_the_script_on_the_server_over_ssh() {
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(remote_container_ws());
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
+    let (f, ssh, mg) = remote_fixture("api", remote_container_ws());
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("down-ssh.txt");
-    let out = f.run_with_env(&["down", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws down failed:\n{}", stderr(&out));
+    f.run_env_ok(&["down", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
@@ -170,22 +162,18 @@ fn down_runs_the_script_on_the_server_over_ssh() {
 
 #[test]
 fn list_runs_status_on_the_server_for_a_remote_workspace() {
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(
+    let (f, ssh, mg) = remote_fixture(
+        "api",
         r#"{
             "repos":[{"name":"api","services":{"mysql":{"port":3306}},
                       "scripts":{"up":"echo x","status":"docker compose ps"}}],
             "remote":{"connection":"srv","workspace_path":"ws"}
         }"#,
     );
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("list-ssh.txt");
-    let out = f.run_with_env(&["list"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+    let out = f.run_env_ok(&["list"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
@@ -199,22 +187,11 @@ fn list_runs_status_on_the_server_for_a_remote_workspace() {
 
 #[test]
 fn host_repo_on_a_remote_workspace_runs_on_the_server() {
-    let f = WorkspaceFixture::empty();
-    f.add_repo("svc");
-    f.write_ws_json(
-        r#"{
-            "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
-                      "scripts":{"up":"run --port $WS_PORT_web"}}],
-            "remote":{"connection":"srv","workspace_path":"ws"}
-        }"#,
-    );
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
+    let (f, ssh, mg) = remote_fixture("svc", host_repo_ws());
     new_remote(&f, "svc", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    f.run_env_ok(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(rec.contains("nohup "), "host process not launched (no nohup) over ssh:\n{rec}");
@@ -246,13 +223,7 @@ fn a_host_process_that_dies_on_launch_fails_the_step_and_shows_its_log() {
     // launch script re-checks the process afterwards and returns its log tail.
     let f = WorkspaceFixture::empty();
     f.add_repo("svc");
-    f.write_ws_json(
-        r#"{
-            "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
-                      "scripts":{"up":"run --port $WS_PORT_web"}}],
-            "remote":{"connection":"srv","workspace_path":"ws"}
-        }"#,
-    );
+    f.write_ws_json(host_repo_ws());
     // `__WS_HOST_DIED__` is what the real launch script emits when its re-check
     // finds the process already gone.
     let ssh = f.stub(
@@ -268,7 +239,7 @@ case "$last" in
   *) exit 0 ;;
 esac"#,
     );
-    let mg = mutagen_noop(&f);
+    let mg = f.stub("fake-mutagen", "exit 0");
     new_remote(&f, "svc", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
@@ -290,17 +261,12 @@ esac"#,
 fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     // `prepare` is the one hook that stays on the client when offloading, so it can
     // stage local data (a db dump) into the worktree for the sync to carry.
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(remote_container_ws());
+    let (f, ssh, mg) = remote_fixture("api", remote_container_ws());
     f.add_hook("api", "prepare", "echo staged > \"$WS_WORKTREE/prepared.txt\"");
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    f.run_env_ok(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     assert!(
         f.path().join(".worktrees/feat-foo/api/prepared.txt").exists(),
@@ -314,18 +280,13 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
 fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
     // A workspace-root `.ws-hooks/` script lives outside the repos, so it can't
     // ride the worktree sync and needs a push of its own.
-    let f = WorkspaceFixture::empty();
-    f.add_repo("api");
-    f.write_ws_json(remote_container_ws());
+    let (f, ssh, mg) = remote_fixture("api", remote_container_ws());
     std::fs::create_dir_all(f.path().join(".ws-hooks")).unwrap();
     std::fs::write(f.path().join(".ws-hooks/up.sh"), "#!/usr/bin/env bash\necho hi\n").unwrap();
-    let ssh = ssh_stub(&f);
-    let mg = mutagen_noop(&f);
     new_remote(&f, "api", &ssh, &mg);
 
     let args = f.path().join("up-ssh.txt");
-    let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    f.run_env_ok(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
