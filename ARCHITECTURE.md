@@ -102,8 +102,8 @@ code returns `ops::ExitError` (`preflight` = 2, `op_failure` = 1,
 **Plumbing** — read once, forget:
 
 `ui.rs` (the whole visual language), `signal.rs`
-(cooperative Ctrl-C), `compat.rs` (macOS floor warning, matrix baked in by
-`build.rs`), `skills.rs` (the `ws claude` payload).
+(cooperative Ctrl-C), `compat.rs` (the macOS floor warning), `skills.rs` (the
+`ws claude` payload).
 
 ---
 

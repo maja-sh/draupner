@@ -1,33 +1,29 @@
 //! macOS compatibility policy.
 //!
-//! Each release bakes in a MIN..=MAX matrix of qualified macOS majors, but only
-//! the **floor** gates anything, and only as a warning: an older macOS may lack
-//! the APFS clonefile (`ws new`'s vendor copy) and subprocess-signal semantics ws
-//! relies on. A *newer* major is ignored entirely — macOS is forward-compatible
-//! and the build host's major always trails the latest shipping one, so a ceiling
-//! would refuse to run for every up-to-date user. A future major that genuinely
-//! breaks one of these surfaces at the operation using it, not as a refusal to
-//! start.
+//! One declared floor, and only as a warning: an older macOS may lack the APFS
+//! clonefile (`ws new`'s vendor copy) and subprocess-signal semantics ws relies
+//! on. There is deliberately no ceiling — macOS is forward-compatible and any
+//! qualified ceiling would trail the latest shipping major, so it would refuse
+//! to run for every up-to-date user. A future major that genuinely breaks one
+//! of these surfaces at the operation using it, not as a refusal to start.
 //!
-//! A failed `sw_vers` or an unparseable matrix skips the check: Apple has changed
-//! that output before, and admitting an unqualified host beats breaking every
+//! A failed or unparseable `sw_vers` skips the check: Apple has changed that
+//! output before, and admitting an unqualified host beats breaking every
 //! install on a format bump.
 
 use std::process::Command;
 
-const MATRIX: &str = env!("WS_COMPAT_MATRIX");
+/// The oldest macOS major `ws` is qualified on.
+const MIN_MACOS_MAJOR: u32 = 13;
 
 pub fn check() {
-    if MATRIX == "linux" || MATRIX == "unknown" {
+    if !cfg!(target_os = "macos") {
         return;
     }
-
-    let Some((min, _max)) = parse_range(MATRIX) else { return; };
-    let Some(running) = current_macos_major() else { return; };
-
-    if below_floor(min, running) {
+    let Some(running) = current_macos_major() else { return };
+    if below_floor(MIN_MACOS_MAJOR, running) {
         eprintln!(
-            "warning: ws is qualified for macOS {min} and newer; running {running} \
+            "warning: ws is qualified for macOS {MIN_MACOS_MAJOR} and newer; running {running} \
              may hit untested APFS/signal behavior."
         );
     }
@@ -37,14 +33,14 @@ fn below_floor(min: u32, running: u32) -> bool {
     running < min
 }
 
-fn parse_range(s: &str) -> Option<(u32, u32)> {
-    let (lo, hi) = s.split_once("..=")?;
-    Some((lo.parse().ok()?, hi.parse().ok()?))
-}
-
 fn current_macos_major() -> Option<u32> {
     let out = Command::new("sw_vers").arg("-productVersion").output().ok()?;
-    let v = String::from_utf8_lossy(&out.stdout);
+    parse_major(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `None` for anything that doesn't lead with an integer major — the fail-open
+/// the module doc promises.
+fn parse_major(v: &str) -> Option<u32> {
     v.trim().split('.').next()?.parse().ok()
 }
 
@@ -53,17 +49,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_matrix_range() {
-        assert_eq!(parse_range("13..=15"), Some((13, 15)));
-        assert_eq!(parse_range("10..=10"), Some((10, 10)));
+    fn parses_the_sw_vers_major() {
+        assert_eq!(parse_major("13.4.1"), Some(13));
+        assert_eq!(parse_major("26.0\n"), Some(26));
     }
 
     #[test]
-    fn rejects_malformed_range() {
-        assert_eq!(parse_range("linux"), None);
-        assert_eq!(parse_range("13..15"), None);
-        assert_eq!(parse_range("13..=abc"), None);
-        assert_eq!(parse_range(""), None);
+    fn unparseable_sw_vers_fails_open() {
+        // Apple has reshaped this output before; a new shape must skip the
+        // check, never warn or panic.
+        assert_eq!(parse_major(""), None);
+        assert_eq!(parse_major("abc"), None);
+        assert_eq!(parse_major("Version 13"), None);
     }
 
     #[test]
