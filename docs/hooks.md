@@ -15,10 +15,29 @@ Declare them in `.ws.json` under a repo's `scripts`:
 }
 ```
 
-Each value is one shell command or a list run in order, executed with `sh -c`
-from the **worktree directory**. A value beginning `.ws-hooks/` is anchored to
-the workspace root so it resolves wherever it runs; any other relative path is
-not resolved for you.
+Each value is one shell command, or a list:
+
+```json
+"scripts": {
+  "up": [
+    "composer install",
+    "php artisan migrate"
+  ]
+}
+```
+
+A list is joined with `&&` into a **single** `sh -c`, which is the reason to
+prefer it over cramming commands into one string with `;`:
+
+- **Fail-fast.** A step that exits non-zero stops the rest. `;` would carry on.
+- **One shell, so state carries.** A `cd` or an env assignment in one entry still
+  applies to the next.
+- **Anchoring is per entry**, so you can mix a shared script into a list:
+  `["npm ci", ".ws-hooks/app-seed.sh"]`.
+
+Everything runs with the **worktree** as the working directory. A value beginning
+`.ws-hooks/` is anchored to the workspace root so it resolves wherever it runs;
+any other relative path is not resolved for you.
 
 ---
 
@@ -150,18 +169,20 @@ are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 
 ## The `.ws-hooks/` directory
 
-Anything longer than a line belongs in a shell file rather than inline JSON.
-`.ws-hooks/` at the workspace root is where those live — `ws init` scaffolds a
-starter `.ws-hooks/<repo>-<event>.sh` per event, and `ws` pushes the whole
-directory to the server on each `up`, so a shared script works the same in both
-places. Point a `scripts` entry at one:
+Reach for a shell file when a step needs real logic — loops, conditionals,
+several stages of setup. A handful of straightforward commands is what the list
+form above is for; you don't need a file for two lines.
+
+`.ws-hooks/` at the workspace root is where those files live. `ws` pushes the
+whole directory to the server on each `up`, so a shared script works the same in
+both places. Create them yourself and point a `scripts` entry at one:
 
 ```json
 "scripts": { "up": ".ws-hooks/api-up.sh" }
 ```
 
-Nothing in `.ws-hooks/` runs unless a `scripts` entry names it. The scaffolded
-files are inert until you declare one.
+Nothing in `.ws-hooks/` runs unless a `scripts` entry names it — the directory is
+a place you keep scripts, not a place `ws` looks.
 
 Scripts must be executable. `ws` restores the executable bit on the copy it
 pushes to a server, but a client-side script (notably `prepare`) that an editor
