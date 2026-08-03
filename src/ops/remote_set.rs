@@ -541,12 +541,12 @@ fn compose_liveness(
 /// Every existing worktree as `(task, repo, path)`, composed from the two
 /// canonical `workspace` walkers so the ".worktrees layout" rules (symlink and
 /// non-UTF-8 handling) stay in one place. Task-dir names are already-sanitized
-/// branches; `all_worktrees_for` re-sanitizes idempotently.
+/// branches; `all_worktree_dirs_for` re-sanitizes idempotently.
 fn all_worktrees(root: &std::path::Path) -> Vec<(String, String, PathBuf)> {
     let mut out = Vec::new();
     for task_dir in workspace::all_task_dirs(root) {
         let Some(task) = task_dir.file_name().and_then(|n| n.to_str()) else { continue };
-        for (repo, wt) in workspace::all_worktrees_for(root, task) {
+        for (repo, wt) in workspace::all_worktree_dirs_for(root, task) {
             out.push((task.to_string(), repo, wt));
         }
     }
