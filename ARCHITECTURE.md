@@ -92,8 +92,8 @@ code returns `ops::ExitError` (`preflight` = 2, `op_failure` = 1,
 | `caddy.rs` | The containerized Caddy on `ws-net` and its admin-API route CRUD |
 | `supervise.rs` | `kind: host` processes: detached launch, PID-file identity, `Health` |
 | `mutagen.rs` | Sync sessions (files) and forward sessions (ports) for offloaded workspaces |
-| `setup.rs` | Routing readiness probe + the consented privileged fixes |
-| `probe.rs` | Read-only server checks behind `ws remote check`. Never mutates, never `sudo`s |
+| `setup.rs` | The consented privileged fixes (`sudo` always shown, never silent) |
+| `probe.rs` | Read-only readiness checks: local routing prerequisites + the server probes. Never mutates, never `sudo`s |
 | `workspace.rs` | The on-disk layout, branch sanitization, and *what counts as a worktree* |
 | `config.rs` | The `.ws.json` schema and the load-time guards that make it safe to act on |
 | `settings.rs` | Machine-global defaults under `~/.config/ws/` — the file behind `ws config` |
