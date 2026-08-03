@@ -57,10 +57,21 @@ fn admin_url(path: &str) -> String {
 }
 
 /// Whether Caddy + `ws-net` are managed outside `ws`. In that mode `ws` still
-/// adds/removes routes against the given admin API but creates no network and
-/// runs no container.
+/// adds/removes routes against the admin API but creates no network and runs no
+/// container.
+///
+/// `WS_CADDY_MANAGE` decides explicitly (`external` / `managed`); without it, a
+/// set `WS_CADDY_ADMIN` implies external, because pointing `ws` at an admin it
+/// didn't boot has always meant "bring your own Caddy". The explicit `managed`
+/// exists so a test can redirect the admin *and* still exercise the container
+/// lifecycle — under the implied rule, everything behind this check was
+/// untestable through the CLI.
 pub fn externally_managed() -> bool {
-    std::env::var_os("WS_CADDY_ADMIN").is_some()
+    match std::env::var("WS_CADDY_MANAGE").as_deref() {
+        Ok("external") => true,
+        Ok("managed") => false,
+        _ => std::env::var_os("WS_CADDY_ADMIN").is_some(),
+    }
 }
 
 /// A machine-wide port `ws` persists: the `env` seam wins, else

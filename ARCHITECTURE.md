@@ -444,7 +444,8 @@ The seams that make this work without a server, a container or a Caddy:
 |---|---|
 | `WS_SSH` | the `ssh` binary |
 | `WS_MUTAGEN` | the `mutagen` binary |
-| `WS_CADDY_ADMIN` | the Caddy admin URL — **and** puts `ws` in externally-managed mode, so it creates no network and runs no container. The fixture points it at an always-200 stub; a test that wants the failure path points it at a dead endpoint |
+| `WS_CADDY_ADMIN` | the Caddy admin URL — and, unless `WS_CADDY_MANAGE` says otherwise, puts `ws` in externally-managed mode, so it creates no network and runs no container. The fixture points it at an always-200 stub; a test that wants the failure path points it at a dead endpoint |
+| `WS_CADDY_MANAGE` | `external` / `managed` — explicitly decides whether `ws` owns the Caddy container. `managed` + a redirected admin is how tests reach the container-lifecycle code (with the runtime pointed at a fake) |
 | `WS_HTTPS_PORT` | the port Caddy serves on, for one invocation |
 | `HOME`, `CLAUDE_SKILLS_DIR` | the global config dir and the `ws claude` target |
 

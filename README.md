@@ -190,7 +190,9 @@ Two more exist as escape hatches rather than everyday settings.
 `WS_HTTPS_PORT` overrides the port Caddy serves on for one invocation (the
 durable way is `ws setup --port`). `WS_CADDY_ADMIN` points `ws` at an admin API
 you manage yourself, which also stops it from creating the network or running a
-Caddy container at all — bring-your-own routing.
+Caddy container at all — bring-your-own routing. (`WS_CADDY_MANAGE=external`
+or `managed` states that half explicitly, if you need the admin redirected
+without giving up the managed container.)
 
 ---
 
