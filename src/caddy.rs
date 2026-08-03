@@ -1085,10 +1085,34 @@ mod tests {
         }
     }
 
-    /// Serialize the env-mutating port tests (they share the process env).
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    /// Serialize the env-mutating port tests (they share the process env) and
+    /// point the global config dir at an empty scratch dir — otherwise a machine
+    /// that opted into a non-default port via `ws setup --port` reads its own
+    /// `~/.config/ws/{https,admin}_port` and fails the defaults.
+    fn env_guard() -> EnvGuard {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("scratch config dir");
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        EnvGuard { prev, _dir: dir, _lock: lock }
+    }
+
+    struct EnvGuard {
+        prev: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvGuard {
+        // Runs before the fields, so the lock is still held while the env is put
+        // back — a waiting test can't observe the scratch dir.
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
     }
 
     #[test]
