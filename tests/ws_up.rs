@@ -14,7 +14,6 @@ fn happy_path_both_hooks_run() {
 
     assert!(err.contains("API-UP-RAN"), "expected api hook output in:\n{err}");
     assert!(err.contains("APP-UP-RAN"), "expected app hook output in:\n{err}");
-    // Both step lines resolved ok (non-tty renders "ok").
     assert_eq!(err.matches("up hook").count(), 2, "expected two up-hook steps in:\n{err}");
 }
 
@@ -65,7 +64,6 @@ fn partial_only_repos_with_worktrees_run() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
     f.add_hook("api", "up", "echo API-UP-RAN");
     f.add_hook("app", "up", "echo APP-UP-RAN");
-    // Only api gets a worktree for this branch.
     f.run_ok(&["new", "api", "feat/partial"]);
 
     let out = f.run_ok(&["up", "feat/partial"]);
@@ -88,7 +86,6 @@ fn no_worktrees_is_preflight_error() {
 #[test]
 fn missing_hook_is_skipped_not_an_error() {
     let f = WorkspaceFixture::with_repos(&["api"]);
-    // No up hook added — repo has a worktree but nothing to run.
     f.run_ok(&["new", "api", "feat/nohook"]);
 
     let out = f.run_ok(&["up", "feat/nohook"]);
@@ -107,7 +104,6 @@ fn failure_isolation_second_repo_hook_fails() {
     assert_eq!(out.status.code(), Some(1), "expected exit 1 when a hook fails");
     let err = stderr(&out);
 
-    // First repo still ran to completion despite the second failing.
     assert!(err.contains("API-UP-RAN"), "first repo should still run:\n{err}");
     assert!(err.contains("APP-UP-TRIED"), "second repo hook should have been attempted:\n{err}");
     assert!(err.contains("FAIL"), "expected a failed step line in:\n{err}");
@@ -121,7 +117,6 @@ fn idempotent_second_run_also_succeeds() {
     f.run_ok(&["new", "api", "feat/idem"]);
 
     f.run_ok(&["up", "feat/idem"]);
-    // Second run must not fail — nothing ws adds should break hook idempotency.
     let out = f.run_ok(&["up", "feat/idem"]);
     assert!(stderr(&out).contains("API-UP-RAN"));
 }
@@ -142,15 +137,12 @@ fn hook_streaming_stdout_and_stderr() {
     for marker in ["out1", "out2", "out3", "err1"] {
         assert!(err.contains(marker), "expected {marker} in streamed output:\n{err}");
     }
-    // Hook lines carry the `<repo>-<event>` tag.
     assert!(err.contains("api-up"), "expected hook tag in:\n{err}");
 }
 
-// A repo with a declared HTTP service + a top-level `domain` routes through
-// Caddy. Since 6.2b the override `!reset`s an HTTP service's host publish, so it
-// is reachable ONLY via its Caddy route — an install that fails means the
-// running stack is unreachable, so `ws up` must fail (not report success). Uses
-// a bare declared-HTTP repo (no compose file needed) and a dead admin endpoint.
+// An HTTP service's host publish is `!reset` away in the override, so it is
+// reachable only via its Caddy route — a route that won't install means a
+// running-but-unreachable stack, which must not report success.
 #[test]
 fn up_fails_when_an_http_route_cannot_be_installed() {
     let f = WorkspaceFixture::empty();
@@ -162,7 +154,6 @@ fn up_fails_when_an_http_route_cannot_be_installed() {
     );
     f.run_ok(&["new", "api", "feat/route"]);
 
-    // Dead admin endpoint → route_up can't install the route.
     let out = f.run_with_env(&["up", "feat/route"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
     assert_eq!(
         out.status.code(),
@@ -170,12 +161,10 @@ fn up_fails_when_an_http_route_cannot_be_installed() {
         "an unroutable HTTP service must fail `up`, not report success:\n{}",
         stderr(&out)
     );
-    // The hook itself ran — the failure is the routing step, not the hook.
+    // The failure must be the routing step, not the hook.
     assert!(stderr(&out).contains("up-ran"), "the up hook should still have run:\n{}", stderr(&out));
 }
 
-// The mirror of the above: with a reachable admin (the fixture's stub) the same
-// stack comes up green and reports its routed hostname.
 #[test]
 fn up_succeeds_and_routes_when_caddy_is_reachable() {
     let f = WorkspaceFixture::empty();
@@ -191,9 +180,8 @@ fn up_succeeds_and_routes_when_caddy_is_reachable() {
     assert!(err.contains("feat-route.web.myapp.test"), "expected the routed hostname in:\n{err}");
 }
 
-// A raw-TCP-only stack in a routing-active workspace needs neither Caddy nor
-// `ws-net` (no HTTP service ⇒ no route, no host publish dropped), so a route
-// call is never made and `up` succeeds regardless of Caddy.
+// No HTTP service ⇒ no route and no host publish dropped, so a raw-TCP stack in
+// a routing-active workspace never needs Caddy at all.
 #[test]
 fn raw_tcp_only_up_makes_no_route_call() {
     let f = WorkspaceFixture::empty();
@@ -205,7 +193,6 @@ fn raw_tcp_only_up_makes_no_route_call() {
     );
     f.run_ok(&["new", "api", "feat/db"]);
 
-    // Even with a dead admin, a stack that installs no route must still come up.
     let out = f.run_with_env(&["up", "feat/db"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
     assert!(
         out.status.success(),

@@ -29,7 +29,6 @@ pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(written)
 }
 
-/// Where skills are written by default. Overridable via `CLAUDE_SKILLS_DIR` for tests.
 pub fn default_target_root() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("CLAUDE_SKILLS_DIR") {
         return Ok(PathBuf::from(p));
@@ -54,8 +53,7 @@ mod tests {
 
     #[test]
     fn command_wrapper_skills_carry_an_invoke_line() {
-        // Most skills just map `/ws-<x>` to `ws <x>`; a few (ws-resume) are
-        // procedures with no single command, so the invoke line is not universal.
+        // ws-resume is a procedure, not a wrapper around one `ws` subcommand.
         for (name, body) in SKILLS {
             if *name == "ws-resume" {
                 continue;

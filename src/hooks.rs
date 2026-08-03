@@ -1,16 +1,10 @@
-//! Per-repo lifecycle execution. One mechanism: the **declarative `scripts`**
-//! block in `.ws.json` — one or more shell commands run via `sh -c` in the
-//! worktree, with the `WS_*` env — plus a `ws`-synthesized default for a
-//! container repo that declares nothing.
+//! What command a `(repo, event)` runs, and running it **here on this machine**.
+//! See ARCHITECTURE.md for where this sits.
 //!
-//! `resolve` answers "what command does this (repo, event) run"; `run_command` /
-//! `capture_command` run it **here on this machine**. Streamed output goes through
-//! `ui::hook_line` so it lands with the correct gutter/indent.
-//!
-//! Ops don't call the two runners directly: `lifecycle::Ctx` does, as the local
-//! arm of the one dispatcher that decides between here and the server (its remote
-//! arm lands in `remote::run_event`, which shares this module's `base_env` and
-//! `stream_and_wait` so both sides keep the same contract and the same output).
+//! Ops don't call the runners directly — `lifecycle::Ctx` does, as the local arm
+//! of the dispatcher. Its remote arm (`remote::run_event`) reuses `base_env` and
+//! `stream_and_wait` from here so both sides keep the same env contract and the
+//! same output shape.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};
@@ -22,25 +16,16 @@ use std::time::{Duration, Instant};
 use crate::config::WsConfig;
 use crate::ui;
 
-/// Max bytes buffered per streamed line. A hook that emits an unterminated
-/// stream (e.g. `yes | tr -d '\n'`) can't OOM us — the excess is discarded
-/// up to the next newline.
+/// Max bytes buffered per streamed line, so a hook emitting an unterminated
+/// stream (e.g. `yes | tr -d '\n'`) can't OOM us.
 const MAX_LINE: usize = 8 * 1024;
 
-/// Resolve the shell command for `event`: the declared `scripts` entry; else, for
-/// a container repo, the compose default (see `config::default_script`). `None`
-/// when neither applies — the caller treats that as a dim skip.
+/// `None` when the repo declares nothing and has no default — the caller treats
+/// that as a dim skip. Errors only for the migration refusal below.
 ///
-/// Errors only for the removed-mechanism migration (see [`refuse_legacy_hook_file`]).
-///
-/// A declared script arrives as the string `config::script_command` builds — the
-/// one owner of "what shell command does this event run", so a `Many` is joined
-/// fail-fast with `&&` and a `.ws-hooks/…` reference is anchored to
-/// `$WS_WORKSPACE_ROOT`. Deferring that rule to the dispatch site is what once let
-/// `capture_command` join *without* anchoring: with cwd = the worktree, a `status`
-/// script naming a `.ws-hooks/` path exited 127, the non-zero exit was swallowed,
-/// and `ws list` showed an empty status column while the identical config worked
-/// for `up` and on a remote workspace.
+/// The command arrives already joined and anchored by `config::script_command`,
+/// the one owner of that rule; re-deriving it at a dispatch site is how the
+/// captured (`ws list`) path once ran an unanchored `status` script.
 pub fn resolve(
     cfg: &WsConfig,
     workspace_root: &Path,
@@ -55,12 +40,8 @@ pub fn resolve(
     Ok(is_container.then(|| crate::config::default_script(cfg.runtime(), event)).flatten())
 }
 
-/// The `WS_*` context every hook/script receives. Single source of truth for the
-/// env contract, applied by streamed and captured runs alike.
-/// The base `WS_*` env contract every hook/script receives, as owned pairs so the
-/// `Command`-based hook runner AND the detached host-process supervisor
-/// (`supervise::up`, which never touches a `Command`) apply the identical set.
-/// `WS_HOST_*`/`WS_PORT_*` + declared `env` layer on top.
+/// Owned pairs rather than applied to a `Command`, so the detached host-process
+/// supervisor (`supervise::up`, which never builds one) applies the identical set.
 pub fn base_env(
     workspace_root: &Path,
     worktree: &str,
@@ -77,10 +58,8 @@ pub fn base_env(
     ]
 }
 
-/// Apply the whole env contract to `c`: the base `WS_*` set (see [`base_env`]),
-/// then the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env` mappings) on top. Applied as one call, since a declared `env` key only
-/// overrides a base `WS_*` key because `extra_env` is applied last.
+/// `extra_env` goes on last: that ordering is what lets a declared `env` key
+/// override a base `WS_*` one.
 fn apply_env(
     c: &mut Command,
     workspace_root: &Path,
@@ -97,9 +76,7 @@ fn apply_env(
     }
 }
 
-/// Build the process for a declarative script command: `sh -c <cmd>` with
-/// cwd = the worktree and the `WS_*` env plus `WS_WORKTREE`. The single home for
-/// the script env contract. Stdio is left to the caller.
+/// Stdio is left to the caller.
 fn script_command(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -115,8 +92,6 @@ fn script_command(
     c
 }
 
-/// Spawn `cmd` with piped stdio, stream its output under `tag`, and fail on a
-/// non-zero exit reported as "`{what}` exited N".
 fn spawn_streamed(
     mut cmd: Command,
     tag: &str,
@@ -132,15 +107,8 @@ fn spawn_streamed(
     Ok(())
 }
 
-/// Run one already-joined shell command in the worktree via a single `sh -c` with
-/// cwd = the worktree and the `WS_*` env, streaming its output like a hook. A
-/// `Many` arrives already joined with `&&` — sequential and fail-fast, in one
-/// shell so `cd`/env carry across commands (the same shape `capture_command`
-/// uses, so the two agree). Shared by a declared `scripts` entry and a
-/// synthesized container default.
-///
-/// `extra_env` carries the injection context (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env`) the caller computed for this repo; pass `&[]` when there's none.
+/// One `sh -c` for the whole already-`&&`-joined command, so `cd` and env carry
+/// across a `Many` — the same shape `capture_command` uses, so the two agree.
 #[allow(clippy::too_many_arguments)]
 pub fn run_command(
     workspace_root: &Path,
@@ -162,11 +130,8 @@ pub fn run_command(
     )
 }
 
-/// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
-/// wait for exit. Shared by the local runner (`run_command`) and the remote
-/// lifecycle dispatch (`remote::run_event`) so a hook's output gets the same
-/// gutter + spinner-suspend whether it ran locally or over SSH. The child must be
-/// spawned with stdout+stderr piped.
+/// Shared with `remote::run_event` so a hook's output gets the same gutter and
+/// spinner-suspend whether it ran locally or over SSH.
 pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
@@ -182,13 +147,7 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     Ok(status)
 }
 
-/// Run a resolved command for a read-only `status`-style event and capture its
-/// first non-empty stdout line, giving up after `timeout`. Used by `ws list`.
-///
-/// A status probe is normally one command; a `Many` arrives already joined as a
-/// fail-fast `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output
-/// is captured. See `resolve` for why that join — and the `.ws-hooks/…` anchoring
-/// that comes with it — must not be re-derived here.
+/// The read-only `status`-style counterpart to [`run_command`], for `ws list`.
 #[allow(clippy::too_many_arguments)]
 pub fn capture_command(
     workspace_root: &Path,
@@ -208,13 +167,8 @@ pub fn capture_command(
     ui::first_nonempty_line(&text).map(String::from)
 }
 
-/// Drain a child's stdout on a helper thread (so a full pipe buffer can't
-/// deadlock the wait loop), enforce `timeout` by killing the child, and return
-/// everything it wrote. `None` on non-zero exit or timeout.
-///
-/// The one copy of the process-timeout loop, shared by the `status` capture above
-/// and `remote::probe_login_path` (the login-`PATH` harvest) — each keeps its own
-/// reading of the captured text, but a fix to the wait/kill loop lands in both.
+/// Stdout is drained on a helper thread: a child that fills the pipe buffer would
+/// otherwise deadlock the wait loop. `None` on non-zero exit or timeout.
 pub(crate) fn capture_within(mut child: Child, timeout: Duration) -> Option<String> {
     let mut stdout = child.stdout.take()?;
     let reader = thread::spawn(move || {
@@ -243,18 +197,14 @@ pub(crate) fn capture_within(mut child: Child, timeout: Duration) -> Option<Stri
     }
 }
 
-/// Read lines from `r`, capped at `MAX_LINE` bytes per line, calling `f` for
-/// each. Overlong lines are truncated (tail discarded up to the next newline).
-/// Invalid UTF-8 is replaced with U+FFFD via `from_utf8_lossy` — never drops
-/// following lines. Split from `pipe` so the tests exercise this loop rather
-/// than a copy of it.
+/// Split out of `pipe` so the tests drive this loop rather than a copy of it.
 fn for_each_line<R: Read>(r: R, mut f: impl FnMut(&str)) {
     let mut reader = BufReader::new(r);
     let mut buf = Vec::with_capacity(1024);
     loop {
         buf.clear();
         let n = match reader.by_ref().take(MAX_LINE as u64).read_until(b'\n', &mut buf) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(n) => n,
             Err(_) => break,
         };
@@ -269,25 +219,17 @@ fn for_each_line<R: Read>(r: R, mut f: impl FnMut(&str)) {
     }
 }
 
-/// Stream lines from `r` to `ui::hook_line` so hook output lands with the
-/// correct gutter/indent.
 fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
     for_each_line(r, |line| ui::hook_line(tag, line, stderr));
 }
 
-// --- Migration shim: DELETE a release after 0.6, together with its test. ------
-//
-// Until 0.6 an executable `.ws-hooks/<repo>/<event>` file was *discovered* by
-// convention and run as that repo's lifecycle event, with its own contract (cwd =
-// the workspace root, worktree as `$1`). Dropping it silently would turn a
-// working hook into a no-op — or, for a container repo, into the compose default
-// — so a leftover file fails its repo loudly instead. This is a diagnostic, not a
-// resolution rung: `resolve` reaches it only where the old mechanism would have
-// won, and it can never produce a command.
-
-/// Fail when an executable `.ws-hooks/<repo>/<event>` is left over from the
-/// removed hook-file mechanism, naming the `scripts` entry that replaces it and
-/// the two contract changes that come with the move.
+/// Migration shim — delete a release after 0.6, together with its tests.
+///
+/// Until 0.6 an executable `.ws-hooks/<repo>/<event>` was discovered by
+/// convention and run as that repo's event. Dropping that silently would turn a
+/// working hook into a no-op — or, for a container repo, into the compose default
+/// — so a leftover file fails its repo loudly instead. A diagnostic, never a
+/// resolution rung: it can't produce a command.
 fn refuse_legacy_hook_file(workspace_root: &Path, repo: &str, event: &str) -> Result<()> {
     let rel = format!(".ws-hooks/{repo}/{event}");
     if !is_executable(&workspace_root.join(&rel)) {
@@ -312,15 +254,13 @@ fn is_executable(p: &Path) -> bool {
 fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
-// --- end migration shim ------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Drive the real read loop `pipe()` uses so we can assert what the ui layer
-    /// would see, without depending on eprintln capture.
+    /// Drives the real loop `pipe` uses, without depending on eprintln capture.
     fn read_lines(input: &[u8]) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         for_each_line(Cursor::new(input), |l| lines.push(l.to_string()));
@@ -349,10 +289,8 @@ mod tests {
 
     #[test]
     fn a_declared_script_resolves_to_one_anchored_command() {
-        // `resolve` hands back the string `config::script_command` built: a `Many`
-        // already joined fail-fast, and `.ws-hooks/…` already anchored to
-        // `$WS_WORKSPACE_ROOT`. Deferring either step to the dispatch site is how
-        // the captured (`status`) path once ended up joining without anchoring.
+        // Deferring either the join or the anchoring to the dispatch site is how the
+        // captured (`status`) path once ended up joining without anchoring.
         let cfg: WsConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"status":[".ws-hooks/status.sh","echo ok"]}}]}"#,
         )
@@ -367,8 +305,6 @@ mod tests {
     fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
         let cfg: WsConfig =
             serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
-        // No declared script: a container repo gets the compose default,
-        // everything else resolves to nothing (a dim skip for the caller).
         let cmd = resolve(&cfg, Path::new("/ws"), "api", "up", true)
             .expect("resolve")
             .expect("a container repo must fall back to the compose default");
@@ -378,9 +314,7 @@ mod tests {
         assert!(resolve(&cfg, Path::new("/ws"), "api", "post-create", true).unwrap().is_none());
     }
 
-    /// The migration shim (delete with it): a leftover executable hook file must
-    /// fail loudly rather than silently become a no-op — or, worse for a container
-    /// repo, silently become the compose default.
+    /// Delete with the shim it covers.
     #[test]
     fn a_leftover_executable_hook_file_fails_with_the_scripts_entry_to_paste() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -392,8 +326,7 @@ mod tests {
         let cfg: WsConfig =
             serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
 
-        // Not executable: it was already inert before the removal, so nothing to
-        // migrate — a container repo still gets its default.
+        // Not executable: already inert before the removal, so nothing to migrate.
         assert_eq!(
             resolve(&cfg, dir.path(), "api", "up", true).expect("resolve").as_deref(),
             Some("podman compose up -d")
@@ -411,8 +344,7 @@ mod tests {
         assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
         assert!(err.contains("cwd = the worktree"), "the cwd change must be named: {err}");
 
-        // A declared script wins outright — the shim never fires for a repo that
-        // already migrated, even with the old file still sitting there.
+        // A declared script wins outright, even with the old file still sitting there.
         let migrated: WsConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#,
         )
@@ -423,7 +355,6 @@ mod tests {
         );
     }
 
-    /// A child with piped stdout, for the capture loop.
     fn sh(script: &str) -> Child {
         Command::new("sh")
             .arg("-c")
@@ -437,22 +368,18 @@ mod tests {
 
     #[test]
     fn capture_within_returns_the_whole_output_and_refuses_a_failed_child() {
-        // Everything the child wrote, verbatim — reading a *line* out of it is the
-        // caller's rule (`ws list` takes the first non-empty one; the login-PATH
-        // probe wants the line after its sentinel), not this loop's.
+        // Verbatim: reading a *line* out of it is each caller's rule, not this loop's.
         assert_eq!(
             capture_within(sh("printf 'a\\nb\\n'"), Duration::from_secs(30)).as_deref(),
             Some("a\nb\n")
         );
-        // A non-zero exit is no answer at all, whatever landed on stdout.
         assert_eq!(capture_within(sh("echo out; exit 3"), Duration::from_secs(30)), None);
     }
 
     #[test]
     fn capture_within_kills_a_child_that_outlives_its_timeout() {
-        // The path neither caller could afford to get wrong: a wedged `status`
-        // script must not stall `ws list`, and a misbehaving interactive rc must
-        // not hang the op that harvested its PATH.
+        // A wedged `status` script must not stall `ws list`, nor a misbehaving
+        // interactive rc the op that harvested its PATH.
         let started = Instant::now();
         assert_eq!(capture_within(sh("sleep 30"), Duration::from_millis(200)), None);
         assert!(

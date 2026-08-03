@@ -1,24 +1,19 @@
-//! Small git-plumbing helpers shared across ops. Ops keep their own *policy*
-//! (clean's audit verdict, rm's safety scan, new's start-point choice); this
-//! module owns the repeated `git -C <path> …` invocations they were each
-//! re-deriving.
+//! The repeated `git -C <path> …` invocations. Policy — clean's audit verdict,
+//! rm's safety scan, new's start-point choice — stays in the ops.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// `git -C <path>` with no other args set yet. Public because ops that own their
-/// own git *policy* (new's `worktree add`, teardown's removal ladder) still route
-/// the invocation itself through here — a `-C` dropped at one of those call sites
-/// runs the command against the wrong repo.
+/// Public so ops that own their own git policy (new's `worktree add`, teardown's
+/// removal ladder) still build the invocation here — a `-C` dropped at one of
+/// those call sites runs the command against the wrong repo.
 pub fn git(path: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(path);
     c
 }
 
-/// Run `c` and report whether it exited cleanly; output discarded. For the
-/// probe-shaped commands whose exit code *is* the answer.
 fn succeeds(c: &mut Command) -> bool {
     c.stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -27,9 +22,9 @@ fn succeeds(c: &mut Command) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `c` and return its stdout as lines. Empty on any failure — a non-zero
-/// exit, a missing git, a path that isn't a repo — so callers reporting "nothing
-/// found" never have to distinguish those from a genuinely empty answer.
+/// Empty on any failure — a non-zero exit, a missing git, a path that isn't a
+/// repo — so callers reporting "nothing found" never have to distinguish those
+/// from a genuinely empty answer.
 pub fn stdout_lines(c: &mut Command) -> Vec<String> {
     match c.output() {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -40,14 +35,9 @@ pub fn stdout_lines(c: &mut Command) -> Vec<String> {
     }
 }
 
-/// Every worktree git has registered for `repo`, as `(path, branch)`. `branch` is
-/// `None` for a detached HEAD. The first record is always the main checkout.
-///
-/// This is the authoritative answer to "what worktrees exist" — a directory under
-/// `.worktrees/` is *not* a worktree (it can be the residue of a failed `ws rm`, a
-/// bare `git worktree remove`, or a hand-made copy), and git additionally knows
-/// about worktrees living outside `.worktrees/` entirely. An empty vec on any
-/// failure: not a repo, git missing, or a non-zero exit.
+/// Every worktree git has registered for `repo`. `branch` is `None` for a
+/// detached HEAD, the first record is always the main checkout, and any failure
+/// (not a repo, git missing, non-zero exit) reads as an empty vec.
 pub fn worktree_list(repo: &Path) -> Vec<(PathBuf, Option<String>)> {
     let Ok(out) = git(repo).args(["worktree", "list", "--porcelain"]).output() else {
         return Vec::new();
@@ -58,9 +48,6 @@ pub fn worktree_list(repo: &Path) -> Vec<(PathBuf, Option<String>)> {
     parse_worktree_list(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Parse `git worktree list --porcelain`: blank-line-separated records, each
-/// opening with `worktree <path>` and optionally carrying `branch <ref>`. Split
-/// out from the `Command` call so the record framing is testable without a repo.
 fn parse_worktree_list(text: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut result = Vec::new();
     let mut cur_path: Option<PathBuf> = None;
@@ -83,29 +70,23 @@ fn parse_worktree_list(text: &str) -> Vec<(PathBuf, Option<String>)> {
     result
 }
 
-/// Whether `rel` (a worktree-relative path) is tracked by git in the worktree.
-/// Used before rendering a template to a `dest` so we never silently dirty a
-/// committed file.
+/// Checked before rendering a template over a `dest`: ws must never silently
+/// dirty a committed file.
 pub fn is_tracked(wt: &Path, rel: &str) -> bool {
     succeeds(git(wt).args(["ls-files", "--error-unmatch", rel]))
 }
 
-/// Append `entries` to the git exclude file (`info/exclude`) that applies to
-/// `wt`, idempotently. Resolves the real exclude path via `git rev-parse
-/// --git-path` so it works through a linked worktree's `.git` gitdir pointer.
-/// Best-effort on lookup — a missing exclude path just skips silently. This is
-/// how `ws` keeps the artifacts it drops (symlinked deps, rendered templates)
-/// out of git.
+/// Append `entries` to the exclude file applying to `wt`, idempotently — how ws
+/// keeps the artifacts it drops (symlinked deps, rendered templates) out of git.
+/// Best-effort: a missing exclude path skips silently.
 ///
-/// **Scope is the whole repo, not one worktree.** `info/` is in git's common
-/// list (only `info/sparse-checkout` is per-worktree), so `--git-path
-/// info/exclude` from a linked worktree resolves to the *main* checkout's
-/// `.git/info/exclude` — entries written for a worktree also hide matching
-/// untracked files in main and in every sibling worktree, and nothing prunes
-/// them on `ws rm`. Genuine per-worktree excludes would mean enabling the
-/// `extensions.worktreeConfig` repo format extension and pointing a per-worktree
-/// `core.excludesFile` at our own file, which would also override the user's
-/// global excludes file inside ws worktrees — not something to turn on silently.
+/// **Scope is the whole repo, not one worktree.** `info/` is in git's common list,
+/// so `--git-path info/exclude` from a linked worktree resolves to the *main*
+/// checkout's file — entries also hide matching untracked files in main and in
+/// every sibling worktree, and nothing prunes them on `ws rm`. Genuine
+/// per-worktree excludes would mean enabling `extensions.worktreeConfig` and
+/// pointing a per-worktree `core.excludesFile` at our own file, which would
+/// override the user's global excludes inside ws worktrees.
 pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -148,38 +129,28 @@ pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `git status --porcelain` lines. Empty on a clean tree, on error, or when the
-/// path isn't a git repo.
 pub fn dirty_files(wt: &Path) -> Vec<String> {
     stdout_lines(git(wt).args(["status", "--porcelain"]))
 }
 
-/// Whether the worktree has uncommitted changes (tracked or untracked).
 pub fn is_dirty(wt: &Path) -> bool {
     !dirty_files(wt).is_empty()
 }
 
-/// Whether `refspec` resolves in the repo (`rev-parse --verify`). Accepts full
-/// refs (`refs/heads/main`) or short names (`origin/main`).
 pub fn ref_exists(path: &Path, refspec: &str) -> bool {
     succeeds(git(path).args(["rev-parse", "--verify", "--quiet", refspec]))
 }
 
-/// The repo's default branch as a start-point name (`origin/main`, `main`, …),
-/// or `None` when none can be resolved. Prefers `origin/HEAD`, then falls back
-/// through the conventional `main`/`master` ladder (remote-tracking first).
+/// The repo's default branch as a start-point name (`origin/main`, `main`, …).
 ///
-/// The ladder probes *fully-qualified* refspecs so a `main`/`master` **tag**
-/// (or a stray `refs/main`) can't shadow the branch — short-name `rev-parse`
-/// would resolve the tag first and branch new work off the wrong commit.
+/// The ladder probes *fully-qualified* refspecs so a `main`/`master` **tag** (or
+/// a stray `refs/main`) can't shadow the branch — short-name `rev-parse` would
+/// resolve the tag first and branch new work off the wrong commit.
 pub fn default_ref(path: &Path) -> Option<String> {
-    // `origin/HEAD` is only usable if it still *resolves*. When upstream renames
-    // its default branch, a `git fetch --prune` deletes `refs/remotes/origin/master`
-    // but leaves the `origin/HEAD` symref pointing at it; `symbolic-ref` doesn't
-    // dereference, so it keeps reporting the dead branch. Handing that to
-    // `git worktree add` failed the whole op ("not a valid object name") for a
-    // repo whose ladder below resolves `origin/main` fine — so probe, then fall
-    // through instead of trusting the symref.
+    // `origin/HEAD` outlives its target: after upstream renames its default
+    // branch, `fetch --prune` deletes the remote-tracking ref but leaves the
+    // symref pointing at it, and `symbolic-ref` doesn't dereference. So verify it
+    // resolves and otherwise fall through to the ladder.
     if let Some(head) =
         symbolic_origin_head(path).filter(|h| ref_exists(path, &format!("refs/remotes/{h}")))
     {
@@ -196,8 +167,6 @@ pub fn default_ref(path: &Path) -> Option<String> {
     .map(|(_, name)| name.to_string())
 }
 
-/// `git symbolic-ref refs/remotes/origin/HEAD`, stripped to a short name
-/// (`origin/main`). `None` when origin has no HEAD symref.
 fn symbolic_origin_head(path: &Path) -> Option<String> {
     let out = git(path)
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
@@ -217,14 +186,13 @@ mod tests {
 
     #[test]
     fn worktree_list_parses_records_and_strips_the_branch_ref() {
-        // Real porcelain shape: blank-line-separated records, main checkout first.
         let out = "worktree /home/u/ws/api\nHEAD abc123\nbranch refs/heads/main\n\n\
                    worktree /home/u/ws/.worktrees/feat-x/api\nHEAD def456\nbranch refs/heads/feat/x\n\n";
         let got = parse_worktree_list(out);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], (PathBuf::from("/home/u/ws/api"), Some("main".to_string())));
-        // The branch keeps its slash — only the `refs/heads/` prefix is stripped,
-        // so the caller gets the real name rather than the sanitized dir form.
+        // The slash survives: callers need the real branch, not the sanitized
+        // dir form, and the two can't be told apart afterwards.
         assert_eq!(
             got[1],
             (PathBuf::from("/home/u/ws/.worktrees/feat-x/api"), Some("feat/x".to_string()))

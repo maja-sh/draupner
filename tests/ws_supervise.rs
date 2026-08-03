@@ -1,16 +1,12 @@
-//! `kind: host` repos are supervised as a detached, `ws`-owned process tracked by
-//! a PID file (no systemd/launchd — works on macOS too). These run the *real*
-//! mechanism: `ws up` launches a `sleep`, and we assert liveness via the pid file,
-//! then `ws down` stops it. `$HOME` is redirected into the fixture, so `~/.ws-run`
-//! is isolated.
+//! These drive the real supervision mechanism — `ws up` launches an actual
+//! process. The fixture redirects `$HOME`, so the pid files land under the
+//! fixture's own `~/.ws-run` rather than the developer's.
 
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 use std::path::PathBuf;
 
-/// A host repo whose `up` records the injected env, then runs a long sleep as the
-/// supervised (tracked) process.
 fn host_fixture() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
@@ -22,13 +18,10 @@ fn host_fixture() -> WorkspaceFixture {
     f
 }
 
-/// Where `ws` records the pid of `feat/foo`'s api host process (under the
-/// fixture HOME).
 fn pid_file(f: &WorkspaceFixture) -> PathBuf {
     f.path().join(".ws-run/ws-feat-foo-api.pid")
 }
 
-/// Whether a pid is alive, probed the way the shell does.
 fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
@@ -37,21 +30,16 @@ fn alive(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the host process for `feat/foo`'s api is alive, read the same way `ws`
-/// does: the pid file under the fixture HOME, then `kill -0`.
 fn proc_alive(f: &WorkspaceFixture) -> bool {
     let Ok(contents) = std::fs::read_to_string(pid_file(f)) else { return false };
-    // The pid file is two lines — pid, then the start-time identity. We only need
-    // the pid to probe liveness the way the shell does.
+    // The pid file is two lines: the pid, then the start-time identity.
     let pid = contents.lines().next().unwrap_or("").trim();
     !pid.is_empty() && alive(pid)
 }
 
-/// Poll `cond` every 50 ms for up to 2 s, reporting whether it ever held.
-///
-/// Detached work — a supervised process starting, or dying after a signal —
-/// races the assertion that follows it, and each wait below wants the same
-/// budget rather than one invented per call site.
+/// Every assertion about a supervised process races the detached work that
+/// satisfies it, so they all share one polling budget rather than inventing one
+/// per call site.
 fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     for _ in 0..40 {
         if cond() {
@@ -67,13 +55,9 @@ fn stop(f: &WorkspaceFixture) {
     let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
 
-/// Runs its closure on drop — including while unwinding from a failed assertion.
-///
 /// A trailing `stop(&f)` only runs when every assertion above it passed, so a
-/// failing test leaks the process it supervised: it is reparented to init and
-/// keeps whatever it holds. The `sleep 40` fixtures self-limit, but the test that
-/// serves a real `python3 -m http.server` does not — one such orphan was found
-/// still LISTENing on 127.0.0.1:20000, the first port of ws's allocation range.
+/// failing test orphans the process it supervised to init, still holding its
+/// port. This tears down on unwind too.
 struct Teardown<F: FnMut()>(F);
 
 impl<F: FnMut()> Drop for Teardown<F> {
@@ -82,14 +66,11 @@ impl<F: FnMut()> Drop for Teardown<F> {
     }
 }
 
-/// The pid `ws` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
     let contents = std::fs::read_to_string(pid_file(f)).expect("pid file after up");
     contents.lines().next().unwrap().trim().to_string()
 }
 
-/// The host port ws allocated for `web`, read off its own output (`start web:20000`)
-/// — the same handle a user has.
 fn allocated_port(out: &str) -> u16 {
     let at = out.find("web:").expect("up should report the allocated port");
     out[at + 4..]
@@ -100,24 +81,19 @@ fn allocated_port(out: &str) -> u16 {
         .expect("a numeric port after `web:`")
 }
 
-/// Serialises the tests that care about *which* process holds an allocated port.
-///
-/// Allocation scans `.ws-meta` per workspace root and confirms the choice with a
-/// live bind, so two fixtures running in parallel can be handed the same port
-/// while neither is holding it yet — and then one test's listener gets attributed
-/// to the other test's process. That collision is real (a known cross-workspace
-/// limitation) but it isn't what these tests are about.
+/// Port allocation is scanned per workspace root, so two fixtures in parallel can
+/// be handed the same free port and then attribute each other's listener. Tests
+/// that care *which* process holds a port take this lock.
 static PORT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Take the port lock, ignoring poisoning: one test failing shouldn't turn the
-/// others into spurious failures that hide it.
+/// Poisoning is ignored so one failing test doesn't turn the rest into spurious
+/// failures that hide it.
 fn port_lock() -> std::sync::MutexGuard<'static, ()> {
     PORT_TESTS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Can the site attribute a listening socket to a pid? `ss` (Linux) or `lsof`
-/// (macOS); without either, ws reports plain liveness and these assertions
-/// wouldn't apply.
+/// Without `ss` or `lsof` ws reports plain liveness, so the port assertions below
+/// have nothing to assert.
 fn port_tools_available() -> bool {
     ["ss", "lsof"].iter().any(|bin| {
         std::process::Command::new("sh")
@@ -136,11 +112,9 @@ fn host_up_launches_a_detached_process_with_injected_env() {
     let out = f.run_ok(&["up", "feat/foo"]);
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
 
-    // The process is alive (pid file + kill -0)…
     assert!(proc_alive(&f), "host process should be running after up");
-    // …both the injected routing env (WS_HOST_web) AND the base contract
-    // (WS_BRANCH_SANITIZED) reached the command — the latter regressed once,
-    // producing `https://.api.<domain>` from an empty branch segment.
+    // WS_BRANCH_SANITIZED is asserted alongside the routing env because it
+    // regressed once, producing `https://.api.<domain>` from an empty segment.
     let marker = f.path().join(".worktrees/feat-foo/api/env-marker");
     let got = std::fs::read_to_string(&marker).unwrap_or_default();
     assert_eq!(got, "feat-foo.web.myapp.test feat-foo", "host env missing WS_HOST_web or WS_BRANCH_SANITIZED");
@@ -151,16 +125,11 @@ fn host_up_launches_a_detached_process_with_injected_env() {
 
 #[test]
 fn list_reports_a_host_process_that_crashed() {
-    // The state a user had no way to see: ws launched it, ws said green, and it
-    // died some time later. `ws list` asked the repo's `status` script, which for a
-    // host repo is usually absent — so a dead dev server looked exactly like a
-    // healthy one (a bare dash) until something downstream failed.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
     let pid = recorded_pid(&f);
 
-    // Kill it the way a crash would — behind ws's back, no `ws down`.
     std::process::Command::new("kill").args(["-9", &pid]).status().unwrap();
     wait_until(|| !proc_alive(&f));
 
@@ -176,8 +145,7 @@ fn list_reports_a_host_process_that_crashed() {
 #[test]
 fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
     let _ports = port_lock();
-    // Alive is not the same as serving. The fixture's `up` is a bare `sleep`: it
-    // runs happily forever and never listens on the port ws handed it, which is
+    // The fixture's `up` is a bare `sleep` — alive forever, never listening, and
     // indistinguishable from a working dev server to a pid check.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
@@ -206,9 +174,6 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
 #[test]
 fn up_warns_when_another_process_holds_the_allocated_port() {
     let _ports = port_lock();
-    // The expensive one. An orphan from an earlier run still held the port, so the
-    // dev server found it busy and silently moved to another — while ws reported
-    // the port it had allocated, and everything downstream dialled that.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
@@ -216,18 +181,15 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // First up allocates the port. The supervised process is a bare `sleep`, so it
-    // never takes the port itself — exactly the situation the bug needs.
+    // The supervised process is a bare `sleep`, so it never takes the allocated
+    // port itself — leaving it free for the squatter below.
     let out = f.run_ok(&["up", "feat/foo"]);
     let port = allocated_port(&stderr(&out));
 
-    // Stand in for the orphan: something outside ws's process tree holding it.
-    // Tolerant of losing the bind — port allocation is scanned per workspace root
-    // and probed live, so a fixture running in parallel can hold this port instead.
-    // Either way something outside ws's tree has it, which is what's under test.
+    // Losing the bind is fine: a parallel fixture holding the port is still
+    // something outside ws's process tree, which is what's under test.
     let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).ok();
 
-    // A second up: the process is still running, and ws re-checks the port.
     let out = f.run_ok(&["up", "feat/foo"]);
     let err = stderr(&out);
     drop(squatter);
@@ -246,8 +208,6 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
 #[test]
 fn up_and_list_confirm_a_process_serving_its_allocated_port() {
     let _ports = port_lock();
-    // The green path: when the process really is listening on the port ws
-    // allocated, ws says so plainly and adds no caveat.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
@@ -269,8 +229,8 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
             "scripts":{"up":"exec python3 -m http.server \"$WS_PORT_web\" --bind 127.0.0.1"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
-    // Unlike the `sleep 40` fixtures, this one supervises a real HTTP server that
-    // never exits on its own — teardown has to survive a failing assertion.
+    // Unlike the `sleep 40` fixtures, this server never exits on its own, so
+    // teardown has to survive a failing assertion.
     let _teardown = Teardown(|| stop(&f));
 
     let out = f.run_ok(&["up", "feat/foo"]);
@@ -309,7 +269,6 @@ fn host_up_is_idempotent_when_already_running() {
     f.run_ok(&["up", "feat/foo"]);
     let pid1 = std::fs::read_to_string(pid_file(&f)).unwrap();
 
-    // A second up must NOT relaunch — same pid, and it says "already running".
     let out = f.run_ok(&["up", "feat/foo"]);
     let pid2 = std::fs::read_to_string(pid_file(&f)).unwrap();
     assert_eq!(pid1, pid2, "up must not relaunch a running host process");
@@ -338,15 +297,12 @@ fn host_up_with_no_up_script_is_skipped() {
 
 #[test]
 fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
-    // The recorded pid is only the dev server itself when every layer `exec`s
-    // through. An `up` that points at a *script* leaves the wrapper shell alive as
-    // a parent, so signalling the recorded pid alone killed the wrapper and left
-    // the real server running, reparented to init and still holding its port —
-    // one leaked process per `ws down`/`ws rm`.
+    // The recorded pid is the dev server itself only when every layer `exec`s
+    // through. This fixture is the shape that doesn't — a wrapper script with a
+    // long-lived child — where signalling the recorded pid alone kills the wrapper
+    // and orphans the real server.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // Marker file, then a long-lived child: the same shape as a dev server started
-    // from a `.ws-hooks/` script.
     std::fs::write(
         f.path().join("runner.sh"),
         "#!/bin/sh\necho $$ > \"$WS_WORKSPACE_ROOT\"/wrapper.pid\nsleep 40 &\necho $! > \"$WS_WORKSPACE_ROOT\"/child.pid\nwait\n",
@@ -376,7 +332,6 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
     assert!(alive(&child), "the child should be running before down");
 
     f.run_ok(&["down", "feat/foo"]);
-    // Give the TERM a moment to land.
     wait_until(|| !alive(&child));
     assert!(
         !alive(&child),
@@ -387,10 +342,6 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
 
 #[test]
 fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
-    // The identity guard is right to refuse to signal a stranger, but `down` used
-    // to remove the pid file anyway — discarding the only record of a process it
-    // had just left running. The next `ws up` then saw no pid file, concluded
-    // nothing was running, and started a second dev server beside the first.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
@@ -422,10 +373,6 @@ fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
 
 #[test]
 fn teardown_runs_when_an_assertion_fails_mid_test() {
-    // Teardown written as the last statement of a test only runs when everything
-    // above it passed — so the tests that supervise a process leaked it on exactly
-    // the runs where a human most needs the machine left in a sane state. `Teardown`
-    // is the guard that fixes that; this pins its behaviour on unwind.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
@@ -447,10 +394,6 @@ fn teardown_runs_when_an_assertion_fails_mid_test() {
 
 #[test]
 fn wait_until_returns_early_and_gives_up_after_its_budget() {
-    // Every wait above is a race against detached work, so both halves matter:
-    // returning the instant the condition holds (or the tests pay the full budget
-    // each time) and giving up after ~2 s (or a wait that never comes true hangs
-    // the suite instead of failing its assertion).
     let mut polls = 0;
     let started = std::time::Instant::now();
     assert!(wait_until(|| {

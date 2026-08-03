@@ -18,8 +18,8 @@ pub mod remote_check;
 pub struct ExitError {
     pub code: i32,
     pub msg: String,
-    /// When true, `main` exits with `code` but prints no failure banner — the
-    /// command being wrapped already reported the failure (see `passthrough_exit`).
+    /// Suppresses `main`'s failure banner, for outcomes the wrapped command has
+    /// already reported itself (see `passthrough_exit`).
     pub silent: bool,
 }
 
@@ -39,19 +39,17 @@ pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into(), silent: false }.into()
 }
 
-/// The machine-wide default remote host when no explicit host was given:
-/// `$WS_REMOTE_HOST` (the env override), then the global config's `remote.host`
-/// (`ws config set remote.host <h>`). Callers try their explicit flag/arg
-/// first, completing the documented precedence: flag > env > global config.
-/// A malformed global config is noted (not fatal) — the caller's own
-/// "needs a host" error would otherwise mask the real problem.
+/// The env/global-config half of the documented `flag > env > global config`
+/// precedence; callers try their explicit flag first. A malformed global config
+/// is noted rather than fatal, so it doesn't hide behind the caller's own
+/// "needs a host" error.
 pub(crate) fn default_remote_host() -> Option<String> {
     if let Some(h) = std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
         return Some(h);
     }
     match crate::config::GlobalConfig::load() {
-        // A hand-edited empty host is treated as unset, same as the env var —
-        // the caller's "needs a host" guidance beats an "unsafe host" refusal.
+        // An empty host counts as unset: the caller's "needs a host" guidance
+        // beats an "unsafe host" refusal.
         Ok(g) => g.remote_host().filter(|h| !h.is_empty()).map(String::from),
         Err(e) => {
             crate::ui::note(&format!("global config: {e}"));
@@ -60,14 +58,10 @@ pub(crate) fn default_remote_host() -> Option<String> {
     }
 }
 
-/// Client-side readiness for a remote workspace (mutagen installed locally,
-/// host reachable over SSH), checked when the remote block is configured
-/// (`ws init --remote`, `ws remote set`) so a teammate hears about a bad setup
-/// there instead of at their first `ws new`. Strict — `no_verify` (the callers'
-/// `--no-verify` flag) skips it for the bootstrap case where the server isn't
-/// provisioned yet. Owns the step UI too, so the ceremony can't drift between
-/// callers. This is the *client* half; full server validation is `ws remote
-/// check`.
+/// Client-side readiness for a remote workspace, run when the remote block is
+/// configured so a bad setup surfaces there rather than at the first `ws new`.
+/// `no_verify` exists for the bootstrap case where the server isn't provisioned
+/// yet. The *client* half only; full server validation is `ws remote check`.
 pub(crate) fn verify_remote_client(
     r: &crate::config::RemoteConfig,
     no_verify: bool,
@@ -89,8 +83,6 @@ pub(crate) fn verify_remote_client(
 }
 
 fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
-    // Reuse the same read-only probes `ws remote check` runs, so there's one
-    // source of truth for "is the remote reachable / can we sync".
     if !crate::probe::mutagen_local().ok {
         return Err(preflight(
             "mutagen isn't installed — a remote workspace needs it locally to sync. \
@@ -107,9 +99,6 @@ fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Persist a workspace config to `<root>/.ws.json`, step UI included, so the
-/// ops that write one (`ws init`, `ws remote set`/`unset`) can't drift on the
-/// filename or the step label.
 pub(crate) fn write_ws_json(
     root: &std::path::Path,
     cfg: &crate::config::WsConfig,
@@ -120,18 +109,15 @@ pub(crate) fn write_ws_json(
     Ok(())
 }
 
-/// Exit with `code`, printing no failure banner — everything worth saying has
-/// already been said (`silent: true`; `main` skips the banner). Used where `ws`
-/// mirrors an outcome it merely relays: `ws exec` passing through a child's
-/// exit code (the child reported its own failure), `ws config get` on an unset
-/// key (git-parity exit 1, the stderr note said so).
+/// Exit with `code` and no failure banner, for outcomes `ws` merely relays:
+/// `ws exec` passing through a child's exit code, `ws config get` on an unset
+/// key. Everything worth saying has already been said.
 pub(crate) fn passthrough_exit(code: i32) -> anyhow::Error {
     ExitError { code, msg: String::new(), silent: true }.into()
 }
 
-/// Return the interrupt error (exit 130) if a Ctrl-C has been observed. Called
-/// by looping ops at each repo boundary so an interrupt stops the sweep cleanly
-/// instead of proceeding into the next repo. Convention: 130 = SIGINT.
+/// Called by looping ops at each repo boundary, so a Ctrl-C stops the sweep
+/// between repos rather than mid-repo. Exit 130 is the SIGINT convention.
 pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
     if crate::signal::interrupted() {
         return Err(ExitError { code: 130, msg: "interrupted".into(), silent: false }.into());

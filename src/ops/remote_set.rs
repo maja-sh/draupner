@@ -1,17 +1,7 @@
-//! `ws remote set` / `ws remote unset` — flip a workspace between local and
-//! remote **after** `ws init` (which refuses to re-run on an existing
-//! `.ws.json`). The flip is workspace-level, and it's more than a config edit:
+//! Flipping a workspace between local and remote is more than a config edit:
 //! worktrees that predate the switch need their file sync backfilled (going
-//! remote) or torn down (going local), else `ws up`/`exec` would target a
-//! server that has no files (or mutagen would keep syncing to a server the
-//! workspace no longer uses).
-//!
-//! Two things guard the flip, because both of the states it changes are derived
-//! rather than declared. [`refuse_if_running`] refuses while a stack is up, since
-//! `ws down` follows the config and not the containers. [`settle_dns_flip`]
-//! handles the wildcard's correct answer having just changed — it offers `ws
-//! setup`'s own DNS step and falls back to saying what's stale, so DNS is still
-//! only ever rewritten with consent.
+//! remote) or torn down (going local), or `ws up`/`exec` targets a server with no
+//! files — or mutagen keeps syncing to a server the workspace no longer uses.
 
 use anyhow::Result;
 use std::path::Path;
@@ -47,20 +37,14 @@ pub fn set(
 
     crate::ui::header("ws-remote-set", &connection);
 
-    // Pre-flight before anything is touched: a stack still running where the
-    // workspace points *now* would be stranded by the flip.
     let stranded = refuse_if_running(&cfg, &ws.root, force)?;
 
-    // The wildcard's correct answer is derived from where the stacks live, so the
-    // flip about to happen invalidates it. Read it before the config changes.
+    // Read before the config changes: the flip is what invalidates this answer.
     let old_answer = expected_wildcard(cfg.remote.as_ref());
 
-    // Keep the configured server path when re-pointing an already-remote
-    // workspace and no --path was given; otherwise default to the workspace's
-    // own dir name, written explicitly (like `ws init --remote`) so it's
-    // discoverable in `.ws.json`. An empty --path (a script's unset variable)
-    // is treated as absent — storing "" would anchor the server layout at the
-    // filesystem root.
+    // A re-point with no `--path` keeps the configured server path. An empty
+    // `--path` (a script's unset variable) counts as absent — storing "" would
+    // anchor the server layout at the filesystem root.
     let workspace_path = path
         .filter(|p| !p.is_empty())
         .or_else(|| cfg.remote.as_ref().and_then(|r| r.workspace_path.clone()))
@@ -78,48 +62,34 @@ pub fn set(
 
     super::write_ws_json(&ws.root, &cfg)?;
 
-    // Backfill sync for the worktrees that predate the switch. Config is
-    // already written, so a partial failure here is recoverable by rerunning
-    // `ws remote set` (the loop is idempotent) — report and continue, like a
-    // hooksweep. Creates first, one flush pass after: `create` returns once the
-    // daemon accepts the session, so the initial syncs run concurrently instead
-    // of serializing N pushes.
+    // Backfill sync for the worktrees that predate the switch. The config is
+    // already written, so a partial failure is recoverable by rerunning the whole
+    // command — report and continue rather than abort.
     let mut created = Vec::new();
     let mut failed = false;
-    // Enumerated from **git**, not from `.worktrees/` on disk — the shared
-    // `workspace::worktrees` every op uses. A directory that git doesn't know as
-    // a worktree (a failed `ws rm`'s residue, a hand-made copy) is not something
-    // to push to a server; `ws clean` reports those instead. Unmanaged worktrees
-    // (outside `.worktrees/`) are skipped too: they have no task dir, so there's
-    // no server path to sync them to.
+    // Enumerated from **git**, not from `.worktrees/` on disk: a directory git
+    // doesn't know as a worktree (a failed `ws rm`'s residue, a hand-made copy) is
+    // not something to push to a server. Unmanaged worktrees have no task dir and
+    // so no server path to sync to.
     for wt in workspace::worktrees(&ws.root, &cfg) {
         super::bail_if_interrupted()?;
         let Some(task) = wt.task else { continue };
         let repo = wt.repo;
         let session = mutagen::session_name(&task, &repo);
 
-        // Drop the port forwards before rebuilding the sync — `set` also
-        // re-points an *already-remote* workspace, and a forward outlives that
-        // flip: its endpoint (`<connection>:tcp:localhost:<port>`) is baked in at
-        // create time while its name (`ws-fwd-<branch>-<repo>-<port>`) carries no
-        // host. So a forward a previous `ws up` made against the old server stays
-        // live, and the next `ws up` re-creates it under the same name — which
-        // `forward_create` reports as idempotent success — printing
-        // `svc → localhost:<port>` while the socket still tunnels to the old host.
-        // Terminating here makes the next `up` build them against the new
-        // connection. Keyed off the still-present port record, mirroring `unset`;
-        // a no-op when the workspace had no forwards.
+        // A forward outlives a re-point: its endpoint is baked in at create time
+        // but its name carries no host, so the next `ws up` "succeeds" at
+        // re-creating it and prints `svc → localhost:<port>` while the socket
+        // still tunnels to the old server. Terminate so `up` rebuilds them.
         let sanitized = workspace::sanitize_branch(&task);
         for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
             let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
         }
 
-        // Recreate every session from a clean slate. An existing one may point
-        // anywhere — an older endpoint (and the rewritten config can no longer
-        // tell), a survivor of a failed unset — and `create` masks a name
-        // collision as success, so a create after a failed terminate would
-        // report ok while the files keep syncing to the wrong server.
-        // Terminating a session that doesn't exist is a no-op.
+        // `create` masks a name collision as success, so a surviving session
+        // pointing at an older endpoint would report ok while the files kept
+        // syncing to the wrong server. A failed terminate has to be fatal for this
+        // worktree; terminating a session that doesn't exist is a no-op.
         if let Err(e) = mutagen::terminate(&session) {
             crate::ui::step(&format!("{task}/{repo}"), "Sync created")
                 .fail(&format!("stale session not terminated: {e}"));
@@ -127,8 +97,7 @@ pub fn set(
             continue;
         }
 
-        // `worktrees` only walks configured repos, so the entry is always found;
-        // it's needed here for the repo's declared sync excludes.
+        // Always found — `worktrees` only walks configured repos.
         let Some(entry) = cfg.repos.iter().find(|r| r.name() == repo) else {
             continue;
         };
@@ -146,23 +115,21 @@ pub fn set(
             }
         }
     }
-    // Push the initial state so the server has the files before the first
-    // `ws up`/`exec` — best-effort, like `ws new`.
+    // Flushed in a second pass, not inside the loop: `create` returns as soon as
+    // the daemon accepts the session, so the initial pushes overlap.
     for session in &created {
         let _ = mutagen::flush(session);
     }
 
-    // Show the server base too — on a re-point it may be a *retained* value
-    // from the old config, and where the sync lands should never be implicit.
+    // The base is shown because on a re-point it may be retained from the old
+    // config, and where the sync lands should never be implicit.
     let mut summary = vec![format!("remote  → {connection}:{base}")];
     if !created.is_empty() {
         summary.push(format!("sync backfilled for {} worktree(s)", created.len()));
     }
     crate::ui::summary_ok(&summary);
-    // Only reachable via `--force` now: the pre-flight refuses an unforced flip
-    // with anything running. A stack that was running is beyond `ws down` from
-    // here on — every op dispatches to the server — so the advice must be the
-    // sequence that actually reaches it.
+    // Only reachable via `--force`. A stack that was running is beyond `ws down`
+    // from here on, so the advice has to be the sequence that reaches it again.
     if stranded {
         crate::ui::note(
             "stacks that were running keep running and `ws down` now targets the server — \
@@ -192,26 +159,20 @@ pub fn unset(force: bool) -> Result<()> {
         cfg.remote.as_ref().map(|r| r.connection.as_str()).unwrap_or_default(),
     );
 
-    // Pre-flight against the *server*, which is where the stacks are right now.
-    // Taking the remote block out of `cfg` first would point the probe at the
-    // wrong machine, so it happens before the `take` below.
+    // Before the `take` below: the stacks are on the server right now, and dropping
+    // the remote block first would point the probe at the wrong machine.
     let stranded = refuse_if_running(&cfg, &ws.root, force)?;
     let old_answer = expected_wildcard(cfg.remote.as_ref());
     let old = cfg.remote.take().expect("checked above");
 
-    // Tear the file syncs down before the config flips, mirroring teardown's
-    // "stop watching before you change the ground" order. Every worktree,
-    // unfiltered — terminating a session that doesn't exist is a no-op, so the
-    // wide net can only clean up more. Best-effort: a failed terminate is
-    // reported but never blocks going local (`mutagen sync terminate ws-…` is
-    // the documented escape hatch).
+    // Torn down before the config flips, mirroring teardown's "stop watching
+    // before you change the ground" order. Best-effort: a failed terminate is
+    // reported but never blocks going local.
     //
-    // Deliberately the **filesystem** walk, not `workspace::worktrees`: this is
-    // the asymmetry between creating and destroying. `set` must be strict (only
-    // sync what git calls a worktree), but `unset` must be broad — a directory
-    // git doesn't know may still have a live session pointing at the server,
-    // including one an older, laxer `set` created. Narrowing this to git would
-    // strand exactly those.
+    // Deliberately the **filesystem** walk, not the git-sourced one `set` uses: a
+    // directory git doesn't know may still have a live session pointing at the
+    // server, including one an older, laxer `set` created. Narrowing this to git
+    // would strand exactly those.
     for (task, repo) in all_worktrees(&ws.root) {
         super::bail_if_interrupted()?;
         let session = mutagen::session_name(&task, &repo);
@@ -220,10 +181,8 @@ pub fn unset(force: bool) -> Result<()> {
             Ok(()) => step.ok(),
             Err(e) => step.fail(&format!("{e}")),
         }
-        // Drop the port forwards too, before the config flip makes every future
-        // path skip them (they're all guarded on `cfg.remote.is_some()`). Keyed
-        // off the still-present port record. (`set` mirrors this for the same
-        // reason — see the teardown in its backfill loop.)
+        // Also before the flip, which makes every future path skip them (they're
+        // guarded on `cfg.remote.is_some()`), and while the port record still exists.
         let sanitized = workspace::sanitize_branch(&task);
         for (_, port) in crate::ports::load(&ws.root, &sanitized, &repo) {
             let _ = mutagen::forward_terminate(&mutagen::forward_session_name(&task, &repo, port));
@@ -233,9 +192,8 @@ pub fn unset(force: bool) -> Result<()> {
     super::write_ws_json(&ws.root, &cfg)?;
 
     crate::ui::summary_ok(&["workspace is local again".to_string()]);
-    // Only reachable via `--force`. Server-side state (stacks, Caddy routes, the
-    // generated override) is out of reach once the block is gone — teardown would
-    // run locally. Same actionable sequence as `set`'s note, in the other direction.
+    // Only reachable via `--force`. Server-side state is out of reach once the
+    // block is gone — teardown would run locally.
     if stranded {
         crate::ui::note(&format!(
             "stacks and routes still on {} are left as-is — `ws remote set {}`, `ws down`, \
@@ -247,20 +205,18 @@ pub fn unset(force: bool) -> Result<()> {
     Ok(())
 }
 
-/// The address `*.<domain>` should answer with for a given workspace state:
-/// loopback when local, otherwise the server's — the pinned `publish_address` when
-/// it names a concrete address, else derived from the SSH connection (`ssh -G` +
-/// DNS, the same rule `ws setup` follows). Falls back to *naming* the server when
-/// derivation fails, so the note can still say which machine the answer belongs to
-/// even when it can't say which address. `ssh -G` only parses config — it never
-/// connects — so this is cheap and safe against an unreachable server.
+/// The address `*.<domain>` should answer with, following the same rule as
+/// `ws setup`. Derivation goes through `ssh -G`, which only parses config and
+/// never connects, so this stays cheap and safe against an unreachable server;
+/// when it fails the fallback *names* the server, so the note can still say which
+/// machine the answer belongs to.
 fn expected_wildcard(remote: Option<&RemoteConfig>) -> String {
     let Some(r) = remote else { return "127.0.0.1".to_string() };
     r.publish_address
         .as_deref()
         .map(str::trim)
         .filter(|a| {
-            // A bind-any wildcard is the *default bind*, not somewhere a resolver
+            // A bind-any wildcard is the default bind, not somewhere a resolver
             // can point — same rule `ops::setup::routing_address` applies.
             a.parse::<std::net::IpAddr>().map(|ip| !ip.is_unspecified()).unwrap_or(false)
         })
@@ -269,36 +225,22 @@ fn expected_wildcard(remote: Option<&RemoteConfig>) -> String {
         .unwrap_or_else(|| format!("the server `{}`", r.connection))
 }
 
-/// Settle the wildcard's correct answer after a flip changed it: offer the DNS
-/// step, and say what's stale if it wasn't taken.
+/// The wildcard's right answer is *derived* from where the stacks live, so a flip
+/// invalidates it while leaving the resolver untouched — that is how a workspace
+/// flipped back to local went on sending `*.<domain>` traffic to the offload
+/// server. The DNS step is offered rather than run: `ws` never edits a resolver on
+/// its own account, and when the offer can't be made or is declined the stale-DNS
+/// note is the whole behavior, so a scripted flip is unchanged.
 ///
-/// The right answer is *derived* from where the stacks live — loopback when local,
-/// the server's address when remote — so a flip silently invalidates it while
-/// leaving the resolver untouched. That is exactly how a workspace flipped back to
-/// local kept resolving `*.<domain>` to the offload server: a local dev server
-/// proxied `/api` to that hostname, the request crossed the network to a machine
-/// the user believed she had stopped using, and its Caddy answered with the
-/// "No stack is running here" page.
-///
-/// Never an action taken silently — but a consented one is fine, and this is a
-/// place where a `[R]un / [S]kip` beats homework: re-pointing the wildcard is the
-/// same step `ws setup` walks, and having to re-run the whole setup command every
-/// time you switch sides is friction with no transparency dividend.
-/// [`crate::setup::offer_dns_step`] runs *that* step, prompt and all; `ws` still
-/// never edits a resolver on its own account. When it isn't offered (no tty, a
-/// platform whose privileged bits live in `server-setup/`) or is declined, the
-/// note is what it always was, so a scripted flip is unchanged.
-///
-/// `offloading` is where the workspace points *after* the flip — `set` true,
-/// `unset` false — which is what decides the platform branch inside the offer.
+/// `offloading` is where the workspace points *after* the flip, which is what
+/// decides the platform branch inside the offer.
 fn settle_dns_flip(domain: Option<&str>, old: &str, new: &str, offloading: bool) {
     let Some(domain) = domain else { return };
     if old == new {
-        return; // re-pointing at the same address changes nothing to re-point
+        return;
     }
-    // A failure here is the DNS commands failing, not the flip: the config is
-    // already written and the syncs are already backfilled. Report it and fall
-    // through to the note, which is now exactly the advice the user needs.
+    // The config is written and the syncs are backfilled by now, so a failure here
+    // is the DNS commands failing and not the flip — fall through to the note.
     match crate::setup::offer_dns_step(domain, new, offloading) {
         Ok(true) => return,
         Ok(false) => {}
@@ -310,7 +252,6 @@ fn settle_dns_flip(domain: Option<&str>, old: &str, new: &str, offloading: bool)
     ));
 }
 
-/// Whether a worktree's stack is up, as far as the pre-flight can tell.
 #[derive(PartialEq)]
 enum Live {
     Up,
@@ -320,27 +261,18 @@ enum Live {
     Unknown,
 }
 
-/// Refuse the flip while anything is still running, and report whether `--force`
+/// Refuse the flip while anything is still running, returning whether `--force`
 /// carried it past a positive or inconclusive finding.
 ///
-/// Flipping a live workspace strands it: after `set`, a stack running locally is
-/// beyond `ws down` (every op dispatches to the server from then on); after
-/// `unset`, the server's containers, routes and override are equally out of reach.
-/// This used to be a documented footgun with a recovery note printed *after* the
-/// damage. It's a pre-flight now, so the working order — stop the stack, flip,
-/// bring it back up — is the one the tool enforces.
-///
-/// Liveness is probed **where the workspace points right now**, which is the side
-/// that would be stranded: locally for a local workspace, and on the *old* server
-/// when re-pointing an already-remote one.
+/// Flipping a live workspace strands it: the stack stays where `ws` will no longer
+/// look for it, so this enforces stop, flip, bring back up. Liveness is probed
+/// **where the workspace points right now** — the side that would be stranded, so
+/// the *old* server when re-pointing an already-remote workspace.
 fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result<bool> {
-    // The same git-sourced enumeration `set`'s sync backfill walks, filtered to
-    // worktrees `ws` has a stack model for. A repo that is neither `kind: host`
-    // nor a compose project has nothing `ws` starts or supervises, so there is
-    // nothing for the flip to strand — and probing it would only manufacture
-    // "unknown" verdicts on workspaces that can't be affected. Unmanaged
-    // worktrees are skipped for the same reason `set` skips them: with no task
-    // dir there's no `ws down <branch>` that would even reach them.
+    // Only worktrees `ws` has a stack model for: a repo that is neither `kind:
+    // host` nor a compose project has nothing to strand, and probing it would just
+    // manufacture "unknown" verdicts on workspaces that can't be affected.
+    // Unmanaged worktrees have no task dir, so no `ws down` reaches them either.
     let targets: Vec<workspace::Worktree> = workspace::worktrees(root, cfg)
         .into_iter()
         .filter(|wt| wt.task.is_some())
@@ -350,9 +282,9 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
         return Ok(false);
     }
 
-    // Resolving a remote site fetches the server's `$HOME` over SSH, so this is
-    // also the reachability verdict. An unreachable server means we cannot tell
-    // what's running there — the `unset` case the refusal exists for.
+    // Resolving a remote site fetches the server's `$HOME` over SSH, so this
+    // doubles as the reachability verdict: unreachable means we cannot tell what
+    // is running there, which is the `unset` case the refusal exists for.
     let site = match Site::resolve(cfg) {
         Ok(s) => s,
         Err(_) => {
@@ -369,7 +301,7 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
     let mut unknown: Vec<(String, String)> = Vec::new();
     for wt in &targets {
         super::bail_if_interrupted()?;
-        // A detached worktree has no branch; its task dir name is the sanitized
+        // A detached worktree has no branch, but its task dir name is the sanitized
         // branch, which is what every per-worktree name is keyed off anyway.
         let branch = wt
             .branch
@@ -384,8 +316,8 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
     }
 
     if !up.is_empty() {
-        // Name what's up and the exact command that clears it — per branch, since
-        // `ws down` takes a branch and a workspace can have several live at once.
+        // Grouped per branch because `ws down` takes a branch, and a workspace can
+        // have several live at once.
         let branches = by_branch(&up);
         let what = branches
             .iter()
@@ -418,8 +350,8 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
     Ok(false)
 }
 
-/// Group `(branch, repo)` pairs into `(branch, repos)`, preserving first-seen
-/// branch order so the message reads in the order the worktrees were walked.
+/// Preserves first-seen branch order, so the message reads in the order the
+/// worktrees were walked.
 fn by_branch(pairs: &[(String, String)]) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     for (branch, repo) in pairs {
@@ -442,11 +374,9 @@ fn refuse_unknown(force: bool, reason: String, remedy: String) -> Result<bool> {
     )
 }
 
-/// Turn a finding into the refusal, or into `Ok(true)` when `--force` overrides
-/// (matching the `--no-verify` precedent on these ops: `ws` states the risk, the
-/// user decides). `remedy` is the ordinary way out and belongs only in the
-/// refusal — repeating "stop it first" at someone who just said `--force` is
-/// noise. The caller uses `true` to print the recovery sequence.
+/// `remedy` is the ordinary way out and appears only in the refusal — repeating
+/// "stop it first" at someone who just passed `--force` is noise. The `Ok(true)`
+/// that `--force` yields is what tells the caller to print the recovery sequence.
 fn refuse(force: bool, finding: String, remedy: String) -> Result<bool> {
     if force {
         crate::ui::note(&format!("--force: {finding} — flipping anyway"));
@@ -459,7 +389,6 @@ fn refuse(force: bool, finding: String, remedy: String) -> Result<bool> {
     )))
 }
 
-/// Probe one worktree's stack at `site`.
 fn liveness(
     cfg: &config::WsConfig,
     site: &Site,
@@ -470,18 +399,10 @@ fn liveness(
     let repo = &wt.repo;
     let sanitized = workspace::sanitize_branch(branch);
     if cfg.is_host_repo(repo) {
-        // A host repo's stack IS a ws-owned detached process, so ws can answer for
-        // it directly.
-        //
-        // `Crashed` does NOT block. The refusal exists to stop a *running* stack
-        // being stranded on a machine `ws` will no longer look at; a process that
-        // already died strands nothing. Blocking on it would also make the refusal
-        // say "still running", which for a crashed process is simply false — and a
-        // message that misstates the situation is the exact failure mode this whole
-        // branch is fixing. What it leaves behind is a stale pid record, which is
-        // cleanup, not stranding.
-        //
-        // `None` is the probe failing to run, which is genuinely unknown.
+        // `Crashed` counts as `Down`: a process that already died strands nothing,
+        // and blocking on it would make the refusal say "still running", which is
+        // simply false. All it leaves is a stale pid record — cleanup, not
+        // stranding. `None` is the probe failing to run, which is genuinely unknown.
         let ports: Vec<u16> = crate::ports::load(root, &sanitized, repo).into_values().collect();
         let name = crate::supervise::proc_name(branch, repo);
         return match crate::supervise::health(site, &name, &ports) {
@@ -495,15 +416,12 @@ fn liveness(
     compose_liveness(cfg, site, root, wt, &sanitized)
 }
 
-/// Whether a container repo's compose project has any container at `site`, via
-/// `compose ps -q`.
-///
-/// One round trip carries every verdict, encoded in the exit status, because a
-/// remote workspace pays SSH for each: `3` = no container runtime at the site and
+/// Every verdict rides one round trip, encoded in the exit status, because a
+/// remote workspace pays SSH for each: `3` = no container runtime at the site,
 /// `4` = the stack's directory isn't there. Both are sound "nothing is running"
-/// inferences rather than guesses — no runtime can hold no containers, and a
-/// directory that was never synced was never brought up. A `compose ps` that runs
-/// and *fails* is genuinely inconclusive, and stays that way.
+/// inferences — no runtime can hold no containers, and a directory that was never
+/// synced was never brought up — where a `compose ps` that runs and *fails* is
+/// genuinely inconclusive and stays that way.
 fn compose_liveness(
     cfg: &config::WsConfig,
     site: &Site,
@@ -512,8 +430,6 @@ fn compose_liveness(
     sanitized: &str,
 ) -> Live {
     let repo = &wt.repo;
-    // The stack's directory at the site: the local worktree, or the synced server
-    // dir for a remote workspace.
     let dir = match (site, cfg.remote.as_ref()) {
         (Site::Remote { .. }, Some(r)) => remote::worktree_path(
             &site.abs_base(&r.worktree_base(root)),
@@ -522,10 +438,10 @@ fn compose_liveness(
         ),
         _ => wt.path.to_string_lossy().into_owned(),
     };
-    // `COMPOSE_PROJECT_NAME` is what identifies this worktree's containers; the
+    // `COMPOSE_PROJECT_NAME` alone identifies this worktree's containers — the
     // generated override only carries ports/env, so `ps` needs no `COMPOSE_FILE`.
-    // Every interpolated value is shell-quoted — `runtime` comes from a possibly
-    // cloned `.ws.json`, same posture as `compose::remote_compose_script`.
+    // Every interpolated value is shell-quoted: `runtime` and the paths come from
+    // a possibly cloned `.ws.json`.
     let script = format!(
         "command -v {rt} >/dev/null 2>&1 || exit 3\n\
          cd {dir} 2>/dev/null || exit 4\n\
@@ -550,10 +466,9 @@ fn compose_liveness(
     }
 }
 
-/// Every existing worktree as `(task, repo)`, composed from the two canonical
-/// `workspace` walkers so the ".worktrees layout" rules (symlink and non-UTF-8
-/// handling) stay in one place. Task-dir names are already-sanitized branches;
-/// `all_worktrees_for` re-sanitizes idempotently.
+/// Composed from the two canonical `workspace` walkers so the `.worktrees` layout
+/// rules (symlink and non-UTF-8 handling) stay in one place. Task-dir names are
+/// already sanitized branches, and `all_worktrees_for` re-sanitizes idempotently.
 fn all_worktrees(root: &std::path::Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for task_dir in workspace::all_task_dirs(root) {

@@ -4,17 +4,13 @@ use common::{stderr, WorkspaceFixture};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-// `ws remote set` / `ws remote unset` — flipping a workspace local↔remote
-// after init. The mutagen/ssh binaries are stubbed (`WS_MUTAGEN`/`WS_SSH`), so
-// these assert the exact sync lifecycle `ws` drives, not real syncing.
+// The mutagen/ssh binaries are stubbed throughout, so these assert the sync
+// lifecycle `ws` drives, not real syncing.
 
 fn recorded(args_file: &Path) -> String {
     std::fs::read_to_string(args_file).unwrap_or_default()
 }
 
-/// Run `ws <argv>` with ssh stubbed reachable and `WS_MUTAGEN` pointed at
-/// `mutagen` (usually an arg recorder). Returns the output and the file the stub
-/// records its argv to.
 fn run_with_stubs(ws: &WorkspaceFixture, argv: &[&str], mutagen: &Path) -> (Output, PathBuf) {
     let ok = ws.stub("ok", "exit 0");
     let args_file = ws.path().join("mutagen-args");
@@ -41,8 +37,6 @@ fn remote_set_writes_the_block_and_backfills_sync_for_existing_worktrees() {
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"srv\""), "remote block written:\n{cfg}");
 
-    // Both pre-existing worktrees got a session against the new endpoint, then
-    // an initial flush.
     let calls = recorded(&args_file);
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     for repo in ["api", "web"] {
@@ -60,8 +54,7 @@ fn remote_set_writes_the_block_and_backfills_sync_for_existing_worktrees() {
 fn remote_set_ignores_dep_artifacts_present_in_the_worktree() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
-    // The existing worktree is ground truth: a vendor/ dir present at flip time
-    // must stay off the wire, same as `ws new` would have arranged.
+    // The worktree, not the main checkout, is what a flip scans for artifacts.
     std::fs::create_dir_all(ws.path().join(".worktrees/feat-x/api/vendor")).unwrap();
 
     let (out, args_file) =
@@ -77,8 +70,6 @@ fn remote_set_ignores_dep_artifacts_present_in_the_worktree() {
 #[test]
 fn remote_set_never_ignores_a_git_tracked_vendor_dir() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    // Go-style committed vendoring: vendor/ is tracked source, not a per-host
-    // artifact — it must reach the server, so it must NOT become a sync ignore.
     std::fs::create_dir_all(ws.path().join("api/vendor")).unwrap();
     std::fs::write(ws.path().join("api/vendor/lib.go"), "package lib").unwrap();
     ws.git("api", &["add", "vendor"]);
@@ -101,8 +92,8 @@ fn remote_set_fails_the_worktree_when_a_stale_session_wont_terminate() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
 
-    // Records every call; fails `sync terminate` with an error that is NOT one
-    // of the "already gone" patterns (a real daemon failure).
+    // The terminate error must not match one of the "already gone" patterns, or
+    // it reads as a session that was never there.
     let rec = ws.stub(
         "mutagen-flaky",
         "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"\n\
@@ -110,9 +101,8 @@ fn remote_set_fails_the_worktree_when_a_stale_session_wont_terminate() {
     );
 
     let (out, args_file) = run_with_stubs(&ws, &["remote", "set", "srv"], &rec);
-    // A create after a failed terminate would no-op on the name collision and
-    // report success while the session syncs to the wrong endpoint — so the
-    // worktree must FAIL and the create must not run.
+    // A create after a failed terminate no-ops on the name collision and reports
+    // success while the session keeps syncing to the old endpoint.
     assert_eq!(out.status.code(), Some(1), "must fail:\n{}", stderr(&out));
     assert!(stderr(&out).contains("stale session"), "{}", stderr(&out));
     assert!(!recorded(&args_file).contains("create"), "create must be skipped:\n{}", recorded(&args_file));
@@ -135,8 +125,8 @@ fn remote_set_treats_an_empty_path_as_absent() {
 fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
-    // Simulate a workspace already offloaded to old-host (worktree was created
-    // while local so no server is needed).
+    // Offloaded to old-host only after the worktree existed, so no server is
+    // needed to reach this state.
     ws.write_ws_json(
         r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
     );
@@ -145,16 +135,14 @@ fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
         run_with_stubs(&ws, &["remote", "set", "new-host"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
 
-    // The old-endpoint session dies before the new one is created — `sync
-    // create` alone would no-op on the name collision and keep syncing to
-    // old-host.
+    // `sync create` alone no-ops on the name collision, so the old-endpoint
+    // session has to die first or it keeps syncing to old-host.
     let calls = recorded(&args_file);
     let terminate = calls.find("terminate").expect("stale session terminated");
     let create = calls.find("create").expect("session recreated");
     assert!(terminate < create, "terminate must precede create:\n{calls}");
     assert!(calls.contains("new-host:proj/feat-x/api"), "new endpoint:\n{calls}");
 
-    // --path was not given → the configured workspace_path is kept.
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"workspace_path\": \"proj\""), "path kept on re-point:\n{cfg}");
     assert!(cfg.contains("new-host"), "{cfg}");
@@ -167,10 +155,8 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     ws.write_ws_json(
         r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
     );
-    // A previous `ws up` against old-host allocated a port and left a forward
-    // session for it. The forward's endpoint is fixed at create time but its name
-    // isn't host-keyed, so re-pointing must terminate it — otherwise the next `ws
-    // up` no-ops on the name collision and `localhost:20000` still reaches
+    // A forward's endpoint is fixed at create time but its name isn't host-keyed,
+    // so a re-point that doesn't terminate it leaves `localhost:20000` reaching
     // old-host while the port-forwards table claims the new one.
     std::fs::create_dir_all(ws.path().join(".ws-meta")).unwrap();
     std::fs::write(ws.path().join(".ws-meta/feat-x-api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
@@ -179,14 +165,13 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
         run_with_stubs(&ws, &["remote", "set", "new-host"], &ws.arg_recorder("mutagen-rec"));
     assert!(out.status.success(), "{}", stderr(&out));
 
-    // The recorder writes one argv per line, so this is the exact
+    // The recorder writes one argv per line, so the newlines pin the exact
     // `mutagen forward terminate ws-fwd-feat-x-api-20000` invocation.
     let calls = recorded(&args_file);
     assert!(
         calls.contains("forward\nterminate\nws-fwd-feat-x-api-20000"),
         "the old host's forward must be terminated on a re-point:\n{calls}"
     );
-    // The sync backfill still runs alongside it.
     assert!(calls.contains("create"), "sync still recreated:\n{calls}");
 }
 
@@ -197,14 +182,12 @@ fn remote_set_writes_domain_and_preserves_extended_repo_config() {
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"http":true,"port":8080}},"scripts":{"up":"serve"},"env":{"APP_URL":"https://${WS_HOST_web}"}}]}"#,
     );
 
-    // No worktrees yet → no sync backfill, so no stubs needed beyond skipping
-    // the reachability check.
+    // No worktrees yet → no sync backfill, so `--no-verify` is the only stub needed.
     let out = ws.run(&["remote", "set", "srv", "--domain", "myapp.test", "--no-verify"]);
     assert!(out.status.success(), "{}", stderr(&out));
 
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"domain\": \"myapp.test\""), "top-level domain written:\n{cfg}");
-    // The rewrite must not shed the extended repo config it round-tripped.
     for kept in ["\"kind\": \"host\"", "\"http\": true", "\"up\": \"serve\"", "WS_HOST_web"] {
         assert!(cfg.contains(kept), "extended config lost `{kept}`:\n{cfg}");
     }
@@ -291,16 +274,12 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
 }
 
-// --- the flip is refused while a stack is running -------------------------
-//
 // Flipping a live workspace strands it: after `set` a locally-running stack is
 // beyond `ws down` (every op dispatches to the server from then on); after
-// `unset` the server's containers and routes are equally out of reach. These
-// assert the pre-flight that enforces stop → flip → start instead.
+// `unset` the server's containers and routes are equally out of reach. Hence the
+// pre-flight the tests below assert.
 
-/// A `kind: host` repo whose `up` is a long sleep — a genuinely running,
-/// `ws`-supervised process for the pre-flight to find. `$HOME` is the fixture, so
-/// the pid file under `~/.ws-run` is isolated.
+/// A genuinely running, `ws`-supervised process for the pre-flight to find.
 fn running_host_workspace() -> WorkspaceFixture {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
@@ -310,8 +289,8 @@ fn running_host_workspace() -> WorkspaceFixture {
     ws
 }
 
-/// Kill the supervised process directly, whatever state the config ended in —
-/// `ws rm` would dispatch to a server the test never had.
+/// Killed directly rather than via `ws rm`, which would dispatch teardown to a
+/// server the test never had.
 fn kill_host_proc(ws: &WorkspaceFixture) {
     let Ok(contents) = std::fs::read_to_string(ws.path().join(".ws-run/ws-feat-x-api.pid")) else {
         return;
@@ -330,11 +309,9 @@ fn remote_set_refuses_while_a_stack_is_running() {
 
     assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
     let err = stderr(&out);
-    // Name what's up and the exact command that clears it.
     assert!(err.contains("still running: feat/x (api)"), "{err}");
     assert!(err.contains("`ws down feat/x`"), "{err}");
     assert!(err.contains("--force"), "the override must be discoverable:\n{err}");
-    // A refusal must not have written the block it refused to act on.
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(!cfg.contains("srv"), "refusal must leave .ws.json untouched:\n{cfg}");
 }
@@ -359,8 +336,8 @@ fn remote_set_force_flips_past_a_running_stack() {
     assert!(out.status.success(), "--force must flip anyway:\n{}", stderr(&out));
     let err = stderr(&out);
     assert!(err.contains("--force"), "the override should say what it carried past:\n{err}");
-    // The recovery sequence is printed precisely when something really was left
-    // behind — it's noise on a flip that had nothing running.
+    // The recovery sequence is printed only when something really was stranded;
+    // `remote_set_proceeds_when_the_container_stack_is_down` asserts the other half.
     assert!(err.contains("ws remote unset"), "recovery sequence expected:\n{err}");
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"srv\""), "{cfg}");
@@ -370,8 +347,7 @@ fn remote_set_force_flips_past_a_running_stack() {
 fn remote_set_refuses_while_a_container_stack_is_running() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
-    // A compose project in the worktree, plus a runtime stub reporting one
-    // container — the `compose ps -q` half of the pre-flight.
+    // A container id on stdout is how `compose ps -q` reports a running stack.
     std::fs::write(
         ws.path().join(".worktrees/feat-x/api/docker-compose.yml"),
         "services: {}\n",
@@ -419,7 +395,6 @@ fn remote_set_proceeds_when_the_container_stack_is_down() {
         ],
     );
     assert!(out.status.success(), "an idle stack must not block the flip:\n{}", stderr(&out));
-    // And nothing was stranded, so the recovery note stays out of the way.
     assert!(
         !stderr(&out).contains("ws remote unset"),
         "recovery note is for stranded stacks only:\n{}",
@@ -438,7 +413,7 @@ fn remote_unset_refuses_when_it_cannot_tell_what_is_running() {
     .unwrap();
     ws.write_ws_json(r#"{"repos":["api"],"remote":{"connection":"srv"}}"#);
 
-    // The server is unreachable, so the stack there is unknowable. Reading that
+    // With the server unreachable the stack there is unknowable, and reading that
     // as "nothing is running" is exactly how a stack gets stranded.
     let bad = ws.stub("bad", "exit 255");
     let out = ws.run_with_env(&["remote", "unset"], &[("WS_SSH", bad.to_str().unwrap())]);
@@ -479,13 +454,11 @@ fn remote_unset_force_flips_when_liveness_is_unknown() {
     assert!(stderr(&out).contains("ws remote set srv"), "{}", stderr(&out));
 }
 
-// --- the flip invalidates the wildcard's correct answer --------------------
-
 #[test]
 fn remote_set_says_the_wildcard_answer_is_now_stale() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.write_ws_json(r#"{"repos":["api"],"domain":"myapp.test"}"#);
-    // `ssh -G` (config parsing only, never a connection) is how the client's
+    // `ssh -G` parses config only and never connects — it's how the client's
     // address for the server is derived.
     let sshg = ws.stub(
         "ssh-g",
@@ -503,9 +476,9 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
     // A nudge, not an action: rewriting a resolver stays user-consented.
     assert!(err.contains("ws setup"), "{err}");
     assert!(err.contains("never edits your resolver"), "{err}");
-    // On a tty the flip offers `ws setup`'s DNS step instead of this note. Here
-    // stdin isn't one, so nothing is offered: no prompt that can't be answered,
-    // no command block, and above all no wait for a keypress that never comes.
+    // On a tty the flip offers `ws setup`'s DNS step instead. Here stdin isn't
+    // one, so nothing may be offered — a prompt would wait for a keypress that
+    // never comes.
     assert!(!err.contains("[R]un"), "no unanswerable prompt in a scripted flip: {err}");
     assert!(!err.contains("dnsmasq"), "no command block in a scripted flip: {err}");
 }
@@ -513,9 +486,6 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
 #[test]
 fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    // The incident's exact shape: the wildcard was pointed at the offload
-    // server's address, and going local leaves it aimed at a machine this
-    // workspace no longer uses.
     ws.write_ws_json(
         r#"{"repos":["api"],"domain":"myapp.test",
             "remote":{"connection":"srv","publish_address":"100.64.1.3"}}"#,

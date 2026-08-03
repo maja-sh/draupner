@@ -15,7 +15,6 @@ fn happy_path_both_hooks_run() {
     assert!(err.contains("API-DOWN-RAN"), "expected api hook output in:\n{err}");
     assert!(err.contains("APP-DOWN-RAN"), "expected app hook output in:\n{err}");
     assert_eq!(err.matches("down hook").count(), 2, "expected two down-hook steps in:\n{err}");
-    // Symmetric-counterpart nudge back to `ws up`.
     assert!(err.contains("ws up feat/foo"), "expected resume nudge in:\n{err}");
 }
 

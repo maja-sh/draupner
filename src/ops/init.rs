@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
 use crate::compose;
 
-/// The lifecycle events `ws` dispatches, in the order they happen. `ws init`
-/// scaffolds one starter script per repo per event; declaring one under a repo's
-/// `scripts` is what turns it on.
+/// The lifecycle events `ws` dispatches, in the order they happen.
 const HOOK_EVENTS: &[&str] =
     &["prepare", "post-create", "up", "down", "post-remove", "status"];
 
@@ -22,11 +20,8 @@ pub fn run(
     let cwd = std::env::current_dir()?;
 
     if refresh_schema {
-        // Resolve the workspace the way every other op does — by walking up — rather
-        // than demanding the cwd *be* the root. Scaffolding a new workspace is
-        // rightly cwd-bound; refreshing an existing one is the same "which workspace
-        // am I in" question `ws up`/`list`/`exec` already answer from any
-        // subdirectory, and answering it differently here is just a trap.
+        // Scaffolding is rightly cwd-bound, but refreshing an existing workspace is
+        // the "which workspace am I in" question every other op answers by walking up.
         let root = crate::workspace::locate()
             .map(|ws| ws.root)
             .map_err(|_| super::preflight(format!(
@@ -41,12 +36,8 @@ pub fn run(
     init_local(&cwd, remote_cfg, domain, runtime, no_verify)
 }
 
-/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, or
-/// `None` when `--remote` wasn't given. A bare `--remote` falls back to
-/// `$WS_REMOTE_HOST`, then the global default (`ws config set remote.host`).
-/// `workspace_path` is written explicitly (defaulting to the workspace dir
-/// name) so it's visible in `.ws.json`. `--domain` is handled separately —
-/// it's top-level now (routing is location-transparent).
+/// `workspace_path` is written explicitly, rather than left to default, so the
+/// server layout is visible in the scaffolded `.ws.json`.
 fn build_remote(
     root: &Path,
     remote: Option<Option<String>>,
@@ -83,9 +74,8 @@ fn init_local(
 
     let runtime = runtime.unwrap_or_else(|| "podman".to_string());
 
-    // Blocks *creating* a nested root, not running `ws` from a subdir (that
-    // still resolves upward). The hazard: under the outer's `.worktrees/`, an
-    // outer `ws clean`/`rm` would tear the inner workspace down.
+    // Blocks *creating* a nested root, not running `ws` from a subdir: under the
+    // outer's `.worktrees/`, an outer `ws clean`/`rm` would tear this one down.
     if let Some(outer) = enclosing_workspace(root) {
         let detail = if root.starts_with(outer.join(".worktrees")) {
             " — inside its `.worktrees/` tree, where an outer `ws clean`/`rm` would tear this down"
@@ -108,8 +98,7 @@ fn init_local(
         );
     }
 
-    // Verify client readiness before writing anything, so a strict-mode refusal
-    // leaves no half-written config behind.
+    // Before writing anything, so a strict-mode refusal leaves no half-written config.
     if let Some(r) = &remote {
         super::verify_remote_client(r, no_verify)?;
     }
@@ -120,8 +109,7 @@ fn init_local(
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
         domain,
-        // Written explicitly (like workspace_path) so the routing runtime is
-        // visible/discoverable in the scaffolded .ws.json.
+        // Written explicitly, like workspace_path, so it's discoverable in .ws.json.
         runtime: Some(runtime.clone()),
         remote,
         repos: repos.iter().map(|r| scaffold_repo(root, r, &runtime)).collect(),
@@ -152,16 +140,13 @@ fn init_local(
 fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", "--refresh-schema");
 
-    // `root` is already a located workspace (the caller walked up to find it), so
-    // the schema can't land in a non-workspace dir.
     write_schema(root)?;
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
     Ok(())
 }
 
-/// Generate `<root>/.ws.schema.json` from the live `WsConfig`, step UI included,
-/// so `ws init` and `ws init --refresh-schema` can't drift on the filename or
-/// the step label.
+/// Shared by `ws init` and `--refresh-schema`, step UI included, so the two
+/// can't drift on the filename or the step label.
 fn write_schema(root: &Path) -> Result<()> {
     let step = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
@@ -170,8 +155,6 @@ fn write_schema(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The nearest workspace strictly above `root` (an ancestor holding `.ws.json`),
-/// or `None` if `root` isn't nested inside one.
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     root.ancestors()
         .skip(1)
@@ -179,15 +162,12 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Build a repo entry, scaffolding the auto-derived `services` block when the
-/// repo is a compose project so the routing is visible in `.ws.json` from day
-/// one. Best-effort: if the repo has no compose file, or `compose config` can't
-/// run (runtime absent), it stays a bare-name entry — `ws up` re-derives live
-/// regardless.
+/// Scaffolds the derived `services` block so the routing is visible in `.ws.json`
+/// from day one. Best-effort: with no compose file or no runtime to run `compose
+/// config`, it stays a bare-name entry and `ws up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
-    // `ws init` scaffolds from the local checkout on the host (there's no server
-    // yet — the workspace is being created), so derivation runs on the local site.
+    // The workspace is being created, so there is no server yet to derive on.
     let services = compose::has_compose_file(&repo_dir)
         .then(|| {
             compose::derive(&crate::remote::Site::Local, runtime, &repo_dir.to_string_lossy()).ok().map(|d| d.services)
@@ -204,21 +184,15 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
     // `list_child_dirs` swallows a failing `read_dir` and returns an empty vec,
-    // which for `ws init` would scaffold a repo-less `.ws.json` off an unreadable
-    // cwd instead of saying so. Probe first, then share the walk.
+    // which here would scaffold a repo-less `.ws.json` off an unreadable cwd
+    // instead of saying so. Probe first, then share the walk.
     fs::read_dir(root).context("read cwd")?;
 
     let mut names = Vec::new();
-    // The walk itself is shared with the rest of `ws` (`workspace::list_child_dirs`):
-    // it swallows per-entry read errors so one broken symlink doesn't abort the
-    // scan, and it skips symlinks (they can point outside the workspace and
-    // confuse later ops) and anything that isn't a real dir. Only the dotfile
-    // skip and the `is_git_repo` filter are `init`-specific.
     for (name, path) in crate::workspace::list_child_dirs(root) {
         let Some(name) = name else {
-            // Non-UTF-8 dir names would round-trip through `.ws.json` lossily
-            // and break later worktree lookups. Skip with a note instead of
-            // silently corrupting the config.
+            // A non-UTF-8 name would round-trip through `.ws.json` lossily and
+            // break later worktree lookups, so it's skipped rather than written.
             crate::ui::note(&format!(
                 "skipping non-UTF-8 directory name: {}",
                 path.display()
@@ -236,10 +210,8 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Scaffold a starter shell script per repo per event under `.ws-hooks/`, as
-/// `<repo>-<event>.sh`. They're inert until a repo's `scripts` block names one —
-/// `ws` runs only what `.ws.json` declares — so the template body says how.
-/// Written executable, because a `scripts` entry invokes the file directly.
+/// The scaffolded scripts stay inert until a repo's `scripts` block names one, so
+/// the template body says how. Written executable: `scripts` invokes the file.
 fn write_hook_templates(dir: &Path, repos: &[String]) -> Result<()> {
     fs::create_dir_all(dir)?;
     for repo in repos {

@@ -9,19 +9,11 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // Enumerate from git — the shared `workspace::worktrees` view `ws list` and
-    // `ws clean` use — rather than scanning the task dir. A directory under
-    // `.worktrees/<task>/` need not be a worktree at all: it can be a hand-made
-    // copy or the residue of an interrupted removal. Teardown used to run the
-    // whole lifecycle inside one of those and then fail `git worktree remove` on
-    // it (there is no `<root>/<name>` main checkout to run git from), which
-    // aborted the loop part-way — some repos torn down, the rest left behind —
-    // and made the branch permanently unremovable until the stray dir was
-    // deleted by hand.
-    //
-    // A registration whose directory is gone is excluded too: `git worktree
-    // remove` fails on those, and before this enumeration change they were
-    // simply invisible here (that's `git worktree prune`'s job, not `ws rm`'s).
+    // Enumerate from git rather than scanning the task dir: a directory under
+    // `.worktrees/<task>/` need not be a worktree at all, and tearing one down
+    // fails half-way through the loop, leaving the branch unremovable. The
+    // `is_dir` filter drops registrations whose directory is already gone —
+    // `git worktree remove` fails on those, and pruning them is not `ws rm`'s job.
     let known = workspace::worktrees(&ws.root, &cfg);
     let task = workspace::sanitize_branch(branch);
     let worktrees: Vec<(String, PathBuf)> = known
@@ -30,8 +22,8 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
         .map(|w| (w.repo.clone(), w.path.clone()))
         .collect();
 
-    // The unregistered dirs in *this* task's dir. Reported, never acted on —
-    // the same contract `ws clean` states for them.
+    // Unregistered dirs are reported, never acted on — the same contract
+    // `ws clean` states for them.
     let task_dir = workspace::task_dir(&ws.root, branch);
     let leftovers: Vec<String> = workspace::orphan_dirs(&ws.root, &known)
         .into_iter()
@@ -68,8 +60,8 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
         crate::ui::command_block(&leftovers);
     }
 
-    // Safety scan — surface dirty / unpushed state. Blocks teardown unless
-    // `--force`. With `--force`, warnings still print (we're overriding them).
+    // The scan runs under `--force` too: the warnings are the record of what
+    // was overridden.
     let mut blocking = false;
     for (repo, wt) in &worktrees {
         let dirty = git::dirty_files(wt);
@@ -102,8 +94,8 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Commits present locally but not on the tracked upstream. Empty when there's
-/// no upstream configured (can't be "unpushed" against nothing) or on error.
+/// Empty when no upstream is configured or the command fails, so a branch that
+/// was never pushed anywhere does not block removal.
 fn unpushed_commits(wt: &Path) -> Vec<String> {
     git::stdout_lines(git::git(wt).args(["log", "@{u}..HEAD", "--oneline"]))
 }

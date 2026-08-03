@@ -34,15 +34,13 @@ fn claude_is_idempotent() {
 #[test]
 fn claude_fails_helpfully_when_home_missing() {
     let ws = WorkspaceFixture::empty();
-    // Force both HOME and CLAUDE_SKILLS_DIR to be missing. Since the fixture
-    // sets both by default, we override with empty strings via a different
-    // path: spawn manually so we can `.env_remove`.
+    // Spawned by hand rather than through the fixture, which always sets HOME and
+    // CLAUDE_SKILLS_DIR — the state under test is both being absent.
     let bin = env!("CARGO_BIN_EXE_ws");
     let out = std::process::Command::new(bin)
         .args(["claude"])
         .current_dir(ws.path())
         .env_clear()
-        // clap needs a minimum env to render usage/help; PATH avoids missing exec look-ups.
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .output()
         .expect("spawn");

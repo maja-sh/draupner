@@ -1,6 +1,3 @@
-//! `copy`: untracked dev files (certs/keys/env) named in `.ws.json` are seeded
-//! from the main checkout into each new worktree at `ws new`.
-
 mod common;
 
 use common::{stderr, WorkspaceFixture};
@@ -11,7 +8,7 @@ fn ws_new_seeds_copy_entries_into_the_worktree() {
     let f = WorkspaceFixture::empty();
     let repo = f.add_repo("api");
 
-    // Untracked dev files that live only in the main checkout.
+    // Left untracked, so only `copy` can put them in a worktree.
     fs::write(repo.join(".env"), "SECRET=1").unwrap();
     fs::create_dir_all(repo.join("build-dev/cert")).unwrap();
     fs::write(repo.join("build-dev/cert/dev.pem"), "cert").unwrap();
@@ -27,7 +24,6 @@ fn ws_new_seeds_copy_entries_into_the_worktree() {
     assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
 
     let wt = f.path().join(".worktrees/feat-foo/api");
-    // File, recursive directory, and glob all land at the same relative path.
     assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
     assert!(wt.join("build-dev/cert/dev.pem").is_file(), "directory copied recursively");
     assert_eq!(fs::read_to_string(wt.join("storage/oauth-private.key")).unwrap(), "key");
@@ -40,8 +36,8 @@ fn copied_files_do_not_leave_the_worktree_dirty() {
     let f = WorkspaceFixture::empty();
     let repo = f.add_repo("api");
 
-    // A seeded file the repo does NOT gitignore — without an exclude entry this
-    // shows up as untracked (`??`) and every `ws list` reads the worktree dirty.
+    // Deliberately not gitignored by the repo: without an exclude entry a seeded
+    // file reads as untracked and every `ws list` calls the worktree dirty.
     fs::write(repo.join("dev-secrets.txt"), "s").unwrap();
     fs::create_dir_all(repo.join("build-dev/cert")).unwrap();
     fs::write(repo.join("build-dev/cert/dev.pem"), "cert").unwrap();

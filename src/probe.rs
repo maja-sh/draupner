@@ -1,16 +1,11 @@
-//! Reusable **read-only** readiness probes behind `ws remote check` (and the
-//! light reachability check `ws init --remote` runs).
+//! Readiness probes behind `ws remote check`.
 //!
-//! "Read-only" is a hard contract: a probe never installs, mutates, or `sudo`s —
-//! it only observes, over the user's own SSH. That's what makes `ws remote check`
-//! safe to run against a server you haven't finished setting up. Building these as
-//! functions (not one command body) lets `ws init --remote` reuse the reachability
-//! probe as a light warn-don't-refuse check.
+//! **Read-only** is a hard contract: a probe only observes, over the user's own
+//! SSH — never installs, mutates, or `sudo`s. That is what makes `ws remote check`
+//! safe to run against a server you haven't finished setting up.
 
 use crate::remote;
 
-/// One probe's result: a short label, pass/fail, a human detail, and (surfaced by
-/// `-v`) the underlying command it ran.
 pub struct Probe {
     pub name: &'static str,
     pub ok: bool,
@@ -19,22 +14,18 @@ pub struct Probe {
 }
 
 impl Probe {
-    /// A probe that ran a displayable command (client-side checks).
     fn new(name: &'static str, ok: bool, detail: impl Into<String>, cmd: impl Into<String>) -> Self {
         Probe { name, ok, detail: detail.into(), cmd: Some(cmd.into()) }
     }
-    /// A server-side check whose command isn't shown per-line (the batched server
-    /// script is displayed once, not per probe).
+    /// No `cmd`: the batched server script is displayed once, not per probe.
     fn server(name: &'static str, ok: bool, detail: impl Into<String>) -> Self {
         Probe { name, ok, detail: detail.into(), cmd: None }
     }
 }
 
-// --- Client-side probes (run locally) --------------------------------------
-
-/// The SSH-reachability probe line built from a **known** verdict — no SSH call.
-/// Lets `ws remote check` derive the reachability line from whether the server
-/// probe script connected, instead of paying a second handshake just to test it.
+/// Built from an already-known verdict, so `ws remote check` can derive the
+/// reachability line from whether the server script connected instead of paying a
+/// second handshake to test it.
 pub fn ssh_status(connection: &str, ok: bool) -> Probe {
     Probe::new(
         "ssh",
@@ -48,13 +39,12 @@ pub fn ssh_status(connection: &str, ok: bool) -> Probe {
     )
 }
 
-/// Can we open a non-interactive SSH session to the server? (Standalone — used by
-/// `ws init --remote`'s light check, which does no server probing.)
+/// The standalone form, for `ws init --remote`'s light check — it does no server
+/// probing, so it has no verdict to reuse.
 pub fn ssh_reachable(connection: &str) -> Probe {
     ssh_status(connection, remote::reachable(connection))
 }
 
-/// Is `mutagen` installed locally? A remote workspace needs it to sync.
 pub fn mutagen_local() -> Probe {
     let ok = crate::mutagen::installed();
     Probe::new(
@@ -65,8 +55,6 @@ pub fn mutagen_local() -> Probe {
     )
 }
 
-// --- Server-side probes (one read-only SSH round trip) ---------------------
-
 /// The keys the server script reports, paired with a human description. Kept
 /// beside the script so the two can't drift.
 const SERVER_CHECKS: &[(&str, &str)] = &[
@@ -76,24 +64,18 @@ const SERVER_CHECKS: &[(&str, &str)] = &[
     ("workspace", "the workspace dir exists and is writable"),
 ];
 
-/// The `dns` check isn't in `SERVER_CHECKS` because it only exists when the
-/// workspace routes at all — with no `domain` there is nothing to resolve, and a
+/// Not in `SERVER_CHECKS`: with no `domain` there is nothing to resolve, and a
 /// check that can't fail shouldn't be printed.
 const DNS_CHECK: &str = "dns";
 
-/// A name that only a wildcard entry can answer for. Any label works — the point
-/// is that `*.<domain>` resolves — and at check time there's no branch or service
-/// to name, so use a fixed synthetic one. Same name `server-setup/debian.sh`
-/// verifies with, so the two agree on what "wired" means.
+/// Any label only a wildcard entry can answer for would do; this is the one
+/// `server-setup/debian.sh` verifies with, so the two agree on what "wired" means.
 const DNS_PROBE_LABEL: &str = "ws-probe";
 
-/// Whether the server resolves `*.<domain>` to itself, phrased for a status line.
-///
-/// The failure text carries the whole value of this probe, so it says what didn't
-/// resolve, why anyone cares, and where the fix lives. Real incident: a dhclient
-/// lease renewal rewrote `/etc/resolv.conf` and dropped the loopback nameserver,
-/// leaving dnsmasq healthy but unqueried — a `kind: host` vite server then failed
-/// every proxy hop with `getaddrinfo ENOTFOUND`, and nothing in `ws` noticed.
+/// The failure text carries the whole value of this probe, so it names what
+/// didn't resolve, why anyone cares, and where the fix lives: a DHCP lease
+/// renewal can rewrite `/etc/resolv.conf` and leave dnsmasq healthy but
+/// unqueried, which nothing else in `ws` notices.
 fn dns_detail(domain: &str, ok: bool) -> String {
     if ok {
         format!("the server resolves *.{domain} to itself")
@@ -106,22 +88,17 @@ fn dns_detail(domain: &str, ok: bool) -> String {
     }
 }
 
-/// A read-only shell script that probes each server prerequisite and prints one
-/// `<key>:<ok|fail>` line each. Pure observation — no install, mutate, or sudo.
-/// One round trip rather than an SSH connection per check. Also the exact string
-/// surfaced under `-v`.
-///
-/// `domain` adds the wildcard-resolution check; `None` (no routing configured)
-/// leaves it out entirely rather than emitting a check that always passes.
+/// One `<key>:<ok|fail>` line per prerequisite, joined into a single round trip
+/// and surfaced verbatim under `-v`. Observation only — no install, mutate, or
+/// sudo. A `domain` of `None` leaves the wildcard check out entirely rather than
+/// emitting one that always passes.
 pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
     let wp = remote::shell_quote(workspace_path);
     let mut lines = vec![
         "command -v mutagen >/dev/null 2>&1 && echo mutagen:ok || echo mutagen:fail".to_string(),
         "podman info >/dev/null 2>&1 && echo podman:ok || echo podman:fail".to_string(),
-        // `-f name=` is an unanchored substring match, so anchor it (`^…$`) —
-        // else a stray `ws-caddy-old` would make a stopped ws-caddy read as up.
-        // The name comes from `caddy` so renaming the container can't leave this
-        // probe silently checking the old one.
+        // `-f name=` is an unanchored substring match, so anchor it (`^…$`) — else
+        // a stray `ws-caddy-old` makes a stopped ws-caddy read as up.
         format!(
             "podman ps -q -f name='^{}$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail",
             crate::caddy::CADDY_CONTAINER
@@ -129,9 +106,9 @@ pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
         format!("test -d {wp} && test -w {wp} && echo workspace:ok || echo workspace:fail"),
     ];
     if let Some(d) = domain {
-        // `getent hosts` asks the server's own resolver stack, which is exactly
-        // what a dev server running there would ask — not dnsmasq directly, which
-        // answers fine even while nothing is pointed at it.
+        // `getent hosts` asks the server's own resolver stack, like a dev server
+        // there would. Querying dnsmasq directly answers fine even while nothing
+        // is pointed at it.
         let host = remote::shell_quote(&format!("{DNS_PROBE_LABEL}.{d}"));
         lines.push(format!(
             "getent hosts {host} >/dev/null 2>&1 && echo {DNS_CHECK}:ok || echo {DNS_CHECK}:fail"
@@ -140,15 +117,13 @@ pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
     lines.join("; ")
 }
 
-/// Run the server probes over SSH. Returns the per-check `Probe`s, or `None` when
-/// SSH itself couldn't reach the server (so the caller reports "unreachable"
-/// rather than a wall of failures).
+/// `None` when SSH itself couldn't reach the server, so the caller can report
+/// "unreachable" rather than a wall of failed checks.
 pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str>) -> Option<Vec<Probe>> {
     let script = server_script(workspace_path, domain);
     let out = remote::ssh_capture(connection, &script)?;
     let results = parse_server(&out);
-    // A key missing from the output (older server, partial run) reads as a
-    // failure, not a silent pass.
+    // A missing key (older server, partial run) is a failure, not a silent pass.
     let verdict = |key: &str| results.get(key).copied().unwrap_or(false);
     let mut probes: Vec<Probe> = SERVER_CHECKS
         .iter()
@@ -161,7 +136,6 @@ pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str
     Some(probes)
 }
 
-/// Parse the `<key>:<ok|fail>` lines the server script prints.
 fn parse_server(stdout: &str) -> std::collections::BTreeMap<String, bool> {
     stdout
         .lines()
@@ -173,7 +147,6 @@ fn parse_server(stdout: &str) -> std::collections::BTreeMap<String, bool> {
 mod tests {
     use super::*;
 
-    /// The read-only contract — no mutating verb, no sudo.
     fn assert_read_only(s: &str) {
         for banned in ["sudo", "rm ", "install", "systemctl start", "podman run", "create"] {
             assert!(!s.contains(banned), "server script must stay read-only, found {banned:?}: {s}");
@@ -184,7 +157,6 @@ mod tests {
     fn server_script_is_read_only_and_covers_every_check() {
         let s = server_script("workspace", None);
         assert_read_only(&s);
-        // Every advertised key is probed.
         for (key, _) in SERVER_CHECKS {
             assert!(s.contains(&format!("echo {key}:ok")), "missing probe for {key}: {s}");
         }
@@ -205,7 +177,6 @@ mod tests {
         assert!(with.contains("getent hosts ws-probe.myapp.test"), "expected the wildcard lookup: {with}");
         assert!(with.contains("echo dns:ok"), "expected the dns key: {with}");
         assert!(with.contains("echo dns:fail"), "expected the dns failure branch: {with}");
-        // Still observation only, and still one round trip.
         assert_read_only(&with);
     }
 
@@ -246,7 +217,7 @@ mod tests {
 
     #[test]
     fn server_probes_default_a_missing_key_to_fail() {
-        // Simulate the parse → probe mapping with a partial result set.
+        // Mirrors the verdict closure in `server_probes`, which needs SSH to run.
         let results = parse_server("mutagen:ok\npodman:ok\n");
         let workspace_ok = results.get("workspace").copied().unwrap_or(false);
         assert!(!workspace_ok, "a key absent from the server output must read as a failure");

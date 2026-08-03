@@ -12,9 +12,8 @@ use crate::workspace;
 pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
-    // Where the stack lives (local, or the server for a remote workspace). For a
-    // remote workspace this fetches the server `$HOME`, so an unreachable server
-    // fails here rather than part-way through creating worktrees.
+    // Resolving fetches the server `$HOME`, so an unreachable server fails here
+    // rather than part-way through creating worktrees.
     let site = remote::Site::resolve(&cfg)?;
 
     let requested = parse_repos(repos_arg);
@@ -28,9 +27,8 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     crate::ui::header("ws-new", &format!("{repos_arg} {branch}"));
 
-    // A container repo's post-create (Activate) writes an override that joins the
-    // external `ws-net`; ensure it exists first so a post-create that runs compose
-    // (`compose run --rm app composer install`) doesn't fail on a missing network.
+    // The override written below joins the external `ws-net`, so a post-create
+    // that runs compose fails on a missing network unless it exists by now.
     if cfg.routing_active() {
         if let Err(e) = crate::caddy::ensure_net(&site, cfg.runtime()) {
             crate::ui::note(&format!("ws-net: {e}"));
@@ -72,29 +70,23 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             .with_context(|| format!("create worktree for {repo_name}"))?;
         step.ok();
 
-        // One rollback site for the whole seeding step: any failure in there
-        // leaves a registered-but-half-populated worktree, and the caller's next
-        // `ws new` would refuse on the "already exists" conflict.
+        // A half-seeded worktree is still registered with git, so the next
+        // `ws new` would refuse it on the "already exists" conflict.
         if let Err(e) = seed_worktree(repo_entry, repo_name, &repo_path, &wt_path) {
             remove_worktree(&repo_path, &wt_path);
             return Err(e);
         }
 
-        // Advisory isolation lint — run once, here, when the worktree's compose
-        // file first lands (not on every `ws up`): its constructs are static
-        // properties of the committed file. Warn on the ones that silently defeat
-        // per-worktree isolation (`container_name`, external volumes). Never
-        // blocks `new`; empty for non-compose repos.
+        // Once at creation rather than on every `ws up`: what it warns about
+        // (`container_name`, external volumes) is a static property of the
+        // committed compose file. Advisory — it never blocks `new`.
         let lint = crate::compose::lint(cfg.runtime(), &wt_path);
         if !lint.is_empty() {
             crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
         }
 
-        // A remote workspace establishes the file sync FIRST, so the injection
-        // (server-side compose derive + override) and post-create below run
-        // against files that exist on the server; a local workspace has them
-        // already. Ignores (configured + on-disk dep artifacts) keep per-host
-        // trees off the wire — shared with `ws remote set`'s backfill.
+        // The sync comes first so the injection and post-create below run
+        // against files that exist on the server.
         if let Some(r) = &cfg.remote {
             let step = crate::ui::step(repo_name, "Sync created");
             let session = mutagen::session_name(branch, repo_name);
@@ -104,10 +96,9 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
                 // Settle the initial push before we derive/render against the server.
                 .and_then(|()| {
                     let _ = mutagen::flush(&session);
-                    // Confirm the files actually landed. A session whose transfer
-                    // fails still reports `Watching for changes` — the problem shows
-                    // only in `mutagen sync list --long` — so without this the step
-                    // reports success and the *next* step fails somewhere confusing.
+                    // A session whose transfer failed still reports `Watching for
+                    // changes`, so without this check the step goes green and a
+                    // later one fails somewhere confusing.
                     mutagen::verify_beta(&r.connection, &remote_path)
                 });
             match synced {
@@ -119,16 +110,12 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             }
         }
 
-        // Render templates + compute the injection env before post-create so
-        // one-time setup (composer install, migrate) sees the per-worktree config
-        // and `WS_HOST_*`/`WS_PORT_*` values. Runs at the stack's site — derive,
-        // override, and port allocation land on the server for a remote workspace.
+        // Before post-create, so one-time setup (composer install, migrate) sees
+        // the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
         let extra_env = inject::prepare(
             &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
         )?;
 
-        // Post-create runs where the stack lives: over SSH on the server (in the
-        // synced worktree) for a remote workspace, or locally.
         let ctx = crate::lifecycle::Ctx {
             cfg: &cfg, site: &site, root: &ws.root, worktree: &wt_path,
             branch, sanitized: &sanitized, repo: repo_name,
@@ -144,9 +131,8 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         .collect();
     crate::ui::summary_ok(&summary);
 
-    // `--up`: chain straight into the bring-up rather than making the caller run a
-    // second command. Delegates to the same op `ws up` runs, so the two can't
-    // drift — including its own header, per-repo steps, and failure semantics.
+    // Delegates to the op `ws up` runs, header and failure semantics included,
+    // so `--up` can't drift from the real thing.
     if up {
         return super::up::run(branch);
     }
@@ -155,13 +141,8 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run a repo's `post-create` where its stack lives: on the server over SSH (in
-/// the synced worktree) for a remote workspace, or locally. A repo with nothing
-/// declared is a no-op. Failure is fatal for `new` (one-time setup that didn't
-/// complete).
-///
-/// The remote dispatch flushes the sync first, so the just-rendered templates (and
-/// the initial sync) are on the server before post-create runs there.
+/// Failure is fatal for `new`: this is one-time setup, and nothing later
+/// re-runs it.
 fn run_post_create(ctx: &crate::lifecycle::Ctx, extra_env: &[(String, String)]) -> Result<()> {
     let Some(cmd) = ctx.command("post-create")? else {
         return Ok(());
@@ -257,25 +238,19 @@ fn create_worktree(repo: &Path, branch: &str, wt_path: &Path) -> Result<()> {
 /// ws dropped in the worktree's git exclude.
 ///
 /// Every failure propagates plainly; the caller owns the rollback, so all four
-/// steps unwind the same way instead of two of them stranding the worktree.
+/// steps unwind the same way.
 fn seed_worktree(
     repo_entry: &config::RepoEntry,
     repo_name: &str,
     repo_path: &Path,
     wt_path: &Path,
 ) -> Result<()> {
-    // Artifacts ws drops into the worktree get registered in the worktree's
-    // git exclude so they never show as untracked. Seeded with the repo's
-    // configured `worktree_excludes`.
     let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
 
-    // Seeding `vendor/` from the main checkout only makes sense for a
-    // gitignored, per-host one. A repo that *commits* its vendor/ already has
-    // it in the fresh worktree (`git worktree add` checked it out), and
-    // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
-    // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
-    // exclude below stops git descending, and pushed over SSH on a remote
-    // workspace since a tracked vendor/ is source and isn't sync-ignored.
+    // The `!exists` guard is load-bearing: a repo that *commits* vendor/ already
+    // has it from `git worktree add`, and `cp -R src dst` onto an existing dst
+    // copies *into* it, leaving a silent `<wt>/vendor/vendor` duplicate that the
+    // `/vendor` exclude below hides from git.
     if repo_path.join("composer.json").is_file()
         && repo_path.join("vendor").is_dir()
         && !wt_path.join("vendor").exists()
@@ -294,31 +269,25 @@ fn seed_worktree(
         step.ok();
     }
 
-    // Seed declared untracked files (dev certs/keys/env) from the main checkout
-    // into the fresh worktree. Ordered before the excludes registration below so
-    // the copied paths join them — `copy` seeds files that aren't in git, and one
-    // that isn't gitignored either would otherwise leave the worktree reading
-    // permanently dirty. Also before the remote sync (so they ride it to the
-    // server) and before post-create (so build steps see them).
+    // Ordered before the exclude registration below so the copied paths join it:
+    // a `copy` entry is by definition not in git, and one that isn't gitignored
+    // either would leave the worktree reading permanently dirty.
     let copies = repo_entry.copy();
     if !copies.is_empty() {
         let step = crate::ui::step(repo_name, "files copied");
         let dests = seed_copies(repo_path, wt_path, copies)
             .with_context(|| format!("copy for {repo_name}"))?;
-        // Also exclude the copy *sources* in the main checkout. A `copy` source
-        // is a ws-managed untracked file (a dev cert, a seed dump) living in
-        // main at the same relative path it lands in the worktree — so the
-        // worktree excludes double as main's. Best-effort: keeps main's `git
-        // status` clean and ws's footprint fully local (nothing committed), but
-        // a failure to write main's exclude must not block creating the worktree.
+        // A copy source sits at the same relative path in main, so the same
+        // entries exclude it there and keep main's `git status` clean.
+        // Best-effort — failing to tidy main must not block the worktree.
         let _ = git::add_worktree_excludes(repo_path, &dests);
         excludes.extend(dests);
         step.ok();
     }
 
     // A symlinked node_modules is a *file* to git, so a repo's conventional
-    // `node_modules/` (trailing slash = dir-only) rule won't match it —
-    // without this the worktree reads as permanently dirty.
+    // `node_modules/` (trailing slash = dir-only) rule won't match it — without
+    // this the worktree reads as permanently dirty.
     git::add_worktree_excludes(wt_path, &excludes)
         .with_context(|| format!("register worktree excludes for {repo_name}"))
 }
@@ -327,8 +296,8 @@ fn copy_vendor(repo: &Path, wt: &Path) -> Result<()> {
     cp_r(&repo.join("vendor"), &wt.join("vendor")).context("cp vendor/")
 }
 
-/// Recursively copy `src` to `dst` via the platform `cp` (clonefile on macOS, so
-/// a large `vendor/` is a cheap reflink rather than a byte copy).
+/// Shells out to `cp` rather than walking the tree in Rust so macOS `-c` gives a
+/// large `vendor/` a cheap clonefile reflink instead of a byte copy.
 fn cp_r(src: &Path, dst: &Path) -> Result<()> {
     let mut cmd = Command::new("cp");
     cmd.arg("-R");
@@ -344,21 +313,18 @@ fn cp_r(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Seed `entries` (repo-relative files, directories, or globs) from the main
-/// checkout `repo` into worktree `wt`. No-clobber: an existing dest is left as-is.
-/// A source with no match is skipped (seed-if-present). `..` is refused so a
-/// config entry can't escape the repo.
-///
-/// Returns the anchored git-exclude entries (`/build-dev/cert`) for what it
-/// actually copied, so the caller can keep them out of `git status` — a seeded
-/// file that the repo doesn't already gitignore would otherwise read as untracked.
+/// checkout into the worktree, returning anchored git-exclude entries for what
+/// was actually copied. A source with no match is skipped — `copy` is
+/// seed-if-present. `..` is refused so a `.ws.json` entry can't reach outside
+/// the repo.
 fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>> {
     let mut excludes = Vec::new();
     for entry in entries {
         if Path::new(entry).components().any(|c| c == Component::ParentDir) {
             bail!("copy entry `{entry}` must not contain `..`");
         }
-        // Only `entry` is a glob — escape the repo prefix so a workspace path that
-        // happens to contain `*`/`[`/`?` isn't misread as a pattern.
+        // Only `entry` is a glob; the repo prefix is escaped so a workspace path
+        // containing `*`/`[`/`?` isn't misread as a pattern.
         let pattern = format!("{}/{entry}", glob::Pattern::escape(&repo.to_string_lossy()));
         let matches =
             glob::glob(&pattern).with_context(|| format!("invalid copy pattern `{entry}`"))?;
@@ -370,13 +336,11 @@ fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>
     Ok(excludes)
 }
 
-/// Seed a single source path (file or directory) into the worktree with
-/// **per-file** no-clobber. A directory is walked and merged file-by-file rather
-/// than copied as a unit: the worktree already contains any tracked file the dir
-/// carries (e.g. a `.gitkeep`), so a whole-directory `exists()` check would skip
-/// the dir and strand its *untracked* contents — the exact reason a generated
-/// cert under a tracked `certs/` never arrived. Each copied file is recorded as an
-/// anchored git-exclude so it stays out of `git status`.
+/// No-clobber is **per-file**, so a directory is merged rather than copied as a
+/// unit: the worktree already holds any tracked file the dir carries (a
+/// `.gitkeep`), and a whole-directory `exists()` check would skip it and strand
+/// the untracked siblings — how a generated cert under a tracked `certs/` went
+/// missing.
 fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Result<()> {
     if src.is_dir() {
         for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
@@ -393,9 +357,8 @@ fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Re
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     cp_r(src, &dst)?;
-    // Anchored to the worktree root (`/certs/local.crt`), matching the
-    // `/vendor` + `/node_modules` convention — an unanchored pattern would match
-    // the same name at any depth.
+    // Anchored to the worktree root; an unanchored pattern would match the same
+    // name at any depth.
     excludes.push(format!("/{}", rel.display()));
     Ok(())
 }
@@ -409,9 +372,8 @@ fn symlink_node_modules(repo_name: &str, wt: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort rollback of a half-created worktree. Failures are ignored — this
-/// only runs while unwinding from an earlier error, and the original error is
-/// what the caller propagates.
+/// Failures are ignored: this only runs while unwinding from an earlier error,
+/// which is the one the caller propagates.
 fn remove_worktree(repo: &Path, wt: &Path) {
     let _ = git::git(repo)
         .args(["worktree", "remove", "--force"])

@@ -1,13 +1,7 @@
-//! Declarative `scripts` in `.ws.json` — the only lifecycle mechanism.
-//! Covers: single + multi-command `up`, run order, failure propagation, the
-//! `post-create` path, and the migration error for a workspace still carrying an
-//! executable `.ws-hooks/<repo>/<event>` file from the removed one.
-
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-/// Build a one-repo workspace whose `.ws.json` declares `scripts` for `api`.
 fn fixture_with_scripts(scripts_json: &str) -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
@@ -40,8 +34,7 @@ fn declarative_up_script_multi_command_runs_in_order() {
     assert!(first < second, "commands should run in order:\n{err}");
 }
 
-/// Write an executable `.ws-hooks/<repo>/<event>` — the layout the removed
-/// hook-file mechanism discovered by convention.
+/// The layout the removed hook-file mechanism used to discover by convention.
 fn write_legacy_hook_file(f: &WorkspaceFixture, repo: &str, event: &str) {
     let dir = f.path().join(".ws-hooks").join(repo);
     std::fs::create_dir_all(&dir).expect("create hook dir");
@@ -54,9 +47,8 @@ fn write_legacy_hook_file(f: &WorkspaceFixture, repo: &str, event: &str) {
     }
 }
 
-// Hook files discovered by convention are gone. Dropping one silently would turn
-// a working `up` into the compose default (or nothing), so the repo fails with
-// the `scripts` entry to paste and the two contract changes that come with it.
+// Ignoring a leftover hook file silently would turn a working `up` into the
+// compose default, or into nothing at all — so it has to be an error.
 #[test]
 fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
     let f = WorkspaceFixture::with_repos(&["api"]);
@@ -74,8 +66,6 @@ fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
     assert!(err.contains("$WS_WORKTREE"), "the error must name the new worktree var:\n{err}");
 }
 
-// ...and declaring it is the whole migration: the same file, now named under
-// `scripts`, runs again (with the new contract).
 #[test]
 fn declaring_a_hook_file_under_scripts_runs_it_again() {
     let f = WorkspaceFixture::empty();
@@ -115,8 +105,7 @@ fn multi_command_script_stops_at_first_failure() {
 
 #[test]
 fn multi_command_script_shares_one_shell() {
-    // A `Many` runs in a single shell, so state one command sets is visible to
-    // the next (a fresh process per command would print `val=`).
+    // A fresh process per command would print `val=` instead.
     let f = fixture_with_scripts(r#"{"up":["export FOO=bar","echo val=$FOO"]}"#);
     f.run_ok(&["new", "api", "feat/shell"]);
 
@@ -136,8 +125,6 @@ fn declarative_post_create_script_runs_on_new() {
 
 #[test]
 fn script_runs_in_the_worktree_dir() {
-    // cwd for a script is the worktree, not the workspace root — `pwd` should
-    // land under `.worktrees/<task>/api`.
     let f = fixture_with_scripts(r#"{"up":"pwd"}"#);
     f.run_ok(&["new", "api", "feat/cwd"]);
 

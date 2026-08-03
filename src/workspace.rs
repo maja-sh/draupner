@@ -6,7 +6,6 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Walk upward from CWD looking for a `.ws.json` file. Fails if none found.
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
@@ -21,41 +20,35 @@ pub fn locate() -> Result<Workspace> {
     }
 }
 
-/// Sanitize a branch name for filesystem use — replaces `/` with `-`.
 pub fn sanitize_branch(b: &str) -> String {
     b.replace('/', "-")
 }
 
-/// The per-worktree name `ws-<sanitized-branch>-<repo>`, shared by every
-/// namespace ws keys off a worktree (mutagen sessions, host-process pid/log
-/// files). They are documented as reading alike and one of them is a user-facing
-/// contract, so the string is built once here rather than agreed on by
-/// convention. See [`crate::mutagen::session_name`] and
+/// The name every namespace ws keys off a worktree shares (mutagen sessions,
+/// host-process pid/log files). Built once here rather than agreed on by
+/// convention: the namespaces are documented as reading alike and one of them is
+/// a user-facing contract. See [`crate::mutagen::session_name`] and
 /// [`crate::supervise::proc_name`].
 pub fn ws_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", sanitize_branch(branch), repo)
 }
 
-/// `<root>/.worktrees/<sanitized-branch>/`
 pub fn task_dir(root: &Path, branch: &str) -> PathBuf {
     root.join(".worktrees").join(sanitize_branch(branch))
 }
 
-/// The canonical `<root>/.worktrees` dir — the prefix [`task_repo_under`]
-/// expects. Canonicalized (falling back to the raw path) so a path derived from a
-/// canonical cwd strips against it; callers that compare a real filesystem path
-/// to the worktrees tree should go through here rather than joining the literal.
+/// The `.worktrees` dir, canonicalized so a path derived from a canonical cwd
+/// strips against it. Callers comparing a real filesystem path to the worktrees
+/// tree must come through here rather than joining the literal.
 pub fn worktrees_root(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).join(".worktrees")
 }
 
-/// `<root>/.worktrees/<sanitized-branch>/<repo>/` if the worktree exists on disk.
 pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     let p = task_dir(root, branch).join(repo);
     p.is_dir().then_some(p)
 }
 
-/// Return all repo worktrees for a branch (repo name + path pairs).
 pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
     list_child_dirs(&task_dir(root, branch))
         .into_iter()
@@ -63,9 +56,8 @@ pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Every task dir under `.worktrees/`. A *filesystem* view — see [`worktrees`]
-/// for the authoritative one. Kept for [`orphan_dirs`], which exists precisely to
-/// compare the two.
+/// A *filesystem* view, not the authoritative one — [`worktrees`] is. Exists for
+/// [`orphan_dirs`], which compares the two.
 pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
     list_child_dirs(&root.join(".worktrees"))
         .into_iter()
@@ -75,30 +67,19 @@ pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
 
 /// One task worktree, as **git** knows it.
 pub struct Worktree {
-    /// The `.ws.json` repo entry this worktree belongs to.
     pub repo: String,
     pub path: PathBuf,
-    /// The checked-out branch; `None` for a detached HEAD.
+    /// `None` for a detached HEAD.
     pub branch: Option<String>,
-    /// The `.worktrees/<task>` dir name when this worktree is `ws`-managed;
-    /// `None` for one the user created elsewhere by hand (`ws list` renders those
-    /// as "(unmanaged)").
+    /// The `.worktrees/<task>` dir name; `None` for a worktree the user created
+    /// elsewhere by hand (`ws list` renders those as "(unmanaged)").
     pub task: Option<String>,
 }
 
 /// Every task worktree across the workspace's configured repos — **the single
-/// definition of "a worktree exists"**, shared by every op that enumerates.
-///
-/// Sourced from git, not from `.worktrees/` on disk, for four reasons: a
-/// directory is not a worktree (it can be the residue of a failed `ws rm` or a
-/// hand-made copy, and acting on one — syncing it to a server, say — is silent
-/// corruption); git also sees worktrees *outside* `.worktrees/`, which a scan
-/// structurally cannot; git reports the real branch, while a task dir name is the
-/// sanitized form and can't be inverted (`fix/x` and `fix-x` collapse together);
-/// and git alone knows a registration is stale. The scan is cheaper, but by a
-/// margin (a few subprocess spawns) that every caller dwarfs.
-///
-/// The main checkout is excluded — it isn't a task worktree.
+/// definition of "a worktree exists"**, sourced from git rather than from a scan
+/// of `.worktrees/` (see ARCHITECTURE.md; a directory is not a worktree, and git
+/// sees ones living outside the tree). The main checkout is excluded.
 pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     let worktrees_root = worktrees_root(root);
 
@@ -116,9 +97,7 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
             if canon == repo_canon {
                 continue; // the main checkout, not a task worktree
             }
-            // A managed worktree sits at `.worktrees/<task>/<repo>`; the repo
-            // component is implied by which repo reported it, so only the task
-            // name is read back out.
+            // The repo component is implied by which repo reported the worktree.
             let task = task_repo_under(&canon, &worktrees_root).map(|(task, _)| task);
             out.push(Worktree { repo: repo.to_string(), path, branch, task });
         }
@@ -126,13 +105,10 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     out
 }
 
-/// Directories under `.worktrees/` that git does **not** know as worktrees.
-///
-/// The counterpart to [`worktrees`], and the reason the filesystem view is worth
-/// keeping: these are exactly what the git enumeration deliberately cannot see —
-/// the leftovers of a failed removal, a bare `git worktree remove`, or a copied
-/// directory. They are reported (by `ws clean`), never acted on. Silently leaving
-/// them unexamined is how they end up synced to a server as if they were real.
+/// Directories under `.worktrees/` that git does **not** know as worktrees —
+/// leftovers of a failed removal, a bare `git worktree remove`, a copied
+/// directory. Reported (by `ws clean`), never acted on: acting on one, syncing it
+/// to a server say, is silent corruption.
 pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {
     let known: Vec<PathBuf> = known
         .iter()
@@ -152,10 +128,9 @@ pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {
     out
 }
 
-/// If `path` is inside `<worktrees_root>/<task>[/<repo>/…]`, return the task dir
-/// name and (when the path reaches into a repo) that repo name. Both paths are
-/// expected to be canonical. The single source of truth for CWD→task/repo
-/// inference used by `ws here`, `ws exec`, and `ws list`.
+/// If `path` is inside `<worktrees_root>/<task>[/<repo>/…]`, the task dir name
+/// and (when the path reaches into a repo) that repo name. Both paths must
+/// already be canonical.
 pub fn task_repo_under(
     path: &Path,
     worktrees_root: &Path,
@@ -167,15 +142,14 @@ pub fn task_repo_under(
     Some((task, repo))
 }
 
-/// Is this path a git repo? Handles both plain repos (has `.git/`) and worktrees (has `.git` file).
+/// A linked worktree's `.git` is a file, not a directory — hence both checks.
 pub fn is_git_repo(p: &Path) -> bool {
     let g = p.join(".git");
     g.is_dir() || g.is_file()
 }
 
-/// List real (non-symlink) child directories of `dir`. Returns pairs of
-/// `(name_or_none_if_not_utf8, path)`. Broken entries and non-directories are
-/// silently skipped. Errors on `read_dir` itself yield an empty vec.
+/// Child directories as `(name, path)`, where the name is `None` when it isn't
+/// UTF-8. Symlinked directories are deliberately not included.
 pub fn list_child_dirs(dir: &Path) -> Vec<(Option<String>, PathBuf)> {
     let Ok(rd) = fs::read_dir(dir) else { return Vec::new(); };
     rd.filter_map(Result::ok)
@@ -214,12 +188,11 @@ mod tests {
             task_repo_under(Path::new("/ws/proj/.worktrees/feat-foo/api/src"), root),
             Some(("feat-foo".into(), Some("api".into())))
         );
-        // Task dir itself — no repo component.
         assert_eq!(
             task_repo_under(Path::new("/ws/proj/.worktrees/bug-bar"), root),
             Some(("bug-bar".into(), None))
         );
-        // Outside the tree, and a sibling-prefix collision, both yield None.
+        // The second case is a sibling-prefix collision, not just an outside path.
         assert_eq!(task_repo_under(Path::new("/ws/proj/api/src"), root), None);
         assert_eq!(
             task_repo_under(Path::new("/ws/proj/.worktrees-backup/feat-foo/api"), root),

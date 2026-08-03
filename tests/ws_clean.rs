@@ -17,7 +17,6 @@ fn preview_by_default_removes_nothing() {
     f.git(wt, &["commit", "-q", "--allow-empty", "-m", "task work"]);
     f.git("api", &["merge", "-q", "feat/done"]);
 
-    // No --force: a removable worktree is previewed, not removed.
     let out = f.run_ok(&["clean"]);
     let err = stderr(&out);
 
@@ -31,8 +30,6 @@ fn clean_merged_worktree_is_removed_with_force() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/done"]);
 
-    // Commit on the task branch, then merge it into main so its work is fully
-    // contained in the default branch — the canonical "safe to drop" case.
     let wt = ".worktrees/feat-done/api";
     f.git(wt, &["commit", "-q", "--allow-empty", "-m", "task work"]);
     f.git("api", &["merge", "-q", "feat/done"]);
@@ -50,11 +47,10 @@ fn dirty_worktree_is_kept() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/dirty"]);
 
-    // Merge it (so only dirtiness, not unmerged work, is the reason it stays).
+    // Merged first, so dirtiness is the only reason it can be kept.
     let wt = ".worktrees/feat-dirty/api";
     f.git(wt, &["commit", "-q", "--allow-empty", "-m", "work"]);
     f.git("api", &["merge", "-q", "feat/dirty"]);
-    // Now make the tree dirty.
     std::fs::write(f.path().join(wt).join("scratch.txt"), "wip").unwrap();
 
     let out = f.run_ok(&["clean"]);
@@ -70,7 +66,6 @@ fn unmerged_clean_worktree_is_kept() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/wip"]);
 
-    // A committed-but-unmerged branch: clean tree, but work not in main.
     let wt = ".worktrees/feat-wip/api";
     f.git(wt, &["commit", "-q", "--allow-empty", "-m", "unmerged work"]);
 
@@ -85,11 +80,9 @@ fn unmerged_clean_worktree_is_kept() {
 #[test]
 fn mixed_removes_safe_keeps_unsafe() {
     let f = WorkspaceFixture::with_repos(&["api"]);
-    // Safe task: merged.
     f.run_ok(&["new", "api", "feat/safe"]);
     f.git(".worktrees/feat-safe/api", &["commit", "-q", "--allow-empty", "-m", "safe work"]);
     f.git("api", &["merge", "-q", "feat/safe"]);
-    // Unsafe task: unmerged.
     f.run_ok(&["new", "api", "feat/keepme"]);
     f.git(".worktrees/feat-keepme/api", &["commit", "-q", "--allow-empty", "-m", "wip"]);
 
@@ -104,7 +97,6 @@ fn mixed_removes_safe_keeps_unsafe() {
 #[test]
 fn never_committed_worktree_is_removed_with_force() {
     let f = WorkspaceFixture::with_repos(&["api"]);
-    // Fresh worktree, no commits beyond main, clean → safe to drop.
     f.run_ok(&["new", "api", "feat/empty"]);
 
     let out = f.run_ok(&["clean", "--force"]);
@@ -116,10 +108,8 @@ fn never_committed_worktree_is_removed_with_force() {
 
 #[test]
 fn a_directory_git_doesnt_know_is_reported_not_audited() {
-    // The exact shape that made `ws remote set` and `ws list` disagree: a dir
-    // under .worktrees/ that git never registered. It must never be treated as a
-    // worktree (audited, removed, synced), but it must be named — silence here is
-    // what let it get pushed to a server as if it were real.
+    // A dir git never registered must not be audited, removed or synced — but
+    // staying silent is what let one get pushed to a server as if it were real.
     let f = WorkspaceFixture::with_repos(&["api"]);
     std::fs::create_dir_all(f.path().join(".worktrees/feat-ghost/api")).unwrap();
 
@@ -128,7 +118,6 @@ fn a_directory_git_doesnt_know_is_reported_not_audited() {
 
     assert!(err.contains("not registered with git"), "expected an orphan report in:\n{err}");
     assert!(err.contains("feat-ghost"), "expected the path named in:\n{err}");
-    // Reported, never removed: `ws` didn't put it there and can't judge it.
     assert!(f.path().join(".worktrees/feat-ghost/api").exists(), "must not remove an orphan");
 }
 

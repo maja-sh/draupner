@@ -2,8 +2,8 @@ mod common;
 
 use common::{stderr, stdout, WorkspaceFixture};
 
-// `ws config` needs no workspace — it's machine-global. The fixture is still
-// used for its HOME isolation (`~/.config/ws` lands in the tempdir).
+// `ws config` is machine-global and needs no workspace; the fixture appears only
+// for its HOME isolation, which puts `~/.config/ws` in the tempdir.
 
 #[test]
 fn config_set_get_unset_round_trip() {
@@ -23,7 +23,6 @@ fn config_set_get_unset_round_trip() {
     assert_eq!(stdout(&out), "", "nothing on stdout for an unset key");
     assert!(stderr(&out).contains("not set"), "human-facing note on stderr");
 
-    // The emptied section is pruned, not left as a bare `[remote]` header.
     let raw = std::fs::read_to_string(&file).unwrap();
     assert_eq!(raw.trim(), "", "file empties out cleanly: {raw}");
 }
@@ -53,8 +52,8 @@ fn config_rejects_unknown_keys() {
 #[test]
 fn config_rejects_an_option_shaped_host() {
     let ws = WorkspaceFixture::empty();
-    // Without `--`, clap already refuses the hyphen-leading value; `--` gets it
-    // past clap so ws's own guard is what's exercised.
+    // The `--` gets the hyphen-leading value past clap, which would otherwise
+    // refuse it first — ws's own guard is what's under test.
     let out = ws.run(&["config", "set", "--", "remote.host", "-oProxyCommand=evil"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("unsafe SSH host"), "{}", stderr(&out));
@@ -80,7 +79,6 @@ fn init_remote_falls_back_to_the_global_default_host() {
     let ok = ws.stub("ok", "exit 0");
     ws.run_ok(&["config", "set", "remote.host", "global-host"]);
 
-    // Bare `--remote`, no $WS_REMOTE_HOST → the global default fills in.
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[("WS_SSH", ok.to_str().unwrap()), ("WS_MUTAGEN", ok.to_str().unwrap())],
@@ -97,7 +95,6 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let ok = ws.stub("ok", "exit 0");
     ws.run_ok(&["config", "set", "remote.host", "global-host"]);
 
-    // env > global.
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[
@@ -110,7 +107,7 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("env-host") && !cfg.contains("global-host"), "env wins:\n{cfg}");
 
-    // flag > env (fresh workspace — init refuses to rerun).
+    // A second fixture, because `init` refuses to rerun in the first.
     let ws2 = WorkspaceFixture::empty();
     ws2.add_repo("api");
     let ok2 = ws2.stub("ok", "exit 0");

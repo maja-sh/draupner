@@ -2,6 +2,28 @@
 
 Project rules for AI-assisted work in this repo.
 
+## Comments
+
+Write a comment when the code makes a choice a reader would otherwise undo. That
+is the whole test.
+
+- **Never restate the code.** If what it does needs explaining in prose, the
+  names are wrong — fix those instead.
+- **Never signpost structure.** No section banners, no `// 1. …` step markers. A
+  file that needs a table of contents wants splitting, not annotating.
+- **Explain why, and only when the why is non-obvious.** "This looks wrong and
+  isn't" is the bar. A reason a competent reader would arrive at unaided does not
+  need writing down.
+
+**The story goes in the commit message; the comment gets one sentence.** An
+incident is better recorded where `git blame` will hand it to whoever needs it,
+in full, than pasted above the fix where every future reader pays for it. The
+comment only needs enough to stop someone deleting the line.
+
+Worth stating plainly because this repo got it wrong for a while: a 44%
+comment-to-code ratio is not thoroughness, and "preserve every comment" is not a
+safe default — it protects the load-bearing and the bloated equally.
+
 ## Commit messages
 
 ### Subject line

@@ -6,7 +6,7 @@ use common::{stderr, stdout, WorkspaceFixture};
 fn version_flag_prints_version() {
     let ws = WorkspaceFixture::empty();
     let out = ws.run_ok(&["--version"]);
-    // Track the package version so a bump never breaks this (it did once, at 0.2.0).
+    // Read from the crate rather than hardcoded, so a version bump can't break it.
     assert!(stdout(&out).contains(&format!("ws {}", env!("CARGO_PKG_VERSION"))));
 }
 

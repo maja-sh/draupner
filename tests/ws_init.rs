@@ -13,7 +13,6 @@ fn init_local_writes_config_and_hook_templates() {
     assert!(err.contains("ws-init"));
     assert!(err.contains(".ws.json"));
     assert!(err.contains(".ws.schema.json"));
-    // The success nudge must point at the current op name, not the renamed one.
     assert!(err.contains("ws claude"), "success nudge should mention `ws claude`, got: {err}");
     assert!(!err.contains("ws register"), "success nudge must not mention the old `ws register` name");
 
@@ -24,9 +23,8 @@ fn init_local_writes_config_and_hook_templates() {
     assert!(cfg.contains("\"app\""));
     assert!(cfg.contains("$schema"));
 
-    // Starter scripts, one per repo per lifecycle event, named so a `scripts`
-    // entry can point at them. Each body says which entry turns it on — `ws`
-    // runs only what `.ws.json` declares.
+    // A scaffolded template is inert until `.ws.json` names it, so each body has
+    // to carry the `scripts` entry that turns it on.
     for repo in ["api", "app"] {
         for event in ["prepare", "post-create", "up", "down", "post-remove", "status"] {
             let p = ws.path().join(".ws-hooks").join(format!("{repo}-{event}.sh"));
@@ -45,11 +43,9 @@ fn init_local_writes_config_and_hook_templates() {
 fn init_remote_writes_the_remote_block() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
-    // Make the client-readiness check pass: mutagen "installed" and host reachable.
+    // Passes the client-readiness check: mutagen "installed", host reachable.
     let ok = ws.stub("ok", "exit 0");
 
-    // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to
-    // the workspace's own dir name (written explicitly so it's discoverable).
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[
@@ -64,7 +60,7 @@ fn init_remote_writes_the_remote_block() {
     assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
     assert!(cfg.contains("srv"), "expected the connection:\n{cfg}");
     assert!(cfg.contains("\"connection\""));
-    // workspace_path defaults to the workspace dir name (the tempdir basename).
+    // workspace_path is written explicitly, defaulting to the workspace dir name.
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     assert!(cfg.contains(base), "expected workspace_path default of `{base}`:\n{cfg}");
 }
@@ -73,8 +69,8 @@ fn init_remote_writes_the_remote_block() {
 fn init_remote_refuses_an_unreachable_host_by_default() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
-    let ok = ws.stub("ok", "exit 0"); // mutagen "installed"
-    let bad = ws.stub("bad-ssh", "exit 1"); // host unreachable
+    let ok = ws.stub("ok", "exit 0");
+    let bad = ws.stub("bad-ssh", "exit 1");
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv"],
@@ -82,7 +78,6 @@ fn init_remote_refuses_an_unreachable_host_by_default() {
     );
     assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
     assert!(stderr(&out).contains("reach"), "clear message:\n{}", stderr(&out));
-    // Strict refusal leaves nothing behind.
     assert!(!ws.path().join(".ws.json").exists(), "no config written on refusal");
 }
 
@@ -90,8 +85,8 @@ fn init_remote_refuses_an_unreachable_host_by_default() {
 fn init_remote_refuses_when_mutagen_missing() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
-    let ok = ws.stub("ok", "exit 0"); // host reachable
-    let bad = ws.stub("no-mutagen", "exit 1"); // mutagen not installed
+    let ok = ws.stub("ok", "exit 0");
+    let bad = ws.stub("no-mutagen", "exit 1");
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv"],
@@ -106,7 +101,7 @@ fn init_remote_refuses_when_mutagen_missing() {
 fn init_remote_no_verify_skips_the_checks() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
-    let bad = ws.stub("bad", "exit 1"); // both checks would fail
+    let bad = ws.stub("bad", "exit 1");
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv", "--no-verify"],
@@ -140,7 +135,6 @@ fn init_refuses_when_ws_json_exists() {
 fn init_skips_dotfile_directories() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("keeper");
-    // A `.hidden` git repo should not be picked up as a workspace repo.
     let hidden = ws.path().join(".hidden");
     std::fs::create_dir_all(&hidden).unwrap();
     std::process::Command::new("git")
@@ -176,7 +170,6 @@ fn refresh_schema_only_rewrites_schema_file() {
 #[test]
 fn refresh_schema_refuses_outside_workspace() {
     let ws = WorkspaceFixture::empty();
-    // No `.ws.json` present — refresh-schema shouldn't scatter an orphan schema.
     let out = ws.run(&["init", "--refresh-schema"]);
     assert!(!out.status.success(), "expected failure outside a workspace");
     assert!(stderr(&out).contains(".ws.json"));
@@ -185,9 +178,7 @@ fn refresh_schema_refuses_outside_workspace() {
 
 #[test]
 fn refresh_schema_works_from_a_subdirectory() {
-    // Every other op locates the workspace by walking up. This one demanded the
-    // cwd *be* the root, so it failed with "no .ws.json here" one directory in —
-    // somewhere `ws up`/`list`/`exec` all work fine.
+    // Every other op locates the workspace by walking up, so this one must too.
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     ws.run_ok(&["init"]);
@@ -198,7 +189,6 @@ fn refresh_schema_works_from_a_subdirectory() {
 
     let schema = std::fs::read_to_string(ws.path().join(".ws.schema.json")).unwrap();
     assert_ne!(schema, "STALE", "the schema at the workspace root should be refreshed");
-    // And not scattered where the command happened to be run.
     assert!(
         !ws.path().join("api/.ws.schema.json").exists(),
         "the schema belongs at the workspace root, not the cwd"
@@ -208,7 +198,6 @@ fn refresh_schema_works_from_a_subdirectory() {
 #[test]
 fn init_refuses_inside_an_enclosing_workspace() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    // A plain subdir of an existing workspace.
     let sub = ws.path().join("nested");
     std::fs::create_dir_all(&sub).unwrap();
 
@@ -238,8 +227,7 @@ fn init_skips_symlinked_directories() {
     let ws = WorkspaceFixture::empty();
     let real = ws.add_repo("real");
 
-    // Symlink `linked` -> `real`. The symlink should be skipped so the same
-    // repo isn't registered under two names.
+    // Skipping the symlink is what stops the same repo being registered twice.
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, ws.path().join("linked")).unwrap();
 

@@ -9,12 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// A throwaway HTTP server that answers every request `200 OK` — stands in for
-/// the Caddy admin API so a test `ws up`'s route calls succeed without spinning
-/// up a real Caddy container / `ws-net`. Pointing `WS_CADDY_ADMIN` at it keeps
-/// `ws` in externally-managed mode (no infra created) while letting `route_up`
-/// return success, so the routing path is actually exercised. A test that wants
-/// to drive the *failure* path overrides `WS_CADDY_ADMIN` to a dead endpoint.
+/// Answers every request `200 OK`. Pointing `WS_CADDY_ADMIN` at it keeps `ws` in
+/// externally-managed mode — no real Caddy container or `ws-net` is created —
+/// while `route_up` still succeeds, so the routing path is genuinely exercised.
+/// A test drives the failure path by overriding `WS_CADDY_ADMIN` to a dead port.
 struct AdminStub {
     url: String,
     shutdown: Arc<AtomicBool>,
@@ -52,8 +50,7 @@ impl Drop for AdminStub {
     }
 }
 
-/// Read one HTTP request off `stream` (headers + any declared body, so the peer
-/// isn't reset mid-write) and reply `200 OK` with an empty JSON body.
+/// The declared body is drained before replying, or the peer is reset mid-write.
 fn serve_200(mut stream: TcpStream) {
     stream.set_read_timeout(Some(Duration::from_millis(1000))).ok();
     let mut buf = Vec::with_capacity(2048);
@@ -77,7 +74,6 @@ fn serve_200(mut stream: TcpStream) {
     let _ = stream.flush();
 }
 
-/// The `Content-Length` of a request from its raw header bytes (0 if absent).
 fn content_length(headers: &[u8]) -> usize {
     String::from_utf8_lossy(headers)
         .to_lowercase()
@@ -86,10 +82,8 @@ fn content_length(headers: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-/// The isolated git config + identity every git invocation in a fixture runs
-/// with — including `ws` itself, which shells out to git. Without it the
-/// developer's global/system gitconfig (and their commit identity) leaks into
-/// the test repos.
+/// Applied to `ws` too, since it shells out to git: without this the developer's
+/// global/system gitconfig and commit identity leak into the test repos.
 fn git_env(cmd: &mut Command) {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -99,8 +93,6 @@ fn git_env(cmd: &mut Command) {
         .env("GIT_COMMITTER_EMAIL", "test@example.com");
 }
 
-/// Write a fixture script and make it runnable — one place that knows a script
-/// the tests hand to `ws` (stub, hook) has to be 0755.
 fn write_exec(path: &Path, contents: &str) {
     std::fs::write(path, contents).expect("write script");
     #[cfg(unix)]
@@ -113,10 +105,8 @@ fn write_exec(path: &Path, contents: &str) {
 pub struct WorkspaceFixture {
     pub root: TempDir,
     admin: AdminStub,
-    /// Every `add_hook` so far, as `(repo, event, script path)`. Kept so the
-    /// `scripts` entries can be re-applied after any `.ws.json` write — tests add
-    /// hooks and write their config in either order, and a raw `write_ws_json`
-    /// would otherwise drop the entries added before it.
+    /// `(repo, event, script)` for every `add_hook` so far, replayed after each
+    /// `.ws.json` write so a later `write_ws_json` can't drop earlier entries.
     hooks: std::cell::RefCell<Vec<(String, String, String)>>,
 }
 
@@ -129,7 +119,6 @@ impl WorkspaceFixture {
         Self { root, admin: AdminStub::start(), hooks: Default::default() }
     }
 
-    /// Create a workspace with the given repos and a `.ws.json` referencing them.
     pub fn with_repos(names: &[&str]) -> Self {
         let f = Self::empty();
         for name in names {
@@ -144,8 +133,7 @@ impl WorkspaceFixture {
         self.root.path()
     }
 
-    /// Create a subdirectory and `git init` an empty repo with one empty commit,
-    /// so `git worktree add` / `git branch --show-current` etc. work.
+    /// The empty commit is what makes `git worktree add` and friends work at all.
     pub fn add_repo(&self, name: &str) -> PathBuf {
         let repo = self.path().join(name);
         std::fs::create_dir_all(&repo).expect("mkdir repo");
@@ -154,9 +142,6 @@ impl WorkspaceFixture {
         repo
     }
 
-    /// Run a git command inside `<root>/<repo_rel>` with the isolated git env.
-    /// Panics on failure. Lets tests drive git directly to set up scenarios
-    /// (commits, upstreams, dirty state).
     pub fn git(&self, repo_rel: &str, args: &[&str]) {
         let mut cmd = Command::new("git");
         cmd.args(args).current_dir(self.path().join(repo_rel));
@@ -169,9 +154,8 @@ impl WorkspaceFixture {
         );
     }
 
-    /// Add a repo with a real bare `origin` remote (under `.origins/`) and its
-    /// `main` branch pushed + tracked. Enables upstream-aware checks (unpushed
-    /// commits) in tests. Returns the working checkout path.
+    /// A real bare `origin` with `main` pushed and tracked, so upstream-aware
+    /// checks (unpushed commits, `origin/HEAD`) have something to read.
     pub fn add_repo_with_origin(&self, name: &str) -> PathBuf {
         let repo = self.add_repo(name);
         let origin = self.path().join(".origins").join(format!("{name}.git"));
@@ -182,38 +166,29 @@ impl WorkspaceFixture {
         repo
     }
 
-    /// Write `.ws.json` in the fixture root with the given raw JSON content.
-    /// Any hooks already registered via `add_hook` are re-applied on top, so the
-    /// two helpers can be called in either order.
+    /// Registered hooks are re-applied on top, so this and `add_hook` can be
+    /// called in either order.
     pub fn write_ws_json(&self, json: &str) {
         std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
         self.apply_hook_scripts();
     }
 
-    /// Executable stub at `<root>/<name>` with the given bash `body`. Use for a
-    /// canned exit code, e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")`
-    /// pointed at `WS_SSH`/`WS_MUTAGEN` to simulate reachable/unreachable.
+    /// Point `WS_SSH`/`WS_MUTAGEN` at one of these to stand in for the real
+    /// binary — `stub("ok", "exit 0")` / `stub("bad", "exit 1")` for reachability.
     pub fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path().join(name);
         write_exec(&path, &format!("#!/usr/bin/env bash\n{body}\n"));
         path
     }
 
-    /// Executable stub at `<root>/<name>` that appends each argv (one per line)
-    /// to `$ARGS_FILE`, then exits 0. Stands in for `ssh`/`mutagen` so a test
-    /// can assert the exact command `ws` would run without a real server.
-    /// Point `WS_SSH`/`WS_MUTAGEN` at it and set `ARGS_FILE`.
+    /// Appends each argv one-per-line to `$ARGS_FILE`, so a test can assert the
+    /// exact command `ws` would have run without a real server.
     pub fn arg_recorder(&self, name: &str) -> PathBuf {
         self.stub(name, "printf '%s\\n' \"$@\" >> \"$ARGS_FILE\"")
     }
 
-    /// Declare a lifecycle script for `(repo, event)`: `body` (bash commands; the
-    /// shebang is prepended) is written executable to `.ws-hooks/<repo>-<event>.sh`
-    /// and the repo's `scripts` block in `.ws.json` is pointed at it.
-    ///
-    /// A file rather than an inline `scripts` string so a multi-line body needs no
-    /// JSON escaping; `.ws-hooks/…` is anchored to `$WS_WORKSPACE_ROOT` by `ws`, so
-    /// it resolves from the worktree cwd a script runs in.
+    /// Declares `(repo, event)` as a `.ws-hooks/` script file rather than an
+    /// inline `scripts` string, so a multi-line body needs no JSON escaping.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
         let dir = self.path().join(".ws-hooks");
         std::fs::create_dir_all(&dir).expect("create .ws-hooks");
@@ -226,17 +201,14 @@ impl WorkspaceFixture {
         self.apply_hook_scripts();
     }
 
-    /// Declare `cmd` inline as `(repo, event)`'s `scripts` entry — no script file
-    /// in between. Use when the test cares that `ws` is the shell's direct parent
-    /// (`$PPID`): a `scripts` entry naming a file forks a shell around it, an
-    /// inline one does not.
+    /// Use instead of `add_hook` when the test cares that `ws` is the shell's
+    /// direct parent (`$PPID`): a `scripts` entry naming a file forks a shell
+    /// around it, an inline one does not.
     pub fn add_script(&self, repo: &str, event: &str, cmd: &str) {
         self.hooks.borrow_mut().push((repo.to_string(), event.to_string(), cmd.to_string()));
         self.apply_hook_scripts();
     }
 
-    /// Merge every registered hook into `.ws.json` as a `scripts` entry, promoting
-    /// a bare-name repo (`"api"`) to an object entry as needed.
     fn apply_hook_scripts(&self) {
         let hooks = self.hooks.borrow();
         if hooks.is_empty() {
@@ -270,18 +242,11 @@ impl WorkspaceFixture {
             .expect("write .ws.json");
     }
 
-    /// Run `ws <args>` from the fixture root. Returns Output for inspection.
-    ///
-    /// Env: `HOME` and `CLAUDE_SKILLS_DIR` are redirected into the fixture
-    /// tempdir so a test that inadvertently exercises `ws claude` never
-    /// clobbers the developer's real `~/.claude/skills`. Individual tests can
-    /// still override either via `run_with_env`.
     pub fn run(&self, args: &[&str]) -> Output {
         self.run_with_env(args, &[])
     }
 
-    /// Like `run`, but with the process CWD set to `<root>/<subdir>` — for ops
-    /// (e.g. `ws here`) whose behavior depends on which worktree you're inside.
+    /// For ops whose behavior depends on which worktree you're standing in.
     pub fn run_in(&self, subdir: &str, args: &[&str]) -> Output {
         self.run_in_env(subdir, args, &[])
     }
@@ -299,17 +264,12 @@ impl WorkspaceFixture {
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(cwd)
-            // The HOME redirect below is what isolates `~/.config/ws` (the
-            // global config, persisted https_port) into the fixture — an
-            // XDG_CONFIG_HOME inherited from the dev shell would bypass it and
-            // write into the developer's real config dir.
+            // The HOME redirect is what keeps `~/.config/ws` and `~/.claude/skills`
+            // out of the developer's real home; an XDG_CONFIG_HOME inherited from
+            // the dev shell would bypass it, hence the removal.
             .env_remove("XDG_CONFIG_HOME")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
-            // Treat Caddy as externally managed (the always-200 stub) so a test
-            // `ws up` never spins up a real Caddy container / `ws-net` yet its
-            // route calls still succeed. A test can override this (e.g. to a dead
-            // endpoint) to drive the routing-failure path.
             .env("WS_CADDY_ADMIN", self.admin.url.as_str());
         git_env(&mut cmd);
         for (k, v) in extra_env {
@@ -339,8 +299,8 @@ pub fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
-/// The digits in `<marker>NNNNN]` — the convention a test's `up` script uses to
-/// hand an allocated port back through ws's own output.
+/// The digits in `<marker>NNNNN]` — the shape a test's `up` script echoes an
+/// allocated port in so it can be read back off ws's own output.
 pub fn port_after(haystack: &str, marker: &str) -> u16 {
     let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
     let end = start + haystack[start..].find(']').expect("closing ]");

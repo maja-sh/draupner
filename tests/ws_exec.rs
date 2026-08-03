@@ -3,7 +3,6 @@ mod common;
 use common::{stderr, stdout, WorkspaceFixture};
 use std::path::Path;
 
-/// Rewrite `.ws.json` (repos `["api"]`) with a remote block pointing at `connection`.
 fn write_remote(f: &WorkspaceFixture, connection: &str) {
     std::fs::write(
         f.path().join(".ws.json"),
@@ -19,7 +18,6 @@ fn local_exec_runs_in_the_worktree() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // `touch marker` in the (inferred) worktree, then confirm it landed there.
     let out = f.run_in(".worktrees/feat-foo/api", &["exec", "--", "touch", "marker"]);
     assert!(out.status.success(), "exec should succeed:\n{}", stderr(&out));
     assert!(
@@ -33,7 +31,6 @@ fn branch_flag_targets_a_worktree_from_the_workspace_root() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // From the ROOT (not inside the worktree), target it by branch + repo.
     let out = f.run_ok(&["exec", "--branch", "feat/foo", "api", "--", "touch", "marker"]);
     assert!(out.status.success(), "exec --branch should succeed:\n{}", stderr(&out));
     assert!(
@@ -82,8 +79,6 @@ fn propagates_signal_death_as_128_plus_signum() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // Child kills itself with SIGTERM (15) — `ws` should exit 128+15 = 143,
-    // not collapse to a bare 1, and print no banner.
     let out = f.run_in(".worktrees/feat-foo/api", &["exec", "--", "sh", "-c", "kill -TERM $$"]);
     assert_eq!(out.status.code(), Some(143), "expected 128+SIGTERM");
     assert!(!stderr(&out).contains("FAIL"), "no banner over a signalled child:\n{}", stderr(&out));
@@ -94,7 +89,6 @@ fn infers_repo_from_the_current_worktree() {
     let f = WorkspaceFixture::with_repos(&["api", "web"]);
     f.run_ok(&["new", "api,web", "feat/foo"]);
 
-    // No repo arg — should target the worktree we're standing in (web).
     let out = f.run_in(".worktrees/feat-foo/web", &["exec", "--", "touch", "marker"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.path().join(".worktrees/feat-foo/web/marker").exists());
@@ -106,7 +100,6 @@ fn explicit_repo_targets_a_sibling() {
     let f = WorkspaceFixture::with_repos(&["api", "web"]);
     f.run_ok(&["new", "api,web", "feat/foo"]);
 
-    // Standing in web, but ask for api explicitly.
     let out = f.run_in(".worktrees/feat-foo/web", &["exec", "api", "--", "touch", "marker"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(f.path().join(".worktrees/feat-foo/api/marker").exists());
@@ -128,8 +121,7 @@ fn outside_a_worktree_is_a_preflight_error() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // From the workspace root without `--branch` — the worktree can't be inferred
-    // even with a repo arg; the error points at `--branch`.
+    // A repo arg alone can't identify a worktree, so the error must name `--branch`.
     let out = f.run(&["exec", "api", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("not inside a worktree"), "{}", stderr(&out));
@@ -156,9 +148,8 @@ fn remote_workspace_dispatches_over_ssh() {
 
     let recorded = std::fs::read_to_string(&args_file).expect("ssh was invoked");
     let lines: Vec<&str> = recorded.lines().collect();
-    // No TTY in tests (stdin isn't a terminal), so no `-t`. Connection-multiplexing
-    // options (`-o ControlMaster…`) prefix the args, so the connection and the
-    // remote script are the final two.
+    // Indexed from the end because connection-multiplexing options prefix the
+    // args; stdin isn't a terminal here, so there's no `-t` either.
     assert_eq!(lines[lines.len() - 2], "srv", "the connection precedes the script");
     assert_eq!(
         lines[lines.len() - 1],
@@ -166,7 +157,7 @@ fn remote_workspace_dispatches_over_ssh() {
          WS_RUNTIME=podman WS_REMOTE=1 WS_CONNECTION=srv exec php artisan migrate",
         "remote script cds, exports WS_* (incl. runtime + remoteness), and execs the command"
     );
-    // The command must NOT have run locally.
+    // The command must not have run locally.
     assert!(!f.path().join(".worktrees/feat-foo/api/marker").exists());
 }
 

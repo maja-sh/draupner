@@ -19,7 +19,7 @@ fn one_task_one_repo_shows_table() {
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
 
-    // Group label is the (unsanitized) branch name.
+    // The group label carries the unsanitized branch name.
     assert!(err.contains("feat/foo"), "expected branch label in:\n{err}");
     assert!(err.contains("api"), "expected repo in:\n{err}");
     assert!(err.contains("clean"), "expected clean status in:\n{err}");
@@ -43,7 +43,6 @@ fn dirty_worktree_shows_dirty() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/dirty"]);
 
-    // Introduce an untracked file in the worktree.
     std::fs::write(
         f.path().join(".worktrees/feat-dirty/api/scratch.txt"),
         "wip",
@@ -60,13 +59,12 @@ fn missing_status_hook_does_not_crash() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/nostatus"]);
 
-    // No status hook present — op should still succeed and list the worktree.
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
     assert!(err.contains("feat/nostatus"), "expected worktree listed in:\n{err}");
 
-    // With no status hook anywhere, the status column is suppressed entirely —
-    // no bare placeholder dash dangling off the row.
+    // With no status hook anywhere the whole column goes, rather than leaving a
+    // placeholder dash dangling off the row.
     let row = err
         .lines()
         .find(|l| l.contains("api") && l.contains("clean"))
@@ -79,11 +77,9 @@ fn missing_status_hook_does_not_crash() {
 
 #[test]
 fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
-    // A declared `status` script runs with cwd = the worktree, but `.ws-hooks/`
-    // lives at the workspace root. Regression: `capture_command` used to join the
-    // script's commands without anchoring, so this exited 127 and `ws list`
-    // showed an empty status column — while the same value worked for `up`
-    // (which anchors) and on a remote workspace.
+    // A `status` script runs with cwd = the worktree while `.ws-hooks/` lives at
+    // the workspace root, so an unanchored path exits 127 and shows up only as an
+    // empty status column.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     let hook = f.path().join(".ws-hooks").join("api-status.sh");

@@ -1,27 +1,14 @@
 //! Config injection — how per-worktree values reach the app, parser-free.
 //!
-//! `ws` allocates a hostname per HTTP service (`WS_HOST_<svc>` =
-//! `<branch>.<subdomain>.<domain>`) and a host port per raw-TCP service
-//! (`WS_PORT_<svc>`), then delivers them through three format-blind channels:
-//!
-//! 1. **Env vars** (primary) — the `WS_HOST_*`/`WS_PORT_*` vars plus the
-//!    declared `env` mappings are set in the script/exec environment.
-//! 2. **CLI-arg passthrough** (secondary) — needs no code here: an `up` script
-//!    like `run -- --port=$WS_PORT_http` expands the var in its own `sh -c`.
-//! 3. **Templates** (escape hatch) — a committed `src` is rendered to a
-//!    gitignored `dest` with `${WS_*}` tokens substituted.
-//!
-//! A single entry point, [`prepare`], owns the whole protocol: a caller states
-//! the lifecycle [`Phase`] and gets back the env pairs; whether ports are
-//! allocated and templates rendered follows from the phase, so no caller has to
+//! `ws` allocates a hostname per HTTP service (`WS_HOST_<svc>`) and a host port
+//! per raw-TCP service (`WS_PORT_<svc>`), then delivers them through three
+//! format-blind channels: env vars, CLI-arg passthrough (which needs no code
+//! here — an `up` script's own `sh -c` expands `$WS_PORT_http`), and `${WS_*}`
+//! template rendering. [`prepare`] is the single entry point; the caller states
+//! a [`Phase`] and allocation/rendering follow from it, so nothing has to
 //! remember to pair a render call with an env call.
 //!
-//! Substitution is deliberately **brace-only and WS_-scoped**: only a
-//! `${WS_...}` token naming a variable we own is replaced. Everything else —
-//! nginx's `$host`, a shell `$FOO`, an unknown `${WS_typo}` — is copied
-//! verbatim. (This is why we hand-roll rather than use the `subst` crate: `subst`
-//! substitutes *every* `$VAR`, which would mangle the very config files —
-//! nginx.conf, redis.conf — that channel 3 exists to render.)
+//! See ARCHITECTURE.md for how this fits the wider call chain.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -37,15 +24,13 @@ use crate::remote::Site;
 /// template rendering so callers state intent, not mechanics.
 #[derive(Clone, Copy)]
 pub enum Phase {
-    /// Bringing the stack up (`up` / `post-create`): allocate host ports and
-    /// render templates.
+    /// `up` / `post-create`.
     Activate,
-    /// Running a command where the stack lives (`ws exec` locally): allocate
-    /// ports so `WS_PORT_*` is present, but don't render templates — exec is a
-    /// command runner, not a config step.
+    /// `ws exec` locally: ports are allocated so `WS_PORT_*` is present, but
+    /// templates are not rendered — exec is a command runner, not a config step.
     Exec,
-    /// Reading or tearing down (`down` / `post-remove` / `status` / remote
-    /// exec): use whatever's already allocated; never allocate or render.
+    /// `down` / `post-remove` / `status` / remote exec: use whatever's already
+    /// allocated; never allocate or render.
     Inspect,
 }
 
@@ -56,17 +41,12 @@ impl Phase {
     fn renders(self) -> bool {
         matches!(self, Phase::Activate)
     }
-    /// Whether to auto-derive services from `compose config`. Only when
-    /// activating — deriving shells out to the runtime, too heavy for the
-    /// read-only `ws list`/exec paths, which use the declared `services` and the
-    /// already-recorded ports.
+    /// Deriving shells out to the container runtime, too heavy for the read-only
+    /// `ws list`/exec paths — they use the declared `services` and the ports
+    /// already recorded.
     fn derives(self) -> bool {
         matches!(self, Phase::Activate)
     }
-    /// Whether to (re)write the container compose override. Only when
-    /// activating — the same activating concept as `renders`/`derives`, but
-    /// named on its own so the override's write-vs-reuse decision reads
-    /// independently (read/teardown phases reuse the file the last `up` wrote).
     fn writes_override(self) -> bool {
         matches!(self, Phase::Activate)
     }
@@ -74,15 +54,11 @@ impl Phase {
 
 /// Compute the injection env (`WS_HOST_*`/`WS_PORT_*` + declared `env` mappings)
 /// for a repo's worktree, allocating host ports and rendering templates as the
-/// `phase` dictates. A repo with no services/env yields just the workspace
-/// context; a bare-name entry is treated as an object entry with no overrides
-/// (see `repo_config` below), not as an opt-out. This is the one function every op
-/// calls.
+/// `phase` dictates. This is the one function every op calls.
 ///
-/// Location-transparent via `site`: derivation, port-freeness probes, and the
-/// generated compose override all happen where the stack runs (locally, or on
-/// the server for a remote workspace) — `worktree` is always the local (synced)
-/// path, used for the file checks and template rendering that `ws` does host-side.
+/// Derivation, port-freeness probes and the compose override happen at `site`
+/// (the server, for a remote workspace); `worktree` is always the *local*
+/// (synced) path, used for the file checks and rendering `ws` does host-side.
 pub fn prepare(
     cfg: &WsConfig,
     site: &Site,
@@ -92,26 +68,12 @@ pub fn prepare(
     repo: &str,
     phase: Phase,
 ) -> Result<Vec<(String, String)>> {
-    // Workspace-context vars every hook receives, independent of repo config or
-    // routing: the container runtime (so a shared hook can call `$WS_RUNTIME
-    // compose` instead of hardcoding podman/docker) and whether the workspace
-    // offloads (so a hook can branch local-vs-remote behaviour — e.g. same-host db
-    // copy locally vs importing a synced dump on the server). Emitted even for a
-    // repo that isn't in this workspace at all, which returns early below.
+    // A repo that isn't in this workspace still gets the workspace context.
     let context = workspace_context(cfg);
     let Some(rc) = repo_config(cfg, repo) else { return Ok(context) };
 
-    // The worktree path at the execution site: the local path, or the synced dir
-    // on the server (absolute — see `site_worktree_path`). `compose config`/the
-    // override run there; file checks and template renders below stay on the local
-    // (synced) copy.
     let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
 
-    // On an activating event the live compose derivation is authoritative
-    // (declared `services` overlaid on top); on read-only phases prefer the
-    // effective set recorded at the last `up` — it covers services that were
-    // auto-derived from compose and never declared — falling back to the
-    // declared block for a worktree that predates the record.
     let (services, all_services): (BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>) =
         if phase.derives() {
             effective_services(cfg, site, &site_worktree, worktree, repo, rc)?
@@ -121,38 +83,26 @@ pub fn prepare(
             (s, names)
         };
 
-    // Allocate a host port per raw-TCP service (host repos: every service). The
-    // record + lock stay host-side (the host drives every `ws` call); only the
-    // freeness probe follows `site`, so a remote service is de-conflicted on the
-    // server that publishes it. `WS_HOST_*` needs no port — the routed hostname is
-    // location-transparent.
+    // The port record and its lock stay host-side (the host drives every `ws`
+    // call); only the freeness probe follows `site`, so a remote service is
+    // de-conflicted on the server that publishes it.
     let host = rc.is_host();
     let port_map = port_map(site, root, branch_sanitized, repo, &services, host, phase)?;
 
-    // Record the effective service set at `up` so the read-only phases above can
-    // reconstruct hosts/ports for auto-derived services.
+    // Recorded at `up` so the read-only phases can reconstruct hosts and ports
+    // for services that were derived from compose and never declared.
     if phase.derives() {
         ports::record_services(root, branch_sanitized, repo, &services)?;
     }
 
     let vars = ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, host);
 
-    // Substitution map = this repo's own `WS_*` plus every *peer* repo's, re-keyed
-    // under a `<repo>.` prefix (`${WS_PORT_app.web}`, `${WS_HOST_app.web}`), so a
-    // repo's `env`/`templates` can reference a sibling's routed host or allocated
-    // port. Peer entries are for substitution ONLY — their keys carry a `.` (not a
-    // valid env-var name) and are never injected. Peers are read-only: their ports
-    // come from the allocation recorded at `ws new`, so an unbuilt peer just leaves
-    // the token literal (same as any unknown `${WS_*}`).
+    // Peer entries (`${WS_PORT_app.web}`) are for substitution ONLY — their keys
+    // carry a `.`, which is not a valid env-var name, and are never injected.
     let mut subst = vars.clone();
-    // The workspace context (`WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`) is
-    // substitutable too. Without it the only way to hand a project ws's answer for
-    // something is to teach the project about ws — a tool that shells out to a
-    // container runtime has to learn `WS_RUNTIME`, which puts ws's vocabulary in a
-    // codebase that should not have to know it exists. Declaring
-    // `"DOCKER_COMMAND": "${WS_RUNTIME}"` keeps that mapping in `.ws.json`, which
-    // is where the coupling belongs. No collision risk: these keys are fixed and
-    // distinct from the `WS_HOST_*`/`WS_PORT_*` above.
+    // The workspace context is substitutable so a project can map
+    // `"DOCKER_COMMAND": "${WS_RUNTIME}"` in `.ws.json` rather than learn ws's
+    // vocabulary in a codebase that shouldn't know ws exists.
     subst.extend(context.iter().cloned());
     for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
         subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
@@ -162,22 +112,14 @@ pub fn prepare(
         render_all(worktree, rc, &subst)?;
     }
 
-    // Declared `env` mappings with their `${WS_*}` tokens substituted. Fed both
-    // into the script env and (for a container) the override's `environment:`.
     let declared = declared_env(rc, &subst);
     let mut env: Vec<(String, String)> = vars.into_iter().collect();
     env.extend(declared.iter().cloned());
 
-    // Container repos get the generated compose override + project namespacing
-    // via `COMPOSE_*` env, so N parallel worktrees de-conflict their raw-TCP
-    // host ports. Host repos (not compose) are excluded. For a remote workspace
-    // the override is written on the server and `COMPOSE_FILE` uses server paths.
     if !host && rc.is_container(|| compose::has_compose_file(worktree)) {
         let project = compose::project_name(branch_sanitized, repo);
-        // Join `ws-net` (so Caddy can dial the HTTP services) only when routing
-        // is active. Without it, referencing the external `ws-net` would just
-        // make `compose up` fail for nothing. The op layer (`ws up`/`new`)
-        // ensures the network exists before this override is used.
+        // Only join `ws-net` when routing is active: otherwise referencing the
+        // external network would just make `compose up` fail for nothing.
         let join_ws_net = cfg.routing_active();
         let base = base_files_at(worktree, &site_worktree);
         let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
@@ -190,25 +132,20 @@ pub fn prepare(
     Ok(env)
 }
 
-/// The config to apply to `repo`, treating a **bare-name** entry as the object
-/// entry with no overrides that it means (`{"name": "<repo>"}`). `None` only when
-/// `repo` isn't an entry in this workspace at all.
+/// The config to apply to `repo`. `None` only when `repo` isn't an entry in this
+/// workspace at all.
 ///
-/// A bare name is convention-only, not opt-out: `ws init` writes one whenever the
-/// compose derive yields nothing (or the runtime is absent at init time), and
-/// `is_container_repo` still infers container-ness from the worktree's compose
-/// file, so such a repo *does* run the default `<runtime> compose up -d`. Before
-/// this fallback it ran it with no `COMPOSE_PROJECT_NAME`, so compose fell back to
-/// the worktree's dir basename (`api`) — identical for every branch — and a second
-/// worktree's `up` stole the first's containers while `ws rm`'s `compose down -v`
-/// wiped the sibling's volumes. Everything downstream (derive, project name,
-/// override, routes) now treats the two spellings alike.
+/// A **bare-name** entry (`"api"`) is not an opt-out — it means the object entry
+/// with no overrides, and everything downstream (derive, project name, override,
+/// routes) must treat the two spellings alike. Turning it back into a `None`
+/// leaves such a repo with no `COMPOSE_PROJECT_NAME`, so parallel worktrees
+/// collide on the compose default project name.
 fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
     let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
     match entry.config() {
         Some(rc) => Some(rc),
-        // A bare name carries no overrides, so one shared all-defaults config
-        // serves every such entry (nothing here reads `name`).
+        // One shared all-defaults config serves every bare entry — nothing here
+        // reads `name`.
         None => {
             static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
             Some(BARE.get_or_init(RepoConfig::default))
@@ -216,10 +153,9 @@ fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
     }
 }
 
-/// The service set to reason about on a read-only path: prefer the effective set
-/// recorded at the last `up` — it covers services that were auto-derived from
-/// compose and never declared — falling back to the declared block for a worktree
-/// that predates the record.
+/// The service set for a read-only path. The record wins over the declared block
+/// because it covers services auto-derived from compose and never declared; the
+/// fallback is for a worktree that predates the record.
 fn recorded_or_declared(
     root: &Path,
     branch_sanitized: &str,
@@ -230,14 +166,12 @@ fn recorded_or_declared(
     if recorded.is_empty() { rc.services.clone() } else { recorded }
 }
 
-/// The host-port map for a repo's services: allocate the ones that need a port on
-/// an allocating phase, else read back whatever was recorded.
+/// The host-port map for a repo's services.
 ///
-/// A container only needs a host port for its raw-TCP services — HTTP ones are
-/// dialed on the container network. An explicit host repo allocates one for EVERY
-/// service: N host processes on a single machine can't share a port the way N
-/// isolated containers can, so even an HTTP host service needs its own port to
-/// bind (Caddy then routes the host to `host.containers.internal:<port>`).
+/// A container needs a host port only for its raw-TCP services — HTTP ones are
+/// dialed on the container network. A host repo allocates one for EVERY service:
+/// N host processes can't share a port the way N isolated containers can, so
+/// even an HTTP host service needs its own port to bind.
 fn port_map(
     site: &Site,
     root: &Path,
@@ -258,22 +192,13 @@ fn port_map(
     ports::resolve(site, root, branch_sanitized, repo, &needs)
 }
 
-/// The workspace-context env pairs (`WS_RUNTIME`, `WS_REMOTE`, `WS_CONNECTION`)
-/// every hook sees. `WS_REMOTE` reflects whether the *workspace* offloads
-/// (`cfg.remote`), not the site a given call runs against, so a hook reads one
-/// consistent answer wherever it executes. `1`/`0` for shell-friendly
-/// `[ "$WS_REMOTE" = 1 ]` tests.
+/// The workspace-context env pairs every hook sees.
 ///
-/// `WS_CONNECTION` is the SSH destination, empty for a local workspace. Without
-/// it a **client-side** hook knows it is offloading but not to where, so it
-/// cannot reach the server without the user hardcoding a hostname into a script
-/// that `.ws.json` already names. That closes the loop on client-side state the
-/// server needs but no repo contains — a dev CA, a registry token, an auth.json:
-/// `prepare` runs on the client before every `up`, and can now push it.
-///
-/// Derived from config rather than declared, and deliberately not named
-/// `WS_REMOTE_HOST` — that is an *input* override `ws` itself reads, and a hook
-/// inheriting it would silently re-target a nested `ws` call.
+/// `WS_REMOTE` reflects whether the *workspace* offloads, not the site a given
+/// call runs against, so a hook reads one consistent answer wherever it executes.
+/// `WS_CONNECTION` is deliberately not named `WS_REMOTE_HOST` — that is an
+/// *input* override `ws` itself reads, and a hook inheriting it would silently
+/// re-target a nested `ws` call.
 fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     vec![
         ("WS_RUNTIME".to_string(), cfg.runtime().to_string()),
@@ -285,12 +210,9 @@ fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     ]
 }
 
-/// The worktree path at the execution site: the local path for a local
-/// workspace, or the server-side synced dir (`<workspace_path>/<task>/<repo>`,
-/// absolute — the server dir feeds `COMPOSE_FILE`, which must be absolute or the
-/// `cd`'d up script would double-resolve it) for a remote one.
-///
-/// `Site::worktree_at` owns that derivation; this is the name `prepare` reads by.
+/// The worktree path at the execution site. The remote form is absolute because
+/// it feeds `COMPOSE_FILE`, which a `cd`'d up script would otherwise
+/// double-resolve.
 fn site_worktree_path(
     cfg: &WsConfig,
     site: &Site,
@@ -302,9 +224,8 @@ fn site_worktree_path(
     site.worktree_at(cfg.remote.as_ref(), root, worktree, branch_sanitized, repo)
 }
 
-/// The base compose file(s) as paths *at the site*: `compose::base_files` finds
-/// which files exist in the local (synced) worktree, then each is re-homed under
-/// `site_worktree` (a no-op for a local site, where the two dirs coincide).
+/// The base compose file(s) as paths *at the site*: which files exist is decided
+/// from the local (synced) worktree, then each is re-homed under `site_worktree`.
 fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
     let base = site_worktree.trim_end_matches('/');
     compose::base_files(worktree)
@@ -313,11 +234,9 @@ fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
         .collect()
 }
 
-/// The generated compose override's path at the execution site. Local: under the
-/// host `.ws-meta`. Remote: under a `.ws-meta` sibling of the server's synced
-/// worktrees (`<workspace_path>/.ws-meta/...`), so it lives beside the stack it
-/// overrides and is torn down with it. `pub(crate)` so teardown can remove the
-/// server-side file it wrote.
+/// The generated compose override's path at the execution site — remotely, a
+/// `.ws-meta` sibling of the server's synced worktrees, so it lives beside the
+/// stack it overrides and is torn down with it.
 pub(crate) fn override_path_at(
     cfg: &WsConfig,
     site: &Site,
@@ -327,9 +246,9 @@ pub(crate) fn override_path_at(
 ) -> String {
     match &cfg.remote {
         None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
-        // Absolute (home-resolved), same reason as `site_worktree_path` — and the
-        // same owner, so the override can't land beside a *different* directory
-        // than the worktree it overrides.
+        // Home-resolved via the same owner as `site_worktree_path`, so the
+        // override can't land beside a different directory than the worktree it
+        // overrides.
         Some(r) => format!(
             "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
             site.root_at(Some(r), root).trim_end_matches('/')
@@ -337,18 +256,14 @@ pub(crate) fn override_path_at(
     }
 }
 
-/// The `COMPOSE_*` env for a container repo. `COMPOSE_PROJECT_NAME` is set on
-/// every phase (isolation — compose's default project name is the worktree's
-/// dir basename `api`, identical across branches, so distinct stacks would
-/// collide on containers/networks/volumes). `COMPOSE_FILE` (base files plus the
-/// generated override) is set **only on an activating phase**, which is also the
-/// only phase that (re)writes the override: read/teardown/exec phases don't
-/// re-create containers — `down`/`ps`/`exec` target the project by name, and the
-/// override carries only ports/env — so they leave `COMPOSE_FILE` unset rather
-/// than risk referencing an override an edited compose file left stale.
+/// The `COMPOSE_*` env for a container repo.
 ///
-/// Empty when no compose file is present (an explicit `kind: container` with
-/// nothing to find — the derive path already surfaces that fatally on activation).
+/// `COMPOSE_PROJECT_NAME` is set on every phase: compose's default project name
+/// is the worktree's dir basename, identical across branches, so distinct stacks
+/// would collide on containers/networks/volumes. `COMPOSE_FILE` is set only on
+/// the phase that (re)writes the override — `down`/`ps`/`exec` target the project
+/// by name and don't need it, so they leave it unset rather than risk pointing at
+/// an override an edited compose file left stale.
 #[allow(clippy::too_many_arguments)]
 fn compose_env(
     site: &Site,
@@ -377,16 +292,11 @@ fn compose_env(
     Ok(env)
 }
 
-/// The Caddy routes for a repo's HTTP services: one per HTTP service, matching
-/// `<branch>.<subdomain>.<domain>` and proxying to the worktree's container
-/// (`<project>-<service>-1:<port>`) or host process
-/// (`host.containers.internal:<WS_PORT>`).
+/// The Caddy routes for a repo's HTTP services.
 ///
-/// Read-only: it uses the effective service set recorded at the last `up` (so
-/// `down`/`rm` resolve the same `@id`s `up` created) and never allocates or
-/// derives. Empty when `repo` isn't in the workspace or no `domain` is set (no
-/// routing). A bare-name repo routes like any other (see `repo_config`) —
-/// `prepare` hands its services a `WS_HOST_*`, so something has to answer there.
+/// Read-only by design: it uses the service set recorded at the last `up`, so
+/// `down` and `rm` resolve the same `@id`s `up` created. Deriving or allocating
+/// here would make teardown invent routes it never published.
 pub fn routes(
     cfg: &WsConfig,
     root: &Path,
@@ -397,9 +307,6 @@ pub fn routes(
         return Vec::new();
     };
     let services = recorded_or_declared(root, branch_sanitized, repo, rc);
-    // Only the branch actually taken pays its lookup: a host repo loads the port
-    // map (upstream is its allocated port); a container repo computes the project
-    // name (upstream is the project-qualified container name).
     let host = rc.is_host();
     let port_map = if host { ports::load(root, branch_sanitized, repo) } else { BTreeMap::new() };
     let project = if host { String::new() } else { compose::project_name(branch_sanitized, repo) };
@@ -407,8 +314,7 @@ pub fn routes(
     route_specs(&services, &port_map, host, &project, branch_sanitized, repo, domain)
 }
 
-/// The pure core of [`routes`]: given a resolved service set, build one route
-/// spec per HTTP service. A host service without an allocated port is skipped.
+/// The pure core of [`routes`], given an already-resolved service set.
 fn route_specs(
     services: &BTreeMap<String, ServiceConfig>,
     port_map: &BTreeMap<String, u16>,
@@ -423,13 +329,11 @@ fn route_specs(
         let Some(sub) = svc.subdomain(name) else { continue }; // HTTP services only
         let hostname = ws_host(branch_sanitized, sub, domain);
         let upstream = if host {
-            // A host process is reached at its allocated port on the host.
             match port_map.get(name) {
                 Some(port) => format!("host.containers.internal:{port}"),
                 None => continue,
             }
         } else {
-            // A container is dialed by its project-qualified name on `ws-net`.
             format!("{project}-{}-1:{}", compose::compose_service(name, svc.port), svc.port)
         };
         out.push(crate::caddy::RouteSpec {
@@ -442,16 +346,14 @@ fn route_specs(
     out
 }
 
-/// The effective services for a repo: for a container repo (explicit `kind` or a
-/// compose file present), the live `compose config` derivation with the declared
-/// `services` overlaid on top (declared wins per key); otherwise the declared
-/// block alone.
+/// The effective services for a repo: the live `compose config` derivation with
+/// the declared `services` overlaid on top (declared wins per key), or the
+/// declared block alone.
 ///
-/// A failed derivation is fatal for an **explicit** `kind: container` — the user
-/// said it's a container, so a broken compose must surface, not silently bring
-/// up an unrouted stack. When container-ness was merely *inferred* from a compose
-/// file, we fall back to the declared block with a note (the inference is a guess,
-/// and the local-first path shouldn't hard-fail just because the runtime is out).
+/// A failed derivation is fatal only for an **explicit** `kind: container` — the
+/// user said it's a container, so a broken compose must surface rather than
+/// silently bring up an unrouted stack. Inferred container-ness is a guess, and
+/// shouldn't hard-fail the local-first path just because the runtime is out.
 fn effective_services(
     cfg: &WsConfig,
     site: &Site,
@@ -475,35 +377,26 @@ fn effective_services(
             }
         }
     }
-    // No derive (host repo, or a failed/absent compose config): the declared set
-    // is all we know, and its keys double as the service-name list.
     Ok((rc.services.clone(), rc.services.keys().cloned().collect()))
 }
 
-/// The per-worktree hostname for an HTTP service: `<branch>.<subdomain>.<domain>`.
-/// Shared by the `WS_HOST_*` env var and the Caddy route match so the two can't
-/// drift.
+/// The per-worktree hostname for an HTTP service. Shared by the `WS_HOST_*` env
+/// var and the Caddy route match so the two can't drift.
 fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
     format!("{}.{}.{domain}", dns_label(branch_sanitized), dns_label(subdomain))
 }
 
 /// Collapse a branch/subdomain into a single DNS label. `sanitize_branch` leaves
-/// dots (`v2.1`, `release/1.2` → `release-1.2`), which add extra hostname labels —
-/// harmless for an exact match, but with a wildcard route `*.<branch>.<sub>.<domain>`
-/// a dotted branch's base host (`a.b.<sub>.<domain>`) would be *suffix-captured* by
-/// a sibling branch `b`'s wildcard, cross-routing worktrees. One label, no capture.
+/// dots in, and the extra hostname labels they add let a dotted branch's base
+/// host be suffix-captured by a sibling branch's wildcard route, cross-routing
+/// two worktrees.
 fn dns_label(s: &str) -> String {
     s.replace('.', "-")
 }
 
 /// The `WS_HOST_<svc>` / `WS_PORT_<svc>` variable map, keyed off the *current*
-/// service set and the current allocation policy — never the raw `.ws-meta` map,
-/// which can retain a stale port for a service that was since removed or flipped
-/// to HTTP. HTTP services yield a hostname (only when a top-level `domain` is
-/// set). `WS_PORT` is emitted only when the service is one `ws` currently
-/// allocates a port for (`host` repo → every service; container → raw-TCP only),
-/// so a host HTTP service gets both while a container HTTP service never gets a
-/// (possibly stale) port.
+/// service set and allocation policy rather than the raw `.ws-meta` map — that
+/// can retain a stale port for a service since removed or flipped to HTTP.
 fn ws_vars(
     services: &BTreeMap<String, ServiceConfig>,
     branch_sanitized: &str,
@@ -527,12 +420,10 @@ fn ws_vars(
     vars
 }
 
-/// A peer repo's `WS_HOST_*`/`WS_PORT_*`, re-keyed under a `<peer>.` prefix
-/// (`WS_PORT_<peer>.<svc>`) so another repo can reference it via substitution.
-/// Read-only: the peer's ports come from its recorded allocation (written at
-/// `ws new`) — never a fresh allocation here. Empty when the peer isn't a repo in
-/// this workspace or has no allocation yet, which leaves the referencing token
-/// literal.
+/// A peer repo's `WS_HOST_*`/`WS_PORT_*`, re-keyed under a `<peer>.` prefix so
+/// another repo's `env`/`templates` can reference a sibling. Empty when the peer
+/// isn't in this workspace or has no allocation yet, which leaves the
+/// referencing token literal — same as any unknown `${WS_*}`.
 fn peer_vars(
     cfg: &WsConfig,
     site: &Site,
@@ -545,15 +436,10 @@ fn peer_vars(
     let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 
-    // On an allocating phase (`up`/`new`/`exec`) **pre-allocate** the peer's
-    // port-bearing services, so `${WS_PORT_<peer>.<svc>}` resolves even when the
-    // peer worktree isn't built yet — the whole point of letting a repo reference
-    // a sibling it's spun up separately from. The reservation lands in the peer's
-    // own `.ws-meta`; when the peer is later brought up, `resolve` preserves it, so
-    // both agree on the port regardless of order. Teardown of the branch frees a
-    // reservation whose peer was never created. Read/teardown phases stay
-    // read-only (`load`) — they must never allocate. `WS_HOST_*` needs no port and
-    // resolved without this already; this is purely for `WS_PORT_*`.
+    // Allocating phases deliberately **pre-allocate** the peer's ports, so
+    // `${WS_PORT_<peer>.<svc>}` resolves even when the peer worktree isn't built
+    // yet. The reservation lands in the peer's own `.ws-meta` and `resolve`
+    // preserves it, so both repos agree on the port whichever comes up first.
     let port_map = port_map(site, root, branch_sanitized, peer, &services, peer_host, phase)?;
     Ok(ws_vars(&services, branch_sanitized, cfg.domain.as_deref(), &port_map, peer_host)
         .into_iter()
@@ -567,15 +453,12 @@ fn peer_vars(
         .collect())
 }
 
-/// The declared `env` entries with their `${WS_*}` tokens substituted, in
-/// deterministic key order (`rc.env` is a `BTreeMap`). `ws` owns the `WS_*`
-/// values in `vars`; these map them onto the app's own var names.
 fn declared_env(rc: &RepoConfig, vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
     rc.env.iter().map(|(k, t)| (k.clone(), substitute(t, vars))).collect()
 }
 
-/// Render every declared template into the worktree, then register all of their
-/// dests in `info/exclude` in one pass (one `git` spawn, one file rewrite).
+/// Render every declared template into the worktree, then register all the dests
+/// in `info/exclude` in one pass — one `git` spawn, one file rewrite.
 fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>) -> Result<()> {
     if rc.templates.is_empty() {
         return Ok(());
@@ -588,19 +471,15 @@ fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>)
     git::add_worktree_excludes(worktree, &dests)
 }
 
-/// Refuse a template path that doesn't stay inside the worktree.
+/// Refuse a template path that doesn't stay inside the worktree. Security
+/// boundary: `src`/`dest` come from `.ws.json`, which isn't gitignored and so
+/// arrives with a clone, and both are joined onto the worktree.
 ///
-/// `src`/`dest` come from `.ws.json`, which isn't gitignored and so arrives with
-/// a clone: without this, an entry like
-/// `{"src":"payload","dest":"../../../../.ssh/authorized_keys"}` had `ws new` and
-/// every `ws up` write attacker-chosen bytes anywhere the user can write, with no
-/// `scripts` entry needed. An **absolute** `dest` is just as dangerous as `..`,
-/// because `Path::join` discards the base entirely when the joined component is
-/// absolute. The `is_tracked` check below is no defence — `git ls-files` exits
-/// non-zero for a path outside the repo, which reads as "not tracked", so
-/// escaping the worktree *disabled* the anti-clobber guard instead of tripping
-/// it. Same rule `copy` entries get (see `ops::new::seed_copies`), plus a
-/// resolved-prefix check so a committed symlink can't escape without a `..`.
+/// An **absolute** `dest` is as dangerous as `..`, because `Path::join` discards
+/// the base entirely when the joined component is absolute. The `is_tracked`
+/// check in `render_one` is no defence: `git ls-files` exits non-zero for a path
+/// outside the repo, which reads as "not tracked", so escaping the worktree
+/// *disabled* the anti-clobber guard instead of tripping it.
 fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
     let rel = Path::new(p);
     if rel.is_absolute() {
@@ -615,9 +494,7 @@ fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
 
     // Lexically clean, but a symlink on the way (`ln -s / esc`, dest `esc/etc/x`)
     // still lands outside. Canonicalize the deepest ancestor that exists — a dest
-    // itself normally doesn't yet — and require it to stay under the worktree. An
-    // unresolvable worktree (nothing created yet) leaves the lexical checks above
-    // as the guard.
+    // itself normally doesn't yet — and require it to stay under the worktree.
     let Ok(root) = worktree.canonicalize() else { return Ok(()) };
     let joined = worktree.join(rel);
     let mut probe = joined.as_path();
@@ -641,17 +518,16 @@ fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
     }
 }
 
-/// Render one template: read `src`, substitute, write `dest`. Refuses if `dest`
-/// is tracked (rendering would dirty a committed file). Paths are
-/// worktree-relative; keeping `dest` git-invisible is the caller's job.
+/// Render one template. Paths are worktree-relative; keeping `dest` git-invisible
+/// is the caller's job.
 fn render_one(
     worktree: &Path,
     src: &str,
     dest: &str,
     vars: &BTreeMap<String, String>,
 ) -> Result<()> {
-    // Before anything touches the filesystem: both fields are attacker-controlled
-    // config, and both are joined onto the worktree below.
+    // Both fields are attacker-controlled config, so check before anything
+    // touches the filesystem.
     ensure_within_worktree(worktree, "src", src)?;
     ensure_within_worktree(worktree, "dest", dest)?;
     if git::is_tracked(worktree, dest) {
@@ -674,8 +550,9 @@ fn render_one(
 }
 
 /// Replace `${NAME}` tokens with values from `vars`, but only for names present
-/// in the map (which only ever holds `WS_*` keys). Any other `$…` — a bare
-/// `$FOO`, an unknown `${WS_typo}`, nginx's `$host` — is left byte-for-byte.
+/// in the map (which only ever holds `WS_*` keys). Deliberately brace-only and
+/// hand-rolled: a general `$VAR` substitution would mangle the very config files
+/// — nginx's `$host`, a shell `$FOO` — that templates exist to render.
 fn substitute(text: &str, vars: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -719,7 +596,6 @@ mod tests {
         }
     }
 
-    /// The repo's declared services as the sorted map `ws_vars` now takes.
     fn services(rc: &RepoConfig) -> BTreeMap<String, ServiceConfig> {
         rc.services.clone()
     }
@@ -728,7 +604,6 @@ mod tests {
     fn workspace_context_reports_runtime_and_remoteness() {
         use crate::config::{RemoteConfig, WsConfig};
 
-        // Default runtime, local workspace.
         let local = WsConfig::default();
         let ctx = workspace_context(&local);
         assert!(ctx.contains(&("WS_RUNTIME".to_string(), "podman".to_string())), "{ctx:?}");
@@ -736,7 +611,6 @@ mod tests {
         // Always present, so a hook can test it without an unset-variable guard.
         assert!(ctx.contains(&("WS_CONNECTION".to_string(), String::new())), "{ctx:?}");
 
-        // Explicit runtime + a remote block flips both.
         let remote = WsConfig {
             runtime: Some("docker".to_string()),
             remote: Some(RemoteConfig::new("srv".to_string(), None)),
@@ -751,12 +625,9 @@ mod tests {
 
     #[test]
     fn a_bare_name_compose_repo_gets_a_namespaced_compose_project() {
-        // A bare-name entry (`{"repos":["api"]}`) whose worktree has a compose
-        // file still runs the compose lifecycle (`is_container_repo` infers it, so
-        // `hooks::resolve` hands back `<runtime> compose up -d`). It must therefore
-        // get `COMPOSE_PROJECT_NAME`: without it compose falls back to the worktree
-        // dir's basename `api`, the same for every branch, and the second
-        // worktree's `up` adopts the first's containers/network/volumes.
+        // A bare-name entry whose worktree has a compose file still runs the
+        // compose lifecycle, so it must get `COMPOSE_PROJECT_NAME` — otherwise the
+        // second worktree's `up` adopts the first's containers and volumes.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let wt = root.join(".worktrees/feat-a/api");
@@ -764,22 +635,21 @@ mod tests {
         std::fs::write(wt.join("docker-compose.yml"), "services: {}\n").unwrap();
 
         let cfg: WsConfig = serde_json::from_str(r#"{"repos":["api"]}"#).unwrap();
-        // Inspect: no derive, no allocation, no runtime call — the project name is
-        // set on every phase, so this exercises the fix without a container runtime.
+        // Inspect needs no container runtime, and the project name is set on every
+        // phase, so this covers the case without one.
         let env = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "api", Phase::Inspect).unwrap();
         let proj = env.iter().find(|(k, _)| k == "COMPOSE_PROJECT_NAME").map(|(_, v)| v.as_str());
         assert_eq!(proj, Some("feat-a-api"), "bare-name compose repo must be namespaced: {env:?}");
 
-        // A name that isn't a repo here still gets only the workspace context.
         let none = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "nope", Phase::Inspect).unwrap();
         assert!(!none.iter().any(|(k, _)| k == "COMPOSE_PROJECT_NAME"), "{none:?}");
     }
 
     #[test]
     fn a_bare_name_repo_routes_its_recorded_services() {
-        // Same rule on the routing side: `prepare` hands a bare-name repo's HTTP
-        // services a `WS_HOST_*`, so `routes` must produce the Caddy route that
-        // hostname resolves to — otherwise the injected host is a dead name.
+        // `prepare` hands a bare-name repo's HTTP services a `WS_HOST_*`, so
+        // `routes` must produce the matching Caddy route or the injected hostname
+        // is a dead name.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let cfg: WsConfig =
@@ -830,10 +700,9 @@ mod tests {
         )
         .unwrap();
 
-        // Read-only phase: use the recorded port, allocate nothing.
         let pv = peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Inspect).unwrap();
         assert_eq!(pv.get("WS_PORT_app.web").map(String::as_str), Some("20008"));
-        // The app's web service isn't routed, so it exposes no host var.
+        // No `domain` in this config, so nothing is routed and no host var exists.
         assert!(!pv.contains_key("WS_HOST_app.web"));
     }
 
@@ -854,9 +723,8 @@ mod tests {
 
     #[test]
     fn peer_vars_pre_allocates_an_unbuilt_peer_on_an_allocating_phase() {
-        // The point of the feature: `ws up api` (Activate) must resolve
-        // `${WS_PORT_app.web}` even though the app worktree doesn't exist — by
-        // reserving app's port. The reservation persists so app reuses it later.
+        // The point of the feature: `ws up api` must resolve `${WS_PORT_app.web}`
+        // even though the app worktree doesn't exist yet.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let cfg: WsConfig = serde_json::from_str(
@@ -877,8 +745,6 @@ mod tests {
 
     #[test]
     fn route_specs_container_upstreams_and_http_filter() {
-        // web (HTTP 80) + admin (HTTP 8080) + mysql (raw-TCP) — only the HTTP
-        // ones route, each dialing its project-qualified container name.
         let services = services(&repo_with(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("admin", svc(Some(HttpDecl::Enabled(true)), 8080)),
@@ -902,8 +768,8 @@ mod tests {
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 8080)),
             ("api", svc(Some(HttpDecl::Enabled(true)), 9000)),
         ]));
-        // Host repo: upstream is the allocated port via host.containers.internal.
-        // Only `web` has an allocation → `api` (no port) is dropped.
+        // Only `web` has an allocation, so `api` is dropped rather than routed to
+        // a port it never got.
         let ports = [("web".to_string(), 20001u16)].into_iter().collect();
         let specs = route_specs(&services, &ports, true, "", "feat-x", "svc", "myapp.test");
         assert_eq!(specs.len(), 1);
@@ -914,9 +780,8 @@ mod tests {
 
     #[test]
     fn a_wildcard_service_carries_the_flag_into_its_route_spec() {
-        // A multi-tenant host service (e.g. the Vue app): `<tenant>.<host>` routes
-        // to it for any tenant. The base hostname is the usual `<branch>.<sub>.<domain>`;
-        // the wildcard flag is what tells Caddy to also match every tenant label.
+        // A multi-tenant service keeps the ordinary base hostname; the flag is what
+        // tells Caddy to also match every tenant label in front of it.
         let mut app = svc(Some(HttpDecl::Subdomain("app".into())), 3000);
         app.wildcard = true;
         let services = services(&repo_with(&[("app", app)]));
@@ -929,9 +794,8 @@ mod tests {
 
     #[test]
     fn wildcard_on_a_raw_tcp_service_yields_no_route() {
-        // `wildcard` is HTTP-only: a raw-TCP service gets an allocated port, not a
-        // hostname, so the flag is a silent no-op (no route at all) — never a
-        // hostname-less or bogus route.
+        // `wildcard` is HTTP-only: on a raw-TCP service it must be a silent no-op,
+        // never a hostname-less or bogus route.
         let mut db = svc(None, 5432);
         db.wildcard = true;
         let services = services(&repo_with(&[("db", db)]));
@@ -941,9 +805,8 @@ mod tests {
 
     #[test]
     fn a_dotted_branch_collapses_to_one_hostname_label() {
-        // A dotted branch (`v2.1`) must not add extra hostname labels: with a
-        // wildcard route it would otherwise let a sibling branch's `*.` suffix-
-        // capture this worktree's traffic.
+        // Extra hostname labels would let a sibling branch's wildcard route
+        // suffix-capture this worktree's traffic.
         assert_eq!(ws_host("v2.1", "web", "myapp.test"), "v2-1.web.myapp.test");
         assert_eq!(ws_host("release-1.2", "a.b", "d.test"), "release-1-2.a-b.d.test");
     }
@@ -979,7 +842,7 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert("mysql".to_string(), 54321u16);
 
-        // container repo (host = false): HTTP services get no WS_PORT.
+        // Container repo: HTTP services get no WS_PORT.
         let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_HOST_admin"], "feat-x.admin.myapp.test");
@@ -992,7 +855,7 @@ mod tests {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 8080))]);
         let mut ports = BTreeMap::new();
         ports.insert("app".to_string(), 20001u16);
-        // host = true: an HTTP service gets WS_HOST *and* the port to bind.
+        // Host repo: an HTTP service gets WS_HOST *and* the port to bind.
         let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, true);
         assert_eq!(vars["WS_HOST_app"], "feat-x.api.myapp.test");
         assert_eq!(vars["WS_PORT_app"], "20001");
@@ -1000,8 +863,8 @@ mod tests {
 
     #[test]
     fn ws_vars_container_http_ignores_stale_port() {
-        // A now-HTTP service with a lingering .ws-meta port must NOT leak WS_PORT
-        // on a container repo (host = false).
+        // A now-HTTP service with a lingering `.ws-meta` port must not leak
+        // WS_PORT on a container repo.
         let rc = repo_with(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
         let mut ports = BTreeMap::new();
         ports.insert("web".to_string(), 20001u16); // stale allocation from a raw-TCP era
@@ -1018,9 +881,9 @@ mod tests {
 
     #[test]
     fn override_path_at_is_absolute_for_a_relative_remote_base() {
-        // A remote workspace with the default (home-relative) workspace_path must
-        // produce an ABSOLUTE server override path, else `COMPOSE_FILE` would
-        // double-resolve under the `cd`'d worktree and the remote `up` would fail.
+        // A home-relative `workspace_path` must still yield an absolute server
+        // override path, else `COMPOSE_FILE` double-resolves under the `cd`'d
+        // worktree and the remote `up` fails.
         let cfg = WsConfig {
             remote: Some(crate::config::RemoteConfig::new("srv".into(), Some("myapp".into()))),
             ..Default::default()
@@ -1029,7 +892,6 @@ mod tests {
         let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
         assert_eq!(p, "/home/u/myapp/.ws-meta/feat-x-api.override.yml");
 
-        // Local: under the host `.ws-meta`, unchanged.
         let local = WsConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
         assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
@@ -1037,19 +899,17 @@ mod tests {
 
     #[test]
     fn template_paths_must_stay_inside_the_worktree() {
-        // `templates` is attacker-controlled config (`.ws.json` ships with a
-        // clone), and both fields are joined onto the worktree. Every escape
-        // shape is refused; ordinary relative paths are not.
+        // `templates` is attacker-controlled config, and both fields are joined
+        // onto the worktree. Every escape shape is refused; ordinary relative
+        // paths are not.
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("wt");
         std::fs::create_dir_all(wt.join("deploy")).unwrap();
 
-        // Ordinary config keeps working: a plain name, a nested dest, a `./` prefix.
         for ok in ["svc.conf", "deploy/nginx.conf", "./config/generated/svc.conf"] {
             ensure_within_worktree(&wt, "dest", ok).unwrap_or_else(|e| panic!("`{ok}` refused: {e}"));
         }
 
-        // Traversal, in the middle as well as at the front.
         let err = ensure_within_worktree(&wt, "dest", "../../../pwned.txt").unwrap_err().to_string();
         assert!(err.contains("must not contain `..`"), "{err}");
         assert!(ensure_within_worktree(&wt, "src", "deploy/../../escape").is_err());
