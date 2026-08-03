@@ -266,17 +266,7 @@ pub fn ensure_connection_safe(connection: &str) -> anyhow::Result<()> {
 /// config time rather than at first `ws new`. A passphrase-protected key with no
 /// agent reads as unreachable — that is what `--no-verify` is for.
 pub fn reachable(connection: &str) -> bool {
-    if !connection_looks_safe(connection) {
-        return false; // defense-in-depth: never hand ssh an option-shaped host
-    }
-    ssh_fast(connection)
-        .arg("true")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    ssh_capture(connection, "true").is_some()
 }
 
 /// The address a **client** can reach the offload server at, derived from the SSH

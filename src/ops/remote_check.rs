@@ -44,7 +44,10 @@ fn check_remote(connection: &str, workspace_path: &str, domain: Option<&str>, ve
     let mut all_ok = ssh.ok;
 
     let mg = probe::mutagen_local();
-    render(&mg, verbose);
+    crate::ui::status_line(mg.ok, mg.name, &mg.detail);
+    if verbose {
+        crate::ui::command_block(&["mutagen version".to_string()]);
+    }
     all_ok &= mg.ok;
 
     match server {
@@ -56,7 +59,7 @@ fn check_remote(connection: &str, workspace_path: &str, domain: Option<&str>, ve
                 )]);
             }
             for p in &probes {
-                render(p, verbose);
+                crate::ui::status_line(p.ok, p.name, &p.detail);
                 all_ok &= p.ok;
             }
         }
@@ -122,11 +125,3 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn render(p: &probe::Probe, verbose: bool) {
-    crate::ui::status_line(p.ok, p.name, &p.detail);
-    if verbose {
-        if let Some(cmd) = &p.cmd {
-            crate::ui::command_block(&[cmd.clone()]);
-        }
-    }
-}

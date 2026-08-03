@@ -10,16 +10,11 @@ pub struct Probe {
     pub name: &'static str,
     pub ok: bool,
     pub detail: String,
-    pub cmd: Option<String>,
 }
 
 impl Probe {
-    fn new(name: &'static str, ok: bool, detail: impl Into<String>, cmd: impl Into<String>) -> Self {
-        Probe { name, ok, detail: detail.into(), cmd: Some(cmd.into()) }
-    }
-    /// No `cmd`: the batched server script is displayed once, not per probe.
-    fn server(name: &'static str, ok: bool, detail: impl Into<String>) -> Self {
-        Probe { name, ok, detail: detail.into(), cmd: None }
+    fn new(name: &'static str, ok: bool, detail: impl Into<String>) -> Self {
+        Probe { name, ok, detail: detail.into() }
     }
 }
 
@@ -35,14 +30,7 @@ pub fn ssh_status(connection: &str, ok: bool) -> Probe {
         } else {
             format!("cannot open an SSH session to {connection} (host / key / Tailscale?)")
         },
-        format!("ssh -o BatchMode=yes {connection} true"),
     )
-}
-
-/// The standalone form, for `ws init --remote`'s light check — it does no server
-/// probing, so it has no verdict to reuse.
-pub fn ssh_reachable(connection: &str) -> Probe {
-    ssh_status(connection, remote::reachable(connection))
 }
 
 pub fn mutagen_local() -> Probe {
@@ -51,7 +39,6 @@ pub fn mutagen_local() -> Probe {
         "mutagen",
         ok,
         if ok { "installed locally" } else { "not on PATH — needed to sync a remote workspace" },
-        "mutagen version",
     )
 }
 
@@ -127,11 +114,11 @@ pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str
     let verdict = |key: &str| results.get(key).copied().unwrap_or(false);
     let mut probes: Vec<Probe> = SERVER_CHECKS
         .iter()
-        .map(|(key, desc)| Probe::server(key, verdict(key), *desc))
+        .map(|(key, desc)| Probe::new(key, verdict(key), *desc))
         .collect();
     if let Some(d) = domain {
         let ok = verdict(DNS_CHECK);
-        probes.push(Probe::server(DNS_CHECK, ok, dns_detail(d, ok)));
+        probes.push(Probe::new(DNS_CHECK, ok, dns_detail(d, ok)));
     }
     Some(probes)
 }

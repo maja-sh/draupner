@@ -70,7 +70,7 @@ pub(crate) fn verify_remote_client(
         return Ok(());
     }
     let step = crate::ui::step("cfg", "remote reachable");
-    match verify_probes(r) {
+    match client_ready(r) {
         Ok(()) => {
             step.ok();
             Ok(())
@@ -82,14 +82,14 @@ pub(crate) fn verify_remote_client(
     }
 }
 
-fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
-    if !crate::probe::mutagen_local().ok {
+fn client_ready(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
+    if !crate::mutagen::installed() {
         return Err(preflight(
             "mutagen isn't installed — a remote workspace needs it locally to sync. \
              Install mutagen, or pass `--no-verify` to configure anyway.",
         ));
     }
-    if !crate::probe::ssh_reachable(&r.connection).ok {
+    if !crate::remote::reachable(&r.connection) {
         return Err(preflight(format!(
             "can't reach `{}` over SSH — fix the connection (host/key/Tailscale), \
              or pass `--no-verify` to configure anyway.",
