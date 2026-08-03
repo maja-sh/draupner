@@ -22,8 +22,9 @@ const SERVER: &str = "ws";
 /// suffix-free browser URLs and costs the `net.ipv4.ip_unprivileged_port_start`
 /// sysctl, so it's an opt-in (`ws setup --port 443`).
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
-/// Mount point inside the Caddy container for the bind-mounted `config_dir()`,
-/// which holds the pinned boot config (`caddy.json`).
+/// Mount point inside the Caddy container for the bind-mounted machine-global
+/// config dir ([`crate::settings::global_dir`]), holding the pinned boot config
+/// (`caddy.json`).
 const SOCK_MOUNT: &str = "/sock";
 /// 2019 is *Caddy's* default, not a port `ws` picked — so a box already running
 /// its own Caddy holds it, and the collision is likely rather than unlucky.
@@ -73,7 +74,7 @@ fn persisted_port(env: &str, file: &str, default: u16) -> u16 {
         .and_then(|v| v.trim().parse().ok())
         .and_then(nonzero)
         .or_else(|| {
-            std::fs::read_to_string(config_dir().join(file))
+            std::fs::read_to_string(crate::settings::global_dir().join(file))
                 .ok()
                 .and_then(|s| s.trim().parse().ok())
                 .and_then(nonzero)
@@ -131,7 +132,7 @@ fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
 /// Write one of the persisted ports [`persisted_port`] reads back. The trailing
 /// newline keeps the file hand-editable.
 fn set_persisted_port(file: &str, port: u16) -> Result<()> {
-    let dir = config_dir();
+    let dir = crate::settings::global_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join(file), format!("{port}\n"))
         .with_context(|| format!("persist {file}"))
@@ -218,7 +219,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         return Ok(());
     }
     let wanted = https_port();
-    if container_running(site, runtime, CADDY_CONTAINER) {
+    if container_running(site, runtime) {
         // A running Caddy is left alone unless its live port or publish address
         // disagrees with what's wanted. The comparison is against what Caddy is
         // *actually* serving rather than a recorded marker, so a routine `ws up`
@@ -289,12 +290,12 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     }
     // The run failed: either a peer already started it (name taken, now running →
     // done) or a stale *stopped* container holds the name.
-    if container_running(site, runtime, CADDY_CONTAINER) {
+    if container_running(site, runtime) {
         return wait_admin_ready(site);
     }
     let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
     let reason = run_caddy(site, runtime, &dir, publish_addr);
-    if reason.is_none() || container_running(site, runtime, CADDY_CONTAINER) {
+    if reason.is_none() || container_running(site, runtime) {
         return wait_admin_ready(site);
     }
     // Surface the real reason: the container never started, so
@@ -576,7 +577,7 @@ fn answer_ok(got: &std::net::IpAddr, expected: Option<std::net::IpAddr>, want_lo
 /// Externally-managed mode reports `true`: a BYO admin is "up" as far as `ws` is
 /// concerned.
 pub fn is_running(site: &Site, runtime: &str) -> bool {
-    externally_managed() || container_running(site, runtime, CADDY_CONTAINER)
+    externally_managed() || container_running(site, runtime)
 }
 
 /// Fetch Caddy's internal root CA certificate (PEM), for the setup step that
@@ -602,7 +603,7 @@ pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     // Fetched from `site`, but written to the HOST config dir — the CA is trusted
     // in the *client's* store regardless of where the stack runs.
     let pem = root_ca_pem(site)?;
-    let dir = config_dir();
+    let dir = crate::settings::global_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("ws-caddy-root.crt");
     std::fs::write(&path, pem).with_context(|| format!("write {}", path.display()))?;
@@ -614,39 +615,29 @@ pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn container_running(site: &Site, runtime: &str, name: &str) -> bool {
-    site.command(&[runtime, "container", "inspect", "-f", "{{.State.Running}}", name])
+fn container_running(site: &Site, runtime: &str) -> bool {
+    site.command(&[runtime, "container", "inspect", "-f", "{{.State.Running}}", CADDY_CONTAINER])
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
-/// Machine-global, not per workspace — one Caddy serves every workspace on the box.
-fn config_dir() -> PathBuf {
-    crate::settings::global_dir()
-}
-
-/// The config dir at `site`, as an **absolute** path: it is the bind-mount source
-/// for the Caddy container, and the runtime rejects a relative one (which is what
-/// `config_dir()` yields under an unset HOME).
-fn config_dir_at(site: &Site) -> PathBuf {
-    match site {
+/// Write the pinned boot config at `site` and return the dir mounted into the
+/// container. The dir must be **absolute**: it is the bind-mount source for the
+/// Caddy container, and the runtime rejects a relative one (which is what
+/// `global_dir()` yields under an unset HOME).
+fn write_boot_config(site: &Site) -> Result<String> {
+    let dir: PathBuf = match site {
         Site::Local => {
-            let dir = config_dir();
+            let dir = crate::settings::global_dir();
             std::fs::create_dir_all(&dir).ok();
             std::fs::canonicalize(&dir).unwrap_or(dir)
         }
         Site::Remote { .. } => {
             PathBuf::from(site.home_path(".config/ws").expect("remote site carries a home"))
         }
-    }
-}
-
-
-/// Write the pinned boot config at `site` and return the dir mounted into the
-/// container.
-fn write_boot_config(site: &Site) -> Result<String> {
-    let dir = config_dir_at(site).to_string_lossy().into_owned();
+    };
+    let dir = dir.to_string_lossy().into_owned();
     let json = serde_json::to_string_pretty(&boot_config())? + "\n";
     site.write_file(&format!("{dir}/caddy.json"), &json)?;
     Ok(dir)
@@ -735,24 +726,19 @@ fn route(id: &str, hostname: &str, upstream: &str, wildcard: bool) -> serde_json
 /// the new one lands at index 0 so it wins over the catch-all. Order among
 /// worktree routes is irrelevant — each has a distinct host match.
 pub fn route_up(site: &Site, spec: &RouteSpec) -> Result<()> {
-    delete_id(site, &spec.id);
+    route_down(site, &spec.id);
     let body = route(&spec.id, &spec.hostname, &spec.upstream, spec.wildcard).to_string();
     let out = curl(
         site,
         &["-X", "PUT", "-H", "Content-Type: application/json", "-d", &body],
         &format!("/config/apps/http/servers/{SERVER}/routes/0"),
     )?;
-    check(&out, || format!("add route {}", spec.id))
+    check(&out, &format!("add route {}", spec.id))
 }
 
 /// Infallible by design: teardown must survive a missing route or an unreachable
-/// Caddy.
+/// Caddy. A 404 is expected on a first up or a double down.
 pub fn route_down(site: &Site, id: &str) {
-    delete_id(site, id);
-}
-
-fn delete_id(site: &Site, id: &str) {
-    // A 404 is expected on a first up or a double down.
     let _ = curl(site, &["-X", "DELETE"], &format!("/id/{id}/"));
 }
 
@@ -792,12 +778,12 @@ impl CurlOut {
     }
 }
 
-fn check(out: &CurlOut, what: impl FnOnce() -> String) -> Result<()> {
+fn check(out: &CurlOut, what: &str) -> Result<()> {
     if out.succeeded() {
         return Ok(());
     }
     let detail = if !out.body.is_empty() { &out.body } else { &out.stderr };
-    bail!("{}: HTTP {} {}", what(), out.code, detail.trim());
+    bail!("{what}: HTTP {} {}", out.code, detail.trim());
 }
 
 #[cfg(test)]
