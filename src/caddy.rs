@@ -623,7 +623,7 @@ fn container_running(site: &Site, runtime: &str, name: &str) -> bool {
 
 /// Machine-global, not per workspace — one Caddy serves every workspace on the box.
 fn config_dir() -> PathBuf {
-    crate::config::global_dir()
+    crate::settings::global_dir()
 }
 
 /// The config dir at `site`, as an **absolute** path: it is the bind-mount source

@@ -47,7 +47,7 @@ pub(crate) fn default_remote_host() -> Option<String> {
     if let Some(h) = std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
         return Some(h);
     }
-    match crate::config::GlobalConfig::load() {
+    match crate::settings::GlobalConfig::load() {
         // An empty host counts as unset: the caller's "needs a host" guidance
         // beats an "unsafe host" refusal.
         Ok(g) => g.remote_host().filter(|h| !h.is_empty()).map(String::from),

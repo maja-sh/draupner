@@ -12,6 +12,7 @@ mod ops;
 mod ports;
 mod probe;
 mod remote;
+mod settings;
 mod setup;
 mod signal;
 mod skills;

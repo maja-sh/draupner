@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::config::GlobalConfig;
+use crate::settings::GlobalConfig;
 
 pub fn get(key: &str) -> Result<()> {
     let cfg = GlobalConfig::load()?;
