@@ -143,15 +143,21 @@ impl WorkspaceFixture {
     }
 
     pub fn git(&self, repo_rel: &str, args: &[&str]) {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(self.path().join(repo_rel));
-        git_env(&mut cmd);
-        let out = cmd.output().expect("git");
+        let out = self.git_out(repo_rel, args);
         assert!(
             out.status.success(),
             "git {args:?} in {repo_rel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Like `git`, but hands back the output instead of asserting success — for
+    /// tests that read git's own view of a repo rather than driving it.
+    pub fn git_out(&self, repo_rel: &str, args: &[&str]) -> Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(self.path().join(repo_rel));
+        git_env(&mut cmd);
+        cmd.output().expect("git")
     }
 
     /// A real bare `origin` with `main` pushed and tracked, so upstream-aware

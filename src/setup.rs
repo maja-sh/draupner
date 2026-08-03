@@ -181,7 +181,7 @@ pub fn run(
     if !report.privileged_gaps() {
         crate::ui::summary_ok(&[format!(
             "routing is ready — reach a worktree at https://<branch>.<svc>.{domain}{}",
-            port_suffix(report.port)
+            crate::caddy::port_suffix(report.port)
         )]);
         return Ok(());
     }
@@ -541,13 +541,6 @@ fn linux_client_commands(domain: &str, address: &str) -> Vec<String> {
     cmds
 }
 
-fn port_suffix(port: u16) -> String {
-    if port == 443 {
-        String::new()
-    } else {
-        format!(":{port}")
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -683,12 +676,6 @@ mod tests {
         // construction; the absent case must be a clean `false`, not a panic.
         assert!(which("sh"));
         assert!(!which("ws-no-such-binary-exists-here"));
-    }
-
-    #[test]
-    fn port_suffix_is_empty_only_for_443() {
-        assert_eq!(port_suffix(443), "");
-        assert_eq!(port_suffix(8443), ":8443");
     }
 
     #[test]

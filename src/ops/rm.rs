@@ -10,15 +10,15 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let cfg = config::load(&ws.root)?;
 
     // Enumerate from git rather than scanning the task dir: a directory under
-    // `.worktrees/<task>/` need not be a worktree at all, and tearing one down
-    // fails half-way through the loop, leaving the branch unremovable. The
-    // `is_dir` filter drops registrations whose directory is already gone —
-    // `git worktree remove` fails on those, and pruning them is not `ws rm`'s job.
+    // `.worktrees/<task>/` need not be a worktree at all, and a stale
+    // registration has no directory for a filesystem scan to find — `rm` must
+    // reach everything `ws list` shows. Matching the reported branch OR the
+    // task dir name catches a detached worktree, which has no branch to match.
     let known = workspace::worktrees(&ws.root, &cfg);
     let task = workspace::sanitize_branch(branch);
     let worktrees: Vec<(String, PathBuf)> = known
         .iter()
-        .filter(|w| w.task.as_deref() == Some(task.as_str()) && w.path.is_dir())
+        .filter(|w| w.branch.as_deref() == Some(branch) || w.task.as_deref() == Some(task.as_str()))
         .map(|w| (w.repo.clone(), w.path.clone()))
         .collect();
 

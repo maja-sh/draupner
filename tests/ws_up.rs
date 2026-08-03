@@ -176,8 +176,14 @@ fn up_succeeds_and_routes_when_caddy_is_reachable() {
     );
     f.run_ok(&["new", "api", "feat/route"]);
 
-    let err = stderr(&f.run_ok(&["up", "feat/route"]));
-    assert!(err.contains("feat-route.web.myapp.test"), "expected the routed hostname in:\n{err}");
+    // Pinned so this doesn't depend on the machine's opted-in HTTPS port.
+    let out = f.run_with_env(&["up", "feat/route"], &[("WS_HTTPS_PORT", "8443")]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "up failed:\n{err}");
+    assert!(
+        err.contains("feat-route.web.myapp.test:8443"),
+        "the routed line must carry the port:\n{err}"
+    );
 }
 
 // No HTTP service ⇒ no route and no host publish dropped, so a raw-TCP stack in
