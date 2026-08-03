@@ -52,7 +52,7 @@ pub fn base_files(worktree: &Path) -> Vec<PathBuf> {
 /// `sanitize_branch` only strips slashes — so an uppercase or dotted branch
 /// (`Feat/JIRA-1.2`) would otherwise break `up` *and* `down`.
 pub fn project_name(branch_sanitized: &str, repo: &str) -> String {
-    let mut s: String = format!("{branch_sanitized}-{repo}")
+    let s: String = format!("{branch_sanitized}-{repo}")
         .chars()
         .map(|c| match c {
             'a'..='z' | '0'..='9' | '_' | '-' => c,
@@ -60,9 +60,8 @@ pub fn project_name(branch_sanitized: &str, repo: &str) -> String {
             _ => '-',
         })
         .collect();
-    let start = s.find(|c: char| c.is_ascii_alphanumeric()).unwrap_or(s.len());
-    s.drain(..start);
-    if s.is_empty() { "ws".to_string() } else { s }
+    let s = s.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    if s.is_empty() { "ws".to_string() } else { s.to_string() }
 }
 
 /// Returns `true` when a file was written, so the caller adds it to

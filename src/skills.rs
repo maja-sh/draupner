@@ -14,10 +14,10 @@ const SKILLS: &[(&str, &str)] = &[
 ];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
-    fs::create_dir_all(target_root)
-        .with_context(|| format!("create {}", target_root.display()))?;
     let mut written = Vec::with_capacity(SKILLS.len());
     for (name, body) in SKILLS {
+        // Also creates `target_root` itself — create_dir_all makes every
+        // missing ancestor.
         let dir = target_root.join(name);
         fs::create_dir_all(&dir)
             .with_context(|| format!("create {}", dir.display()))?;

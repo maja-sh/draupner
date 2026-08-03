@@ -603,13 +603,7 @@ fn default_route_iface() -> Option<String> {
 }
 
 fn parse_route_iface(text: &str) -> Option<String> {
-    let mut toks = text.split_whitespace();
-    while let Some(t) = toks.next() {
-        if t == "dev" {
-            return toks.next().map(str::to_string).filter(|s| !s.is_empty());
-        }
-    }
-    None
+    text.split_whitespace().skip_while(|t| *t != "dev").nth(1).map(str::to_string)
 }
 
 /// Searches `/usr/sbin` and `/sbin` as well as `PATH`: both tools this looks for

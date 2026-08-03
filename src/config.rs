@@ -278,13 +278,12 @@ pub struct ServiceConfig {
 }
 
 impl RepoConfig {
-    /// `has_compose` is a closure so the filesystem is only touched when `kind`
-    /// is absent.
-    pub fn is_container(&self, has_compose: impl FnOnce() -> bool) -> bool {
+    /// The filesystem is only consulted when `kind` is absent.
+    pub fn is_container(&self, worktree: &Path) -> bool {
         match self.kind {
             Some(RepoKind::Container) => true,
             Some(RepoKind::Host) => false,
-            None => has_compose(),
+            None => crate::compose::has_compose_file(worktree),
         }
     }
 
@@ -374,10 +373,9 @@ impl WsConfig {
     /// A repo with no entry at all still gets the compose-file inference, so an
     /// op pointed at an unlisted repo behaves like one listed with no `kind`.
     pub fn is_container_repo(&self, repo: &str, worktree: &Path) -> bool {
-        let has = || crate::compose::has_compose_file(worktree);
         match self.repo_config(repo) {
-            Some(rc) => rc.is_container(has),
-            None => has(),
+            Some(rc) => rc.is_container(worktree),
+            None => crate::compose::has_compose_file(worktree),
         }
     }
 

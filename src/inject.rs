@@ -113,7 +113,7 @@ pub fn prepare(
     let mut env: Vec<(String, String)> = vars.into_iter().collect();
     env.extend(declared.iter().cloned());
 
-    if !host && rc.is_container(|| compose::has_compose_file(worktree)) {
+    if !host && rc.is_container(worktree) {
         env.extend(compose::env_for(
             cfg, site, root, worktree, &site_worktree, branch_sanitized, repo, &services,
             &all_services, &port_map, &declared, phase.activating(),
@@ -250,7 +250,7 @@ fn effective_services(
     repo: &str,
     rc: &RepoConfig,
 ) -> Result<(BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>)> {
-    if rc.is_container(|| compose::has_compose_file(local_worktree)) {
+    if rc.is_container(local_worktree) {
         match compose::derive(site, cfg.runtime(), site_worktree) {
             Ok(d) => {
                 let mut services = d.services;
