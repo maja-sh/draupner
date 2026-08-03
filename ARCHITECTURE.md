@@ -411,10 +411,6 @@ comment above it.
   worktree's routes.
 - **`hooks::refuse_legacy_hook_file`** is a migration shim, marked for deletion a
   release after 0.6, together with its tests. It can never produce a command.
-- **`compose.rs:render_override`'s doc still says `join_ws_net` is false for
-  "no `domain` / remote".** The remote half is stale — `routing_active()` is now
-  just `domain.is_some()`, and an offloaded workspace with a domain takes the
-  joined path. Trust the code.
 
 ---
 
