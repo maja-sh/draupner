@@ -188,7 +188,7 @@ Then, per repo:
    - Container ⇒ `COMPOSE_PROJECT_NAME = compose::project_name(...)` on every
      phase, and on an activating phase **`compose::write_override`** renders
      `.ws-meta/feat-checkout-api.override.yml` via `Site::write_file`: HTTP
-     services get `ports: !reset []` and join `ws-net`, raw-TCP services get
+     services get `ports: !override []` and join `ws-net`, raw-TCP services get
      `ports: !override` with the allocated host port, declared `env` becomes
      `environment:`. If a file was written, `COMPOSE_FILE=<base>:<override>`.
 
@@ -208,7 +208,7 @@ Then, per repo:
     other worktree.
 
     A failed route ⇒ **`SweepResult::demote`** moves the repo from `ran` to
-    `failed`. That is not pedantry: the override `!reset` away the host publish,
+    `failed`. That is not pedantry: the override dropped the host publish,
     so Caddy is the only path in, so a container without its route is not up.
 
 12. **`sweep_host`** (the `kind: host` branch of step 7) is the same story with a

@@ -140,7 +140,7 @@ fn hook_streaming_stdout_and_stderr() {
     assert!(err.contains("api-up"), "expected hook tag in:\n{err}");
 }
 
-// An HTTP service's host publish is `!reset` away in the override, so it is
+// An HTTP service's host publish is dropped in the override, so it is
 // reachable only via its Caddy route — a route that won't install means a
 // running-but-unreachable stack, which must not report success.
 #[test]

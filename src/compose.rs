@@ -90,12 +90,6 @@ pub fn write_override(
     }
 }
 
-/// A service absent from the `ports` map keeps its committed `ports:` untouched.
-enum PortsDirective {
-    Reset,
-    Override(Vec<(u16, u16)>),
-}
-
 #[derive(Default)]
 struct ServicePlan {
     is_http: bool,
@@ -129,22 +123,20 @@ fn render_override(
         }
     }
 
-    let mut ports: BTreeMap<String, PortsDirective> = BTreeMap::new();
+    // A service absent from the `ports` map keeps its committed `ports:`
+    // untouched. A present, empty list drops the publish entirely (a routed HTTP
+    // service reaches Caddy over `ws-net` and needs no host port).
+    let mut ports: BTreeMap<String, Vec<(u16, u16)>> = BTreeMap::new();
     let mut join: BTreeSet<String> = BTreeSet::new();
     for (name, plan) in &plans {
         if plan.is_http && join_ws_net {
             join.insert(name.clone());
-            let directive = if plan.reissue.is_empty() {
-                PortsDirective::Reset
-            } else {
-                PortsDirective::Override(plan.reissue.clone())
-            };
-            ports.insert(name.clone(), directive);
+            ports.insert(name.clone(), plan.reissue.clone());
         } else if plan.is_http {
             // Deliberately empty: with no Caddy to route them, HTTP (and mixed
             // HTTP+raw) services must keep publishing or they're unreachable.
         } else if !plan.reissue.is_empty() {
-            ports.insert(name.clone(), PortsDirective::Override(plan.reissue.clone()));
+            ports.insert(name.clone(), plan.reissue.clone());
         }
     }
 
@@ -165,8 +157,8 @@ fn render_override(
     for name in &names {
         out.push_str(&format!("  {}:\n", yaml_key(name)));
         match ports.get(name) {
-            Some(PortsDirective::Reset) => out.push_str("    ports: !reset []\n"),
-            Some(PortsDirective::Override(list)) => {
+            Some(list) if list.is_empty() => out.push_str("    ports: !override []\n"),
+            Some(list) => {
                 out.push_str("    ports: !override\n");
                 for (host, internal) in list {
                     out.push_str(&format!("      - \"{host}:{internal}\"\n"));
@@ -686,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn join_ws_net_resets_http_publish_and_declares_external_network() {
+    fn join_ws_net_drops_http_publish_and_declares_external_network() {
         let services = map(&[
             ("web", svc(Some(HttpDecl::Subdomain("web".into())), 80)),
             ("db", svc(None, 3306)),
@@ -700,7 +692,7 @@ mod tests {
 
         let on = render_override(&services, &names(&services), &ports, &[], true).unwrap();
         assert!(
-            on.contains("  web:\n    ports: !reset []\n    networks:\n      - default\n      - ws-net\n"),
+            on.contains("  web:\n    ports: !override []\n    networks:\n      - default\n      - ws-net\n"),
             "web must reset its publish and join ws-net:\n{on}"
         );
         assert!(on.contains("  db:\n    ports: !override\n"), "db still reissued:\n{on}");
@@ -724,7 +716,10 @@ mod tests {
             on.contains("  web:\n    ports: !override\n      - \"20005:9000\"\n    networks:"),
             "mixed service keeps only its raw port + joins ws-net:\n{on}"
         );
-        assert!(!on.contains("!reset"), "a mixed service uses !override, not !reset:\n{on}");
+        assert!(
+            on.contains("  web:\n    ports: !override\n      - \"20005:9000\""),
+            "a mixed service must keep its raw port:\n{on}"
+        );
     }
 
     #[test]

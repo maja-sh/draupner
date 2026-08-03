@@ -64,7 +64,7 @@ impl SweepResult {
         }
     }
 
-    /// A hook can succeed and the repo still not be up: the override `!reset`s
+    /// A hook can succeed and the repo still not be up: the override drops
     /// the host publish, so a container whose Caddy route failed to install is
     /// unreachable.
     fn demote(&mut self, repo: &str) {
@@ -268,7 +268,7 @@ fn run_prepare(
 }
 
 /// The hook paths only: a container's HTTP services are reachable *only* through
-/// Caddy (the override `!reset`s their host publish), so a route that won't
+/// Caddy (the override drops their host publish), so a route that won't
 /// install means an unreachable container and the repo is demoted. A host repo
 /// keeps its bound `WS_PORT`, so `sweep_host` routes best-effort instead.
 #[allow(clippy::too_many_arguments)]

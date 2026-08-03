@@ -191,13 +191,13 @@ fn container_override_deconflicts_raw_tcp_ports() {
     assert!(err_a.contains("PROJ=feat-a-api"), "project name not namespaced:\n{err_a}");
     assert!(err_b.contains("PROJ=feat-b-api"), "project name not namespaced:\n{err_b}");
 
-    // An HTTP service drops its host publish entirely (`!reset []`) — it is
+    // An HTTP service drops its host publish entirely (`!override []`) — it is
     // reachable only through Caddy on `ws-net`.
     let ov_a = read_override(&f, "feat-a-api");
     let ov_b = read_override(&f, "feat-b-api");
     assert!(ov_a.contains("db:") && ov_a.contains("ports: !override"), "no db override:\n{ov_a}");
     assert!(ov_a.contains("ws-net"), "HTTP web should join ws-net:\n{ov_a}");
-    assert!(ov_a.contains("web:\n    ports: !reset []"), "6.2b must !reset the HTTP publish:\n{ov_a}");
+    assert!(ov_a.contains("web:\n    ports: !override []"), "6.2b must drop the HTTP publish:\n{ov_a}");
     let a = override_port(&ov_a);
     let b = override_port(&ov_b);
     assert!((20000..40000).contains(&a), "db host port out of range ({a}):\n{ov_a}");
