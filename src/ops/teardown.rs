@@ -4,6 +4,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+use crate::compose;
 use crate::config::WsConfig;
 use crate::git;
 use crate::inject;
@@ -55,7 +56,7 @@ pub fn remove_task(
         // The local override is removed by `ports::forget` below; the server's
         // copy is not.
         if let Some(s @ Site::Remote { .. }) = site.as_ref() {
-            s.remove_file(&inject::override_path_at(cfg, s, root, &sanitized, repo));
+            s.remove_file(&compose::override_path_at(cfg, s, root, &sanitized, repo));
         }
 
         // Before `ports::forget` wipes the record the forwards are derived from.

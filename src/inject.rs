@@ -67,7 +67,9 @@ pub fn prepare(
     let context = workspace_context(cfg);
     let Some(rc) = cfg.repo_config(repo) else { return Ok(context) };
 
-    let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
+    // The remote form is absolute because it feeds `COMPOSE_FILE`, which a
+    // `cd`'d up script would otherwise double-resolve.
+    let site_worktree = site.worktree_at(cfg.remote.as_ref(), root, worktree, branch_sanitized, repo);
 
     let (services, all_services): (BTreeMap<String, ServiceConfig>, std::collections::BTreeSet<String>) =
         if phase.activating() {
@@ -112,15 +114,9 @@ pub fn prepare(
     env.extend(declared.iter().cloned());
 
     if !host && rc.is_container(|| compose::has_compose_file(worktree)) {
-        let project = compose::project_name(branch_sanitized, repo);
-        // Only join `ws-net` when routing is active: otherwise referencing the
-        // external network would just make `compose up` fail for nothing.
-        let join_ws_net = cfg.routing_active();
-        let base = base_files_at(worktree, &site_worktree);
-        let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
-        env.extend(compose_env(
-            site, &base, &override_path, &project, &services, &all_services, &port_map, &declared,
-            phase, join_ws_net,
+        env.extend(compose::env_for(
+            cfg, site, root, worktree, &site_worktree, branch_sanitized, repo, &services,
+            &all_services, &port_map, &declared, phase.activating(),
         )?);
     }
     env.extend(context);
@@ -182,88 +178,6 @@ fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
             cfg.remote.as_ref().map(|r| r.connection.clone()).unwrap_or_default(),
         ),
     ]
-}
-
-/// The worktree path at the execution site. The remote form is absolute because
-/// it feeds `COMPOSE_FILE`, which a `cd`'d up script would otherwise
-/// double-resolve.
-fn site_worktree_path(
-    cfg: &WsConfig,
-    site: &Site,
-    root: &Path,
-    worktree: &Path,
-    branch_sanitized: &str,
-    repo: &str,
-) -> String {
-    site.worktree_at(cfg.remote.as_ref(), root, worktree, branch_sanitized, repo)
-}
-
-/// The base compose file(s) as paths *at the site*: which files exist is decided
-/// from the local (synced) worktree, then each is re-homed under `site_worktree`.
-fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
-    let base = site_worktree.trim_end_matches('/');
-    compose::base_files(worktree)
-        .iter()
-        .filter_map(|p| p.file_name().map(|n| format!("{base}/{}", n.to_string_lossy())))
-        .collect()
-}
-
-/// The generated compose override's path at the execution site — remotely, a
-/// `.ws-meta` sibling of the server's synced worktrees, so it lives beside the
-/// stack it overrides and is torn down with it.
-pub(crate) fn override_path_at(
-    cfg: &WsConfig,
-    site: &Site,
-    root: &Path,
-    branch_sanitized: &str,
-    repo: &str,
-) -> String {
-    match &cfg.remote {
-        None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
-        // Home-resolved via the same owner as `site_worktree_path`, so the
-        // override can't land beside a different directory than the worktree it
-        // overrides.
-        Some(r) => format!(
-            "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
-            site.root_at(Some(r), root).trim_end_matches('/')
-        ),
-    }
-}
-
-/// The `COMPOSE_*` env for a container repo.
-///
-/// `COMPOSE_PROJECT_NAME` is set on every phase: compose's default project name
-/// is the worktree's dir basename, identical across branches, so distinct stacks
-/// would collide on containers/networks/volumes. `COMPOSE_FILE` is set only on
-/// the phase that (re)writes the override — `down`/`ps`/`exec` target the project
-/// by name and don't need it, so they leave it unset rather than risk pointing at
-/// an override an edited compose file left stale.
-#[allow(clippy::too_many_arguments)]
-fn compose_env(
-    site: &Site,
-    base: &[String],
-    override_path: &str,
-    project: &str,
-    services: &BTreeMap<String, ServiceConfig>,
-    all_services: &std::collections::BTreeSet<String>,
-    port_map: &BTreeMap<String, u16>,
-    declared: &[(String, String)],
-    phase: Phase,
-    join_ws_net: bool,
-) -> Result<Vec<(String, String)>> {
-    if base.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
-    if phase.activating()
-        && compose::write_override(site, override_path, services, all_services, port_map, declared, join_ws_net)?
-    {
-        let mut files: Vec<String> = base.to_vec();
-        files.push(override_path.to_string());
-        env.push(("COMPOSE_FILE".to_string(), files.join(":")));
-    }
-    Ok(env)
 }
 
 /// The Caddy routes for a repo's HTTP services.
@@ -851,24 +765,6 @@ mod tests {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
         let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new(), false);
         assert!(vars.is_empty(), "no domain ⇒ no WS_HOST var: {vars:?}");
-    }
-
-    #[test]
-    fn override_path_at_is_absolute_for_a_relative_remote_base() {
-        // A home-relative `workspace_path` must still yield an absolute server
-        // override path, else `COMPOSE_FILE` double-resolves under the `cd`'d
-        // worktree and the remote `up` fails.
-        let cfg = WsConfig {
-            remote: Some(crate::config::RemoteConfig::new("srv".into(), Some("myapp".into()))),
-            ..Default::default()
-        };
-        let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
-        let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
-        assert_eq!(p, "/home/u/myapp/.ws-meta/feat-x-api.override.yml");
-
-        let local = WsConfig::default();
-        let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
-        assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
     }
 
     #[test]

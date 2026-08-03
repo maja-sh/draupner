@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::caddy::WS_NET;
-use crate::config::{HttpDecl, ServiceConfig};
+use crate::config::{HttpDecl, ServiceConfig, WsConfig};
 use crate::remote::{self, Site};
 
 /// In compose's own preference order — `base_files` takes the first present as
@@ -88,6 +88,83 @@ pub fn write_override(
             Ok(false)
         }
     }
+}
+
+/// The base compose file(s) as paths *at the site*: which files exist is decided
+/// from the local (synced) worktree, then each is re-homed under `site_worktree`.
+fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
+    let base = site_worktree.trim_end_matches('/');
+    base_files(worktree)
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| format!("{base}/{}", n.to_string_lossy())))
+        .collect()
+}
+
+/// The generated compose override's path at the execution site — remotely, a
+/// `.ws-meta` sibling of the server's synced worktrees, so it lives beside the
+/// stack it overrides and is torn down with it.
+pub(crate) fn override_path_at(
+    cfg: &WsConfig,
+    site: &Site,
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+) -> String {
+    match &cfg.remote {
+        None => crate::ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
+        // Home-resolved via the same owner as `Site::worktree_at`, so the
+        // override can't land beside a different directory than the worktree it
+        // overrides.
+        Some(r) => format!(
+            "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
+            site.root_at(Some(r), root).trim_end_matches('/')
+        ),
+    }
+}
+
+/// The `COMPOSE_*` env for a container repo, writing the override on an
+/// activating phase.
+///
+/// `COMPOSE_PROJECT_NAME` is set on every phase: compose's default project name
+/// is the worktree's dir basename, identical across branches, so distinct stacks
+/// would collide on containers/networks/volumes. `COMPOSE_FILE` is set only on
+/// the phase that (re)writes the override — `down`/`ps`/`exec` target the project
+/// by name and don't need it, so they leave it unset rather than risk pointing at
+/// an override an edited compose file left stale.
+#[allow(clippy::too_many_arguments)]
+pub fn env_for(
+    cfg: &WsConfig,
+    site: &Site,
+    root: &Path,
+    worktree: &Path,
+    site_worktree: &str,
+    branch_sanitized: &str,
+    repo: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    all_services: &BTreeSet<String>,
+    port_map: &BTreeMap<String, u16>,
+    declared: &[(String, String)],
+    activating: bool,
+) -> Result<Vec<(String, String)>> {
+    let base = base_files_at(worktree, site_worktree);
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let project = project_name(branch_sanitized, repo);
+    // Only join `ws-net` when routing is active: otherwise referencing the
+    // external network would just make `compose up` fail for nothing.
+    let join_ws_net = cfg.routing_active();
+    let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
+    let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project)];
+    if activating
+        && write_override(site, &override_path, services, all_services, port_map, declared, join_ws_net)?
+    {
+        let mut files: Vec<String> = base;
+        files.push(override_path);
+        env.push(("COMPOSE_FILE".to_string(), files.join(":")));
+    }
+    Ok(env)
 }
 
 #[derive(Default)]
@@ -436,6 +513,7 @@ fn is_truthy(v: Option<&serde_json::Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RemoteConfig;
 
     const SAMPLE: &str = r#"{
       "name": "proj",
@@ -447,6 +525,24 @@ mod tests {
         "redis":   { "ports": [ {"target": 6379, "published": "6379", "protocol": "tcp"} ] }
       }
     }"#;
+
+    #[test]
+    fn override_path_at_is_absolute_for_a_relative_remote_base() {
+        // A home-relative `workspace_path` must still yield an absolute server
+        // override path, else `COMPOSE_FILE` double-resolves under the `cd`'d
+        // worktree and the remote `up` fails.
+        let cfg = WsConfig {
+            remote: Some(RemoteConfig::new("srv".into(), Some("myapp".into()))),
+            ..Default::default()
+        };
+        let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
+        let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
+        assert_eq!(p, "/home/u/myapp/.ws-meta/feat-x-api.override.yml");
+
+        let local = WsConfig::default();
+        let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
+        assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
+    }
 
     #[test]
     fn derives_http_tcp_and_multiport() {
