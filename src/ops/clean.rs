@@ -12,15 +12,11 @@ pub fn run(force: bool) -> Result<()> {
     crate::ui::header("ws-clean", if force { "--force" } else { "" });
 
     let known = workspace::worktrees(&ws.root, &cfg);
-    let mut by_task: std::collections::BTreeMap<String, Vec<Candidate>> =
+    let mut by_task: std::collections::BTreeMap<String, Vec<&workspace::Worktree>> =
         std::collections::BTreeMap::new();
     for wt in &known {
         let Some(task) = wt.task.as_deref() else { continue };
-        by_task.entry(task.to_string()).or_default().push(Candidate {
-            repo: wt.repo.clone(),
-            path: wt.path.clone(),
-            branch: wt.branch.clone(),
-        });
+        by_task.entry(task.to_string()).or_default().push(wt);
     }
 
     let mut removed = 0usize;
@@ -29,11 +25,10 @@ pub fn run(force: bool) -> Result<()> {
 
     for (task_name, worktrees) in &by_task {
         super::bail_if_interrupted()?;
-        let task_name = task_name.clone();
 
-        match audit(worktrees, &task_name) {
+        match audit(worktrees, task_name) {
             Verdict::Remove { branch, reason } => {
-                crate::ui::clean_verdict(&task_name, true, &reason, !force);
+                crate::ui::clean_verdict(task_name, true, &reason, !force);
                 if force {
                     // A hook failure is reported by its own step line; it must
                     // not abort the rest of the sweep.
@@ -46,7 +41,7 @@ pub fn run(force: bool) -> Result<()> {
                 }
             }
             Verdict::Keep { reason } => {
-                crate::ui::clean_verdict(&task_name, false, &reason, !force);
+                crate::ui::clean_verdict(task_name, false, &reason, !force);
                 kept += 1;
             }
         }
@@ -92,17 +87,11 @@ enum Verdict {
     Keep { reason: String },
 }
 
-/// `branch` is carried over from the shared enumeration rather than re-derived
-/// per worktree, so `ws list` and `ws clean` can't disagree about it.
-struct Candidate {
-    repo: String,
-    path: std::path::PathBuf,
-    branch: Option<String>,
-}
-
 /// A single dirty or unmerged repo keeps the whole task: never drop work that
-/// isn't safely in the default branch.
-fn audit(worktrees: &[Candidate], task_name: &str) -> Verdict {
+/// isn't safely in the default branch. `branch` is carried over from the shared
+/// enumeration rather than re-derived per worktree, so `ws list` and `ws clean`
+/// can't disagree about it.
+fn audit(worktrees: &[&workspace::Worktree], task_name: &str) -> Verdict {
     let mut resolved_branch: Option<String> = None;
     let mut unmerged_seen = false;
 
@@ -145,7 +134,8 @@ fn is_ancestor_of_default(wt: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{audit, Candidate, Verdict};
+    use super::{audit, Verdict};
+    use crate::workspace::Worktree;
     use std::path::{Path, PathBuf};
 
     /// Clean and on `main`, so `audit` always reaches the `Remove` arm and the
@@ -172,11 +162,12 @@ mod tests {
         tmp
     }
 
-    fn candidate(path: &Path, branch: Option<&str>) -> Candidate {
-        Candidate {
+    fn candidate(path: &Path, branch: Option<&str>) -> Worktree {
+        Worktree {
             repo: "api".into(),
             path: PathBuf::from(path),
             branch: branch.map(str::to_string),
+            task: Some("t".into()),
         }
     }
 
@@ -194,17 +185,17 @@ mod tests {
         let p = repo.path();
 
         assert_eq!(
-            removed_branch(audit(&[candidate(p, Some("feat/x")), candidate(p, Some("other"))], "t")),
+            removed_branch(audit(&[&candidate(p, Some("feat/x")), &candidate(p, Some("other"))], "t")),
             "feat/x",
         );
         assert_eq!(
-            removed_branch(audit(&[candidate(p, None), candidate(p, Some("feat/x"))], "t")),
+            removed_branch(audit(&[&candidate(p, None), &candidate(p, Some("feat/x"))], "t")),
             "feat/x",
         );
         // The real branch keeps its slash; the sanitized dir name is only the
         // fallback, so `git branch -D` targets a ref that exists.
         assert_eq!(
-            removed_branch(audit(&[candidate(p, Some("feat/x"))], "feat-x")),
+            removed_branch(audit(&[&candidate(p, Some("feat/x"))], "feat-x")),
             "feat/x",
         );
     }
@@ -212,7 +203,7 @@ mod tests {
     #[test]
     fn an_all_detached_task_falls_back_to_the_task_name() {
         let repo = clean_repo();
-        let verdict = audit(&[candidate(repo.path(), None), candidate(repo.path(), None)], "feat-x");
+        let verdict = audit(&[&candidate(repo.path(), None), &candidate(repo.path(), None)], "feat-x");
         assert_eq!(removed_branch(verdict), "feat-x");
     }
 }
