@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 
-use crate::{config, probe, setup, workspace};
+use crate::{config, probe, workspace};
 
 pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
     let ws = workspace::locate()?;
@@ -106,8 +106,8 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     };
 
     // The local half, so the site and the address are loopback by definition.
-    let report = setup::probe(&crate::remote::Site::Local, cfg.runtime(), domain, "127.0.0.1", None);
-    setup::render_report(&report, domain);
+    let report = probe::readiness(&crate::remote::Site::Local, cfg.runtime(), domain, "127.0.0.1", None);
+    probe::render_report(&report, domain);
     if verbose {
         crate::ui::command_block(&[
             format!("resolve a `*.{domain}` name → {} (wildcard DNS)", report.address),

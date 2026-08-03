@@ -1,10 +1,114 @@
-//! Readiness probes behind `ws remote check`.
+//! Readiness probes: the local routing prerequisites (`readiness`, read by
+//! `ws setup`, `ws remote check` and the `ws up` auto-offer) and the server
+//! checks behind `ws remote check`.
 //!
 //! **Read-only** is a hard contract: a probe only observes, over the user's own
 //! SSH — never installs, mutates, or `sudo`s. That is what makes `ws remote check`
-//! safe to run against a server you haven't finished setting up.
+//! safe to run against a half-set-up server, and what lets `ws up` probe on its
+//! hot path without importing the consented-`sudo` module (`setup.rs`), which is
+//! the fixer these probes feed.
 
 use crate::remote;
+use crate::remote::Site;
+use std::process::Command;
+
+/// Which routing prerequisites the probe found satisfied.
+pub struct Report {
+    /// The HTTPS port Caddy is set to serve (8443 default, 443 opt-in).
+    pub port: u16,
+    /// Where the *client* must reach Caddy — loopback for a local workspace, the
+    /// server's routable address when offloading. Carried here so every rendered
+    /// line, generated command and probe agrees on one value.
+    pub address: String,
+    /// What `*.<domain>` resolves to, measured against [`Report::address`], so a
+    /// wildcard pointing at the *wrong* machine is a distinct finding from one
+    /// that doesn't resolve at all.
+    pub dns: crate::caddy::Dns,
+    pub ca_ok: bool,
+    /// Rootless bind to the configured port is permitted. Always true unless the
+    /// port is privileged (`< 1024`) and the sysctl hasn't been lowered.
+    pub port_ok: bool,
+}
+
+impl Report {
+    /// Drives the `ws up` auto-offer. The rootless Caddy bit isn't counted — `ws`
+    /// fixes that itself without a prompt.
+    pub fn privileged_gaps(&self) -> bool {
+        !self.dns.is_ok() || !self.ca_ok || !self.port_ok
+    }
+}
+
+/// Shared by `ws setup` and `ws remote check`'s local mode so the two never drift.
+pub fn render_report(report: &Report, domain: &str) {
+    // Say what a wrong wildcard *does* answer: "→ 127.0.0.1" with a cross beside
+    // it reads as "not wired yet", the opposite of what a stale entry pointing at
+    // another machine needs you to know.
+    let detail = match &report.dns {
+        crate::caddy::Dns::Wrong { got, .. } => {
+            format!("*.{domain} → {} (resolves to {got})", report.address)
+        }
+        _ => format!("*.{domain} → {}", report.address),
+    };
+    crate::ui::status_line(report.dns.is_ok(), "wildcard DNS", &detail);
+    crate::ui::status_line(report.ca_ok, "CA trust", "Caddy root CA in the system store");
+    if report.port < 1024 {
+        crate::ui::status_line(
+            report.port_ok,
+            "privileged port",
+            &format!("rootless bind to :{}", report.port),
+        );
+    }
+}
+
+/// Probe the routing prerequisites without changing anything — the single owner of
+/// "what counts as ready", read by both `ws setup` and the `ws up` auto-offer.
+///
+/// `site` is where Caddy runs, `address` where the client reaches it (see
+/// [`Report::address`]); checking DNS against `address` rather than loopback is
+/// what stops a remote workspace's wildcard pointing at some other machine reading
+/// as ready. `known_dns` lets a caller that already resolved the wildcard skip a
+/// second lookup on the `ws up` hot path.
+pub fn readiness(
+    site: &Site,
+    runtime: &str,
+    domain: &str,
+    address: &str,
+    known_dns: Option<crate::caddy::Dns>,
+) -> Report {
+    let port = crate::caddy::https_port();
+    // CA trust only means something once Caddy is up to serve a cert to test.
+    let caddy_up = crate::caddy::is_running(site, runtime);
+    Report {
+        port,
+        dns: known_dns
+            .unwrap_or_else(|| crate::caddy::resolve_domain(site, domain, Some(address))),
+        ca_ok: caddy_up && ca_trusted(domain, port, address),
+        port_ok: crate::caddy::port_bindable(site, port),
+        address: address.to_string(),
+    }
+}
+
+/// Asks the question that matters instead of comparing fingerprints per-platform:
+/// does a TLS handshake to Caddy validate against the system store? `--resolve`
+/// pins the handshake so it needs no DNS; no `-k`, so curl validates the chain and
+/// succeeds iff the internal root that signed the on-demand leaf is trusted. Any
+/// HTTP status counts — only a cert error or an unreachable Caddy fails it.
+///
+/// Runs on the **client** even when Caddy is on the server: the question is
+/// whether *this* machine's trust store validates the chain.
+fn ca_trusted(domain: &str, port: u16, address: &str) -> bool {
+    let host = format!("ws-ca-probe.{domain}");
+    Command::new("curl")
+        // Short timeout: this is on the `ws up` hot path, and a wedged or
+        // unreachable Caddy mustn't stall the up.
+        .args(["-sS", "-o", "/dev/null", "-m", "4", "--resolve"])
+        .arg(format!("{host}:{port}:{address}"))
+        .arg(format!("https://{host}:{port}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 
 pub struct Probe {
     pub name: &'static str,
@@ -138,6 +242,28 @@ mod tests {
         for banned in ["sudo", "rm ", "install", "systemctl start", "podman run", "create"] {
             assert!(!s.contains(banned), "server script must stay read-only, found {banned:?}: {s}");
         }
+    }
+
+    #[test]
+    fn privileged_gaps_ignores_the_rootless_caddy_bit() {
+        let mut r = Report {
+            port: 8443,
+            address: "127.0.0.1".to_string(),
+            dns: crate::caddy::Dns::Correct,
+            ca_ok: true,
+            port_ok: true,
+        };
+        assert!(!r.privileged_gaps(), "caddy_up is rootless, not a privileged gap");
+        r.dns = crate::caddy::Dns::Unresolved;
+        assert!(r.privileged_gaps());
+        // A wildcard pointing at the wrong machine is a gap too — it used to be
+        // indistinguishable from "not wired yet", and on a remote workspace it
+        // read as ready.
+        r.dns = crate::caddy::Dns::Wrong {
+            got: "100.64.1.3".to_string(),
+            expected: Some("127.0.0.1".to_string()),
+        };
+        assert!(r.privileged_gaps());
     }
 
     #[test]

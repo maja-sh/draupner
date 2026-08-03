@@ -151,7 +151,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                 let incomplete = if site.is_remote() {
                     !dns.is_ok()
                 } else {
-                    crate::setup::probe(&site, cfg.runtime(), domain, "127.0.0.1", Some(dns))
+                    crate::probe::readiness(&site, cfg.runtime(), domain, "127.0.0.1", Some(dns))
                         .privileged_gaps()
                 };
                 if incomplete {
