@@ -126,6 +126,15 @@ pub fn https_port() -> u16 {
         .unwrap_or(DEFAULT_HTTPS_PORT)
 }
 
+/// The `:port` suffix a browser URL carries, empty for the standard `:443`.
+pub fn port_suffix(port: u16) -> String {
+    if port == 443 {
+        String::new()
+    } else {
+        format!(":{port}")
+    }
+}
+
 /// The address Caddy publishes its HTTPS port on. Local is always loopback;
 /// remote honours `remote.publish_address` and otherwise takes all interfaces.
 /// The value is validated at `config::load`, so this can't fail.
@@ -1022,6 +1031,12 @@ mod tests {
         assert_eq!(https_port(), 443);
         std::env::remove_var("WS_HTTPS_PORT");
         assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
+    }
+
+    #[test]
+    fn port_suffix_is_empty_only_for_443() {
+        assert_eq!(port_suffix(443), "");
+        assert_eq!(port_suffix(8443), ":8443");
     }
 
     #[test]
