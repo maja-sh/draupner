@@ -37,6 +37,12 @@ const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// Distinct from any `route_id`, so worktree route CRUD never touches the
 /// catch-all.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
+/// How long the admin API gets to answer before `ws` treats silence as final.
+/// One budget rather than one per caller, because the two callers are asking the
+/// same question — [`wait_admin_ready`] of a Caddy it just started, and
+/// [`served_port`] of one a peer may be starting right now.
+const ADMIN_POLLS: u32 = 50;
+const ADMIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// No `Site` is needed even for a remote site: the admin is published on the
 /// *server's* loopback and `curl` itself runs there (see [`curl`]), so
@@ -237,10 +243,11 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
                     _ => return Ok(()),
                 }
             }
-            // Admin unreachable on a *running* container: it predates the switch to
-            // a TCP admin (its unix-socket admin isn't on :2019) or is wedged.
-            // `--resume` would restore that old admin from the autosave, so the
-            // config volume has to go with it.
+            // Admin still silent after the full boot budget (see `served_port`):
+            // it predates the switch to a TCP admin (its unix-socket admin isn't
+            // on :2019) or is wedged. `--resume` would restore that old admin
+            // from the autosave, so the config volume has to go with it — which
+            // costs every workspace on the machine its routes, hence the wait.
             None => {
                 crate::ui::note(&format!(
                     "{CADDY_CONTAINER} is running but its admin is unreachable — \
@@ -313,13 +320,24 @@ fn preflight_ports(site: &Site) -> Result<()> {
 }
 
 /// The HTTPS port the running Caddy is actually listening on. `None` when the
-/// admin can't be reached or the shape is unexpected.
+/// admin never answers, or answers with an unexpected shape.
+///
+/// Waits out the same budget a boot gets, because `None` is what sends the
+/// caller into a re-seed and a peer three seconds into its own `ws up` refuses
+/// the connection *instantly* — indistinguishable from a wedged admin without
+/// waiting for it. Answering at all settles the question, so a healthy Caddy
+/// still costs one round trip.
 fn served_port(site: &Site) -> Option<u16> {
-    let out = curl(site, &[], &format!("/config/apps/http/servers/{SERVER}/listen")).ok()?;
-    if !out.succeeded() {
-        return None;
+    for _ in 0..ADMIN_POLLS {
+        let listen = curl(site, &[], &format!("/config/apps/http/servers/{SERVER}/listen"));
+        if let Ok(out) = listen {
+            if out.succeeded() {
+                return parse_listen_port(&out.body);
+            }
+        }
+        std::thread::sleep(ADMIN_POLL_INTERVAL);
     }
-    parse_listen_port(&out.body)
+    None
 }
 
 /// Pull the port out of Caddy's `listen` array JSON (`[":8443"]` /
@@ -472,11 +490,11 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
 /// Caddy's admin listener isn't up the instant `run -d` returns, so the
 /// immediately-following `route_up` would otherwise hit a dead socket.
 fn wait_admin_ready(site: &Site) -> Result<()> {
-    for _ in 0..50 {
+    for _ in 0..ADMIN_POLLS {
         if curl(site, &["-o", "/dev/null"], "/config/").map(|o| o.ok).unwrap_or(false) {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(ADMIN_POLL_INTERVAL);
     }
     bail!("{CADDY_CONTAINER} started but its admin API never answered within 5s — it may be crash-looping (check the {CADDY_CONTAINER} container logs)")
 }
