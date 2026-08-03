@@ -530,7 +530,24 @@ persist_resolver() {
         echo "prepend domain-name-servers 127.0.0.1;"
       } | sudo tee -a "$dh" >/dev/null
       note "added \`prepend domain-name-servers 127.0.0.1;\` to $dh."
-      note "  takes effect on the next renewal; the file is correct until then."
+    fi
+    # dhclient parses its config at startup only — a renewal re-applies what the
+    # running process read back then, so a dhclient older than the prepend line
+    # keeps rewriting resolv.conf without it until restarted.
+    local pid started
+    pid="$(pgrep -o -x dhclient 2>/dev/null || true)"
+    if [ -z "$pid" ]; then
+      note "no dhclient is running right now — the prepend applies when one starts."
+      return 0
+    fi
+    started="$(( $(date +%s) - $(ps -o etimes= -p "$pid" | tr -d ' ') ))"
+    if [ "$started" -lt "$(stat -c %Y "$dh")" ]; then
+      note "the running dhclient (pid $pid) started before that line existed and"
+      note "  won't read it until restarted — until then a lease renewal still"
+      note "  rewrites /etc/resolv.conf without dnsmasq. Restart it in place"
+      note "  (the lease and the interface stay up):"
+      note "    sudo kill $pid"
+      note "    sudo $(tr '\0' ' ' <"/proc/$pid/cmdline")"
     fi
     return 0
   fi
