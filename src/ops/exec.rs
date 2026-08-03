@@ -50,11 +50,13 @@ pub fn run(
 
     let remote = if local { None } else { cfg.remote.as_ref() };
 
-    // The injection site is `Local` even for a remote run, which looks wrong: the
-    // `Inspect` phase only reads the ports recorded at `ws up` — it allocates
-    // nothing, derives nothing, writes no override — so it is location-agnostic,
-    // and resolving a remote site here would make `ws exec` dial the server, which
-    // it deliberately never does before running your command.
+    // The injection site is `Local` even for a remote run, which looks wrong:
+    // the remote arm takes the `Inspect` phase, which only reads the ports
+    // recorded at `ws up` — it allocates nothing, derives nothing, writes no
+    // override — so it is location-agnostic, and resolving a remote site here
+    // would make `ws exec` dial the server, which it deliberately never does
+    // before running your command. The local arm's `Exec` phase does allocate,
+    // and allocation against `Site::Local` is exactly right for it.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
     let mut env: Vec<(&str, &str)> = vec![("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
