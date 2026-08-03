@@ -49,16 +49,26 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
-    list_child_dirs(&task_dir(root, branch))
-        .into_iter()
-        .filter_map(|(name, path)| name.map(|n| (n, path)))
-        .collect()
+/// Every `(task, repo)` pair present under `.worktrees/`, from the filesystem
+/// alone — for callers that need the layout (a teardown sweep) without asking
+/// git. The `.worktrees` walk rules (symlink and non-UTF-8 handling) stay in
+/// this module's one walker.
+pub fn task_repo_pairs(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for task_dir in all_task_dirs(root) {
+        let Some(task) = task_dir.file_name().and_then(|n| n.to_str()) else { continue };
+        for (repo, _path) in list_child_dirs(&task_dir) {
+            if let Some(repo) = repo {
+                out.push((task.to_string(), repo));
+            }
+        }
+    }
+    out
 }
 
 /// A *filesystem* view, not the authoritative one — [`worktrees`] is. Exists for
 /// [`orphan_dirs`], which compares the two.
-pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
+fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
     list_child_dirs(&root.join(".worktrees"))
         .into_iter()
         .map(|(_, path)| path)

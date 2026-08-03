@@ -173,7 +173,7 @@ pub fn unset(force: bool) -> Result<()> {
     // directory git doesn't know may still have a live session pointing at the
     // server, including one an older, laxer `set` created. Narrowing this to git
     // would strand exactly those.
-    for (task, repo) in all_worktrees(&ws.root) {
+    for (task, repo) in workspace::task_repo_pairs(&ws.root) {
         super::bail_if_interrupted()?;
         let session = mutagen::session_name(&task, &repo);
         let step = crate::ui::step(&format!("{task}/{repo}"), "Sync terminated");
@@ -466,16 +466,4 @@ fn compose_liveness(
     }
 }
 
-/// Composed from the two canonical `workspace` walkers so the `.worktrees` layout
-/// rules (symlink and non-UTF-8 handling) stay in one place. Task-dir names are
-/// already sanitized branches, and `all_worktrees_for` re-sanitizes idempotently.
-fn all_worktrees(root: &std::path::Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for task_dir in workspace::all_task_dirs(root) {
-        let Some(task) = task_dir.file_name().and_then(|n| n.to_str()) else { continue };
-        for (repo, _wt) in workspace::all_worktrees_for(root, task) {
-            out.push((task.to_string(), repo));
-        }
-    }
-    out
-}
+
