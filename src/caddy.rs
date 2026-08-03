@@ -229,11 +229,12 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
 /// config if not.
 ///
 /// One `ws-caddy` serves every workspace on the machine, so removing a running
-/// one takes a peer's live routes down with it. Three arms below do exactly that
-/// when what Caddy is serving disagrees with what this workspace wants; each
-/// says why it is worth the outage. Everything else — a name clash from a peer
-/// that already has it up, a stale *stopped* container — is handled without
-/// touching a live one.
+/// one takes a peer's live routes down with it. Two arms below still do that —
+/// a wedged admin and a port move — and each says why it is worth the outage;
+/// an address disagreement defers to [`reconcile_publish`], which consults the
+/// live routes before anything is allowed to be destructive. Everything else —
+/// a name clash from a peer that already has it up, a stale *stopped*
+/// container — is handled without touching a live one.
 pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
@@ -253,14 +254,9 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             Some(p) if p == wanted => {
                 match published_host(site, runtime, p) {
                     Some(h) if h != publish_addr => {
-                        crate::ui::note(&format!(
-                            "re-creating {CADDY_CONTAINER} to publish on {publish_addr} \
-                             (currently {h}) — routes are preserved"
-                        ));
-                        // Not `reseed`: replacing only the container lets `--resume`
-                        // reload every peer's route from the retained config volume.
-                        // A port move needs that volume wiped; an address move doesn't.
-                        let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
+                        if !reconcile_publish(site, runtime, &h, publish_addr)? {
+                            return Ok(());
+                        }
                     }
                     _ => return Ok(()),
                 }
@@ -324,6 +320,104 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         "could not start the {CADDY_CONTAINER} container: {}",
         reason.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+/// Decide what a publish-address disagreement costs, and who pays. Returns
+/// whether the container was torn down (so the caller reboots it); `Ok(false)`
+/// means the running Caddy stays.
+///
+/// One `ws-caddy` is shared by every workspace on the machine, and each brings
+/// its own wanted address — so "recreate to what I want" was a ping-pong that
+/// took the other workspaces' routes down on every `ws up`. The live route list
+/// is the arbiter: it is exactly the set of worktrees currently depending on
+/// this Caddy, it lives on the right machine by construction, and it cannot go
+/// stale the way a registry file would.
+fn reconcile_publish(site: &Site, runtime: &str, live: &str, wanted: &str) -> Result<bool> {
+    // A wildcard publish serves loopback too, so a local workspace (which
+    // always wants loopback) needs nothing from a Caddy an offloaded workspace
+    // opened up — and narrowing it would break that workspace for nothing.
+    if is_loopback(wanted) && is_unspecified(live) {
+        return Ok(false);
+    }
+    let hostnames = live_route_hostnames(site);
+    match hostnames {
+        Ok(hosts) if hosts.is_empty() => {
+            crate::ui::note(&format!(
+                "re-creating {CADDY_CONTAINER} to publish on {wanted} (currently {live}, \
+                 no live routes) — routes are preserved"
+            ));
+            // Not `reseed`: replacing only the container lets `--resume` reload
+            // routes from the retained config volume. A port move needs that
+            // volume wiped; an address move doesn't.
+            let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
+            Ok(true)
+        }
+        // The live publish covers what we need, so nothing is broken for us —
+        // but the pin this workspace asked for is not applied while others are
+        // live, and silently staying wide would defeat its point. Say so.
+        Ok(hosts) if covers(live, wanted) => {
+            crate::ui::warn(
+                &format!(
+                    "publish address pin ({wanted}) not applied — {CADDY_CONTAINER} is \
+                     serving live routes on {live}"
+                ),
+                &[
+                    format!("live: {}", hosts.join(", ")),
+                    "the pin applies on the next `ws up` after those are `ws down`ed".to_string(),
+                ],
+            );
+            Ok(false)
+        }
+        Ok(hosts) => bail!(
+            "{CADDY_CONTAINER} publishes on {live}, but this workspace needs {wanted}, and \
+             re-creating it would drop live routes: {}. `ws down` those worktrees first, or \
+             align `remote.publish_address` across the workspaces sharing this machine.",
+            hosts.join(", ")
+        ),
+        // Can't tell what's live — never destroy on an unknown.
+        Err(e) => bail!(
+            "{CADDY_CONTAINER} publishes on {live}, but this workspace needs {wanted}, and \
+             its live routes couldn't be read ({e}) — refusing to re-create it blind"
+        ),
+    }
+}
+
+fn is_loopback(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>().map(|a| a.is_loopback()).unwrap_or(false)
+}
+
+fn is_unspecified(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>().map(|a| a.is_unspecified()).unwrap_or(false)
+}
+
+/// Whether a socket published on `live` answers dials aimed at `wanted`.
+fn covers(live: &str, wanted: &str) -> bool {
+    live == wanted || is_unspecified(live)
+}
+
+/// Every hostname the running Caddy routes, minus the stopped-stack catch-all:
+/// the set of worktrees that would go dark if this Caddy were removed. Route ids
+/// carry no workspace name, so the list says *what* is live, never *whose*.
+fn live_route_hostnames(site: &Site) -> Result<Vec<String>> {
+    let out = curl(site, &[], &format!("/config/apps/http/servers/{SERVER}/routes"))?;
+    if !out.succeeded() {
+        bail!("admin API answered HTTP {}", out.code);
+    }
+    let routes: serde_json::Value = serde_json::from_str(&out.body).context("parse route list")?;
+    let mut hosts = Vec::new();
+    for route in routes.as_array().map(|a| a.as_slice()).unwrap_or_default() {
+        if route.get("@id").and_then(|i| i.as_str()) == Some(STOPPED_STACK_ID) {
+            continue;
+        }
+        for m in route.get("match").and_then(|m| m.as_array()).map(|a| a.as_slice()).unwrap_or_default() {
+            for h in m.get("host").and_then(|h| h.as_array()).map(|a| a.as_slice()).unwrap_or_default() {
+                if let Some(h) = h.as_str() {
+                    hosts.push(h.to_string());
+                }
+            }
+        }
+    }
+    Ok(hosts)
 }
 
 /// Refuse a Caddy run when either port it must publish is already held at `site`.

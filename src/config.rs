@@ -143,8 +143,11 @@ pub struct RemoteConfig {
     /// interface doesn't serve your worktrees to the internet. Any address the
     /// client can route to works; nothing here assumes Tailscale.
     ///
-    /// **Only read when Caddy is created.** Changing it recreates the container on
-    /// the next `ws up` (routes survive — they reload from the config volume).
+    /// **Only read when Caddy is created**, and one Caddy serves every workspace
+    /// on the machine — so a change applies on the next `ws up` where nothing
+    /// else is routed (routes survive — they reload from the config volume).
+    /// While other worktrees are live, `ws up` warns or refuses instead of
+    /// recreating the shared container out from under them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_address: Option<String>,
 }

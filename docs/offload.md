@@ -173,8 +173,11 @@ it:
 
 Any address your client can route to works — a tailnet address, a LAN address.
 Nothing here assumes Tailscale. It's only read when the Caddy container is
-created, so changing it recreates the container on the next `ws up` (routes
-survive; they reload from the config volume).
+created, and one Caddy serves every workspace on the machine — so a change
+applies on the next `ws up` where nothing else is routed (routes survive; they
+reload from the config volume). While other worktrees are live, `ws up` says so
+instead of recreating the shared Caddy out from under them: it warns if the
+live address still covers you, and refuses if it doesn't.
 
 Raw-TCP services don't need any of this: `ws up` creates a `mutagen forward` per
 allocated port and prints the `localhost:<port>` dial string for each one. The
