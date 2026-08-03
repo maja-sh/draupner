@@ -140,7 +140,7 @@ Inside `sweep`:
    here is a **note, not fatal** — a sweep of raw-TCP-only repos needs neither
    Caddy nor `ws-net`. Fatality lands where routing is actually load-bearing, in
    step 11. A missing privileged bit (DNS, CA trust) triggers a `ws setup` nudge
-   via `setup::probe`.
+   via `probe::readiness`.
 
 Then, per repo:
 

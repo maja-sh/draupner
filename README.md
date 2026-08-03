@@ -158,6 +158,8 @@ Every command takes `--help`.
   and the full `WS_*` environment contract your scripts receive.
 - **[docs/offload.md](docs/offload.md)** — running the stacks on a server while
   you edit locally.
+- **[docs/routing.md](docs/routing.md)** — how a URL reaches a worktree, and
+  which link in that chain each failure symptom points at.
 - **[server-setup/](server-setup/)** — the one-time privileged host setup.
 
 Changing `ws` rather than using it? **[ARCHITECTURE.md](ARCHITECTURE.md)** is the
