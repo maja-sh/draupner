@@ -201,10 +201,12 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
 /// Ensure the singleton Caddy container is running, booting it from a pinned
 /// config if not.
 ///
-/// Race-safe against a parallel `ws up` because it **never removes a running
-/// container** — that would delete a peer session's live Caddy and its in-memory
-/// routes. A name clash from a peer that already has it up counts as success;
-/// only a stale *stopped* container is removed and retried.
+/// One `ws-caddy` serves every workspace on the machine, so removing a running
+/// one takes a peer's live routes down with it. Three arms below do exactly that
+/// when what Caddy is serving disagrees with what this workspace wants; each
+/// says why it is worth the outage. Everything else — a name clash from a peer
+/// that already has it up, a stale *stopped* container — is handled without
+/// touching a live one.
 pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
