@@ -27,23 +27,6 @@ use std::process::Command;
 
 use crate::remote::Site;
 
-enum Platform {
-    MacOs,
-    Linux,
-    Other,
-}
-
-/// From the compile target: the binary is built per host, so this is authoritative.
-fn platform() -> Platform {
-    if cfg!(target_os = "macos") {
-        Platform::MacOs
-    } else if cfg!(target_os = "linux") {
-        Platform::Linux
-    } else {
-        Platform::Other
-    }
-}
-
 /// Which routing prerequisites the probe found satisfied.
 pub struct Report {
     /// The HTTPS port Caddy is set to serve (8443 default, 443 opt-in).
@@ -288,7 +271,6 @@ pub fn run(
     }
 
     let report = probe(site, runtime, domain, address, None);
-    let plat = platform();
 
     render_report(&report, domain);
 
@@ -304,16 +286,14 @@ pub fn run(
     // versioned script that owns these commands and defers to it, while a Linux
     // *client* has none, so print-only would be strictly worse UX than macOS for
     // identical transparency.
-    match plat {
-        Platform::MacOs => walk_gaps(macos_steps(site, domain, &report), yes),
-        Platform::Linux if site.is_remote() => {
-            walk_gaps(linux_client_steps(site, domain, &report), yes)
-        }
-        Platform::Linux => {
+    match std::env::consts::OS {
+        "macos" => walk_gaps(macos_steps(site, domain, &report), yes),
+        "linux" if site.is_remote() => walk_gaps(linux_client_steps(site, domain, &report), yes),
+        "linux" => {
             guide_linux_gaps(domain, &report);
             Ok(())
         }
-        Platform::Other => {
+        _ => {
             crate::ui::note(&format!(
                 "automated setup isn't available on this platform yet — wire \
                  `*.{domain}` → {address} and trust Caddy's root CA manually."
@@ -379,10 +359,10 @@ pub fn offer_dns_step(domain: &str, address: &str, offloading: bool) -> Result<b
     if !valid_domain(domain) || !valid_address(address) {
         return Ok(false);
     }
-    let step = match platform() {
-        Platform::MacOs => Some(dns_step_macos(domain, address)),
-        Platform::Linux if offloading => dns_step_linux(domain, address),
-        Platform::Linux | Platform::Other => None,
+    let step = match std::env::consts::OS {
+        "macos" => Some(dns_step_macos(domain, address)),
+        "linux" if offloading => dns_step_linux(domain, address),
+        _ => None,
     };
     let Some(step) = step else { return Ok(false) };
     crate::ui::note("the wildcard's correct answer just changed — this re-points it:");
