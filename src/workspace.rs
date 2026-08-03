@@ -37,8 +37,10 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Return all repo worktrees for a branch (repo name + path pairs).
-pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
+/// Every repo directory under a branch's task dir. A *filesystem* view — see
+/// [`worktrees_for`] for the authoritative one. Kept because a directory git
+/// doesn't know may still hold resources a teardown has to release.
+pub fn all_worktree_dirs_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
     list_child_dirs(&task_dir(root, branch))
         .into_iter()
         .filter_map(|(name, path)| name.map(|n| (n, path)))
@@ -107,6 +109,24 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
         }
     }
     out
+}
+
+/// One task's worktrees as `(repo, path)` — the branch-scoped form of
+/// [`worktrees`], for ops acting on a single task.
+///
+/// Matches the branch git reports **or** the task dir name; the fallback is what
+/// catches a detached worktree, which has no branch to match on.
+pub fn worktrees_for(
+    root: &Path,
+    cfg: &crate::config::WsConfig,
+    branch: &str,
+) -> Vec<(String, PathBuf)> {
+    let task = sanitize_branch(branch);
+    worktrees(root, cfg)
+        .into_iter()
+        .filter(|w| w.branch.as_deref() == Some(branch) || w.task.as_deref() == Some(task.as_str()))
+        .map(|w| (w.repo, w.path))
+        .collect()
 }
 
 /// Directories under `.worktrees/` that git does **not** know as worktrees.
