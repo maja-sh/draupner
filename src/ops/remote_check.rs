@@ -132,7 +132,8 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
         return Err(super::op_failure("local routing setup is incomplete"));
     }
     crate::ui::summary_ok(&[format!(
-        "local routing ready — reach a worktree at https://<branch>.<svc>.{domain}"
+        "local routing ready — reach a worktree at https://<branch>.<svc>.{domain}{}",
+        crate::caddy::port_suffix(report.port)
     )]);
     Ok(())
 }

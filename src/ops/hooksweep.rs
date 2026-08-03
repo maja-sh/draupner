@@ -378,7 +378,10 @@ fn sync_routes(
     let step = crate::ui::step(repo, "routed");
     match err {
         None => {
-            step.ok_with(&hosts.join(", "));
+            // Caddy doesn't bind 443, so a bare hostname refuses the connection.
+            let suffix = crate::caddy::port_suffix(crate::caddy::https_port());
+            let with_port: Vec<String> = hosts.iter().map(|h| format!("{h}{suffix}")).collect();
+            step.ok_with(&with_port.join(", "));
             true
         }
         Some(e) => {
