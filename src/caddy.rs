@@ -217,6 +217,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     if externally_managed() {
         return Ok(());
     }
+    let wanted = https_port();
     if container_running(site, runtime, CADDY_CONTAINER) {
         // A running Caddy is left alone unless its live port or publish address
         // disagrees with what's wanted. The comparison is against what Caddy is
@@ -228,7 +229,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             // it. Without this arm, pinning `remote.publish_address` to close an
             // exposure would silently keep the old binding, and `--restart always`
             // would carry it across reboots.
-            Some(p) if p == https_port() => {
+            Some(p) if p == wanted => {
                 match published_host(site, runtime, p) {
                     Some(h) if h != publish_addr => {
                         crate::ui::note(&format!(
@@ -255,14 +256,20 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
                 ));
                 reseed(site, runtime);
             }
-            // Only move ports if the new one can actually bind — else we'd tear
-            // down a working Caddy for one that fails to start (`:443` before the
-            // sysctl), leaving nothing running. `ws setup` reports the gap.
-            Some(_) if !port_bindable(site, https_port()) => return Ok(()),
+            // Only move ports if the new one will actually take a listener — else we'd
+            // tear a working Caddy down for one that fails to start and leave the
+            // machine with no routing at all. Two ways it won't: the sysctl forbids it
+            // (`:443` before `ws setup`), or something else already holds it.
+            // `preflight_ports` asks the second question too, but only below, after the
+            // teardown. `ws setup` reports either gap.
+            Some(_)
+                if !port_bindable(site, wanted) || !crate::ports::port_free_at(site, wanted) =>
+            {
+                return Ok(())
+            }
             Some(_) => {
                 crate::ui::note(&format!(
-                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `ws up`",
-                    https_port()
+                    "re-seeding {CADDY_CONTAINER} for the :{wanted} move — routes reinstall on `ws up`"
                 ));
                 reseed(site, runtime);
             }
