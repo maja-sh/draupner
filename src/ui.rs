@@ -17,8 +17,9 @@ fn tty() -> bool {
 }
 
 /// The spinner currently animating, if any. A plain `eprintln!` collides with the
-/// spinner's steady-tick redraw on the same terminal row, so every line-emitting
-/// helper that can run under a live step goes through `emit_around_spinner`.
+/// spinner's steady-tick redraw on the same terminal row, so **every** line-emitting
+/// helper goes through `emit_around_spinner` — structural, not a per-helper judgment
+/// of whether it can run under a live step. Without a spinner it's a passthrough.
 static ACTIVE_SPINNER: Mutex<Option<ProgressBar>> = Mutex::new(None);
 
 fn set_active_spinner(pb: Option<ProgressBar>) {
@@ -36,11 +37,13 @@ fn emit_around_spinner(f: impl FnOnce()) {
 }
 
 pub fn header(op: &str, args: &str) {
-    if tty() {
-        eprintln!("{} {} {}", style("◐").cyan(), style(op).bold(), args);
-    } else {
-        eprintln!("{op}: {args}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("{} {} {}", style("◐").cyan(), style(op).bold(), args);
+        } else {
+            eprintln!("{op}: {args}");
+        }
+    });
 }
 
 #[must_use = "Step must be completed with .ok() / .ok_with() / .fail(); dropping without a call emits an aborted line."]
@@ -205,14 +208,16 @@ pub fn skip(tag: &str, reason: &str) {
 }
 
 pub fn summary_ok(lines: &[String]) {
-    if tty() {
-        eprintln!("\n{} {}", style("✓").green(), style("Done.").bold());
-    } else {
-        eprintln!("\nok: Done.");
-    }
-    for l in lines {
-        eprintln!("    {l}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("\n{} {}", style("✓").green(), style("Done.").bold());
+        } else {
+            eprintln!("\nok: Done.");
+        }
+        for l in lines {
+            eprintln!("    {l}");
+        }
+    });
 }
 
 pub fn warn(title: &str, items: &[String]) {
@@ -233,11 +238,13 @@ pub fn warn(title: &str, items: &[String]) {
 }
 
 pub fn summary_fail(reason: &str) {
-    if tty() {
-        eprintln!("{} {}", style("✗").red().bold(), style(reason).red());
-    } else {
-        eprintln!("FAIL: {reason}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("{} {}", style("✗").red().bold(), style(reason).red());
+        } else {
+            eprintln!("FAIL: {reason}");
+        }
+    });
 }
 
 pub struct ListRow {
@@ -261,94 +268,100 @@ pub struct ListGroup {
 /// Shared by every op whose enumeration came up empty; named for the shape, not
 /// the op, so the next op reuses it instead of adding a sibling.
 pub fn empty(msg: &str) {
-    if tty() {
-        eprintln!("\n{}", style(msg).dim());
-    } else {
-        eprintln!("\n{msg}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("\n{}", style(msg).dim());
+        } else {
+            eprintln!("\n{msg}");
+        }
+    });
 }
 
 pub fn list_table(groups: &[ListGroup]) {
-    let repo_w = col_width(groups.iter().flat_map(|g| g.rows.iter()).map(|r| r.repo.as_str()));
+    emit_around_spinner(|| {
+        let repo_w = col_width(groups.iter().flat_map(|g| g.rows.iter()).map(|r| r.repo.as_str()));
 
-    // Suppress the column entirely when nothing reports a status; otherwise every
-    // row is a bare dash, which reads as noise.
-    let any_status = groups
-        .iter()
-        .flat_map(|g| g.rows.iter())
-        .any(|r| r.status.is_some());
-    let dash = if tty() { "—" } else { "-" };
+        // Suppress the column entirely when nothing reports a status; otherwise every
+        // row is a bare dash, which reads as noise.
+        let any_status = groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .any(|r| r.status.is_some());
+        let dash = if tty() { "—" } else { "-" };
 
-    eprintln!();
-    for group in groups {
-        if tty() {
-            let mut header = style(&group.task).bold().to_string();
-            if !group.path.is_empty() {
-                header.push_str(&format!("  {}", style(&group.path).dim()));
-            }
-            eprintln!("  {header}");
-        } else {
-            let sep = if group.path.is_empty() { "" } else { "  " };
-            eprintln!("  {}{sep}{}", group.task, group.path);
-        }
-        for row in &group.rows {
-            let repo = pad_key(&row.repo, repo_w);
-            let dirty_txt = if row.dirty { "dirty" } else { "clean" };
-            if tty() {
-                let dirty = if row.dirty {
-                    style(format!("{dirty_txt:<5}")).yellow()
-                } else {
-                    style(format!("{dirty_txt:<5}")).green()
-                };
-                let mut line = format!("    {} {}", style(repo).green().bold(), dirty);
-                if any_status {
-                    let status = row.status.as_deref().unwrap_or(dash);
-                    line.push(' ');
-                    line.push_str(&style(status).dim().to_string());
-                }
-                if let Some(note) = &row.note {
-                    line.push(' ');
-                    line.push_str(&style(format!("({note})")).dim().to_string());
-                }
-                eprintln!("{line}");
-            } else {
-                let mut line = format!("    {repo} {dirty_txt:<5}");
-                if any_status {
-                    line.push(' ');
-                    line.push_str(row.status.as_deref().unwrap_or(dash));
-                }
-                if let Some(note) = &row.note {
-                    line.push_str(&format!(" ({note})"));
-                }
-                eprintln!("{line}");
-            }
-        }
         eprintln!();
-    }
+        for group in groups {
+            if tty() {
+                let mut header = style(&group.task).bold().to_string();
+                if !group.path.is_empty() {
+                    header.push_str(&format!("  {}", style(&group.path).dim()));
+                }
+                eprintln!("  {header}");
+            } else {
+                let sep = if group.path.is_empty() { "" } else { "  " };
+                eprintln!("  {}{sep}{}", group.task, group.path);
+            }
+            for row in &group.rows {
+                let repo = pad_key(&row.repo, repo_w);
+                let dirty_txt = if row.dirty { "dirty" } else { "clean" };
+                if tty() {
+                    let dirty = if row.dirty {
+                        style(format!("{dirty_txt:<5}")).yellow()
+                    } else {
+                        style(format!("{dirty_txt:<5}")).green()
+                    };
+                    let mut line = format!("    {} {}", style(repo).green().bold(), dirty);
+                    if any_status {
+                        let status = row.status.as_deref().unwrap_or(dash);
+                        line.push(' ');
+                        line.push_str(&style(status).dim().to_string());
+                    }
+                    if let Some(note) = &row.note {
+                        line.push(' ');
+                        line.push_str(&style(format!("({note})")).dim().to_string());
+                    }
+                    eprintln!("{line}");
+                } else {
+                    let mut line = format!("    {repo} {dirty_txt:<5}");
+                    if any_status {
+                        line.push(' ');
+                        line.push_str(row.status.as_deref().unwrap_or(dash));
+                    }
+                    if let Some(note) = &row.note {
+                        line.push_str(&format!(" ({note})"));
+                    }
+                    eprintln!("{line}");
+                }
+            }
+            eprintln!();
+        }
+    });
 }
 
 pub fn clean_verdict(task: &str, removal: bool, reason: &str, dry: bool) {
-    let verb = if removal {
-        if dry { "would remove" } else { "remove" }
-    } else {
-        "keep"
-    };
-    if tty() {
-        let (mark, label) = if removal {
-            (style("✓").green().to_string(), style(verb).green().to_string())
+    emit_around_spinner(|| {
+        let verb = if removal {
+            if dry { "would remove" } else { "remove" }
         } else {
-            (style("·").dim().to_string(), style(verb).dim().to_string())
+            "keep"
         };
-        eprintln!(
-            "  {} {} {} — {}",
-            mark,
-            style(task).bold(),
-            label,
-            style(reason).dim(),
-        );
-    } else {
-        eprintln!("  {task}  {verb}  {reason}");
-    }
+        if tty() {
+            let (mark, label) = if removal {
+                (style("✓").green().to_string(), style(verb).green().to_string())
+            } else {
+                (style("·").dim().to_string(), style(verb).dim().to_string())
+            };
+            eprintln!(
+                "  {} {} {} — {}",
+                mark,
+                style(task).bold(),
+                label,
+                style(reason).dim(),
+            );
+        } else {
+            eprintln!("  {task}  {verb}  {reason}");
+        }
+    });
 }
 
 /// The one channel scripts consume, hence stdout and no styling ever, tty or not;
@@ -408,36 +421,42 @@ fn pad_key(k: &str, w: usize) -> String {
 }
 
 pub fn nudge(text: &str) {
-    if tty() {
-        eprintln!("\n{}", style(format!("Next: {text}")).dim().italic());
-    } else {
-        eprintln!("\nnext: {text}");
-    }
+    emit_around_spinner(|| {
+        if tty() {
+            eprintln!("\n{}", style(format!("Next: {text}")).dim().italic());
+        } else {
+            eprintln!("\nnext: {text}");
+        }
+    });
 }
 
 /// A gap renders yellow rather than red: it isn't a failure, it's something the
 /// user is about to be walked through fixing.
 pub fn status_line(ok: bool, label: &str, detail: &str) {
-    if tty() {
-        let (mark, lab) = if ok {
-            (style("✓").green().to_string(), style(label).bold().to_string())
+    emit_around_spinner(|| {
+        if tty() {
+            let (mark, lab) = if ok {
+                (style("✓").green().to_string(), style(label).bold().to_string())
+            } else {
+                (style("✗").yellow().bold().to_string(), style(label).bold().to_string())
+            };
+            eprintln!("  {mark} {lab} {}", style(format!("— {detail}")).dim());
         } else {
-            (style("✗").yellow().bold().to_string(), style(label).bold().to_string())
-        };
-        eprintln!("  {mark} {lab} {}", style(format!("— {detail}")).dim());
-    } else {
-        eprintln!("  {} {label} — {detail}", if ok { "ok" } else { "MISSING" });
-    }
+            eprintln!("  {} {label} — {detail}", if ok { "ok" } else { "MISSING" });
+        }
+    });
 }
 
 pub fn command_block(commands: &[String]) {
-    for c in commands {
-        if tty() {
-            eprintln!("      {}", style(c).cyan());
-        } else {
-            eprintln!("      {c}");
+    emit_around_spinner(|| {
+        for c in commands {
+            if tty() {
+                eprintln!("      {}", style(c).cyan());
+            } else {
+                eprintln!("      {c}");
+            }
         }
-    }
+    });
 }
 
 /// [`ask`] tests this itself; it is public so a caller can decide not to *offer*
