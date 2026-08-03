@@ -10,7 +10,9 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    let worktrees = workspace::all_worktrees_for(&ws.root, branch);
+    // Git-sourced, so `rm` can reach everything `ws list` shows — a stale
+    // registration has no directory for a filesystem scan to find.
+    let worktrees = workspace::worktrees_for(&ws.root, &cfg, branch);
 
     if worktrees.is_empty() {
         return Err(super::preflight(format!(
