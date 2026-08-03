@@ -14,13 +14,13 @@ tree reads as variations on a path you have already seen.
 
 Read in this order. It is about an hour, and everything else follows from it.
 
-1. **`src/config.rs`, top to bottom.** It has no module header, which is
-   misleading: it is the vocabulary every other module speaks. `WsConfig`,
-   `RepoConfig`, `ServiceConfig`, `RepoKind`, `Script` are the nouns. Their doc
-   comments are compiled by `schemars` into `.ws.schema.json` and shipped to
-   users (`ops/init.rs`), so they are product documentation, not internal notes.
-   The guards at the bottom of `load` are there because `.ws.json` is not
-   gitignored and therefore arrives with a clone — see *Deviations* below.
+1. **`src/config.rs`, top to bottom.** It is the vocabulary every other module
+   speaks. `WsConfig`, `RepoConfig`, `ServiceConfig`, `RepoKind`, `Script` are
+   the nouns. Their doc comments are compiled by `schemars` into
+   `.ws.schema.json` and shipped to users (`ops/init.rs`), so they are product
+   documentation, not internal notes. The guards at the bottom of `load` are
+   there because `.ws.json` is not gitignored and therefore arrives with a
+   clone — see *Deviations* below.
 2. **`src/remote.rs`, the first ~230 lines.** That is `Site`, and nothing below
    it matters yet. `Site` is why there is no separate remote implementation of
    anything.
@@ -96,6 +96,7 @@ code returns `ops::ExitError` (`preflight` = 2, `op_failure` = 1,
 | `probe.rs` | Read-only server checks behind `ws remote check`. Never mutates, never `sudo`s |
 | `workspace.rs` | The on-disk layout, branch sanitization, and *what counts as a worktree* |
 | `config.rs` | The `.ws.json` schema and the load-time guards that make it safe to act on |
+| `settings.rs` | Machine-global defaults under `~/.config/ws/` — the file behind `ws config` |
 | `git.rs` | The repeated `git -C <path> …` invocations. Policy stays in the ops |
 
 **Plumbing** — read once, forget:

@@ -1,3 +1,13 @@
+//! The `.ws.json` schema — the nouns every other module speaks — plus the
+//! load-time guards that make one safe to act on.
+//!
+//! The doc comments on these types are compiled by `schemars` into
+//! `.ws.schema.json` and shipped to users (`ops/init.rs`): product
+//! documentation, not internal notes. And `.ws.json` isn't gitignored, so it
+//! arrives with a clone — every value `ws` executes or hands to `ssh` is
+//! untrusted input, which is the one idea behind the guards at the bottom of
+//! [`load`].
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

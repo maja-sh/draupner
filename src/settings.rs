@@ -1,3 +1,11 @@
+//! Machine-global `ws` state under `~/.config/ws/`: the TOML defaults behind
+//! `ws config`, and the directory itself, which the pinned Caddy boot config,
+//! the persisted ports and the exported root CA also live in.
+//!
+//! Split out of `config.rs` because the two share nothing but the word: that
+//! file is one workspace's `.ws.json`, parsed fresh per command; this one is
+//! read-modify-write state for the whole machine.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
