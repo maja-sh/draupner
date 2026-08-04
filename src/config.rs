@@ -512,6 +512,23 @@ fn runtime_looks_safe(runtime: &str) -> bool {
         && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
 }
 
+/// The one place that refuses an unsafe runtime, so the check and its wording
+/// can't drift apart. Both the *read* side ([`load`]) and the *write* side
+/// (`ws init --runtime`) go through it: the guard originally lived only at load,
+/// which let `ws init` persist a value that every later command then refused —
+/// and since `ws init` won't overwrite an existing `.ws.json`, that wedged the
+/// workspace at the moment it was created.
+pub fn ensure_runtime_safe(runtime: &str) -> Result<()> {
+    if runtime_looks_safe(runtime) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing an unsafe runtime `{runtime}` — the container runtime must be a bare \
+         program name (`podman`, `docker`) or an absolute path to one; a relative path \
+         would run a program out of the repo this config arrived in"
+    )
+}
+
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
     let path = root.join(".ws.json");
@@ -551,13 +568,10 @@ pub fn load(root: &Path) -> Result<WsConfig> {
     // Same choke point, same reason as `remote.connection`: the value comes from
     // a possibly-cloned `.ws.json` and is executed. See `runtime_looks_safe`.
     if let Some(rt) = cfg.runtime.as_deref() {
-        if !runtime_looks_safe(rt) {
-            anyhow::bail!(
-                "refusing an unsafe runtime `{rt}` in .ws.json — the container runtime must \
-                 be a bare program name (`podman`, `docker`) or an absolute path to one; a \
-                 relative path would run a program out of the repo this config arrived in"
-            );
-        }
+        // Appended, not `with_context`: that wraps, and `to_string()` then yields
+        // only the outer frame — the file path, with the reason it was refused
+        // nowhere in the primary message.
+        ensure_runtime_safe(rt).map_err(|e| anyhow::anyhow!("{e} (in {})", path.display()))?;
     }
     Ok(cfg)
 }

@@ -285,3 +285,27 @@ fn init_skips_symlinked_directories() {
     assert!(cfg.contains("\"real\""));
     assert!(!cfg.contains("\"linked\""), "symlinked entries must be skipped");
 }
+
+#[test]
+fn init_refuses_an_unsafe_runtime_instead_of_persisting_it() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+
+    // The `--runtime` flag is now constrained to the known runtimes at the clap
+    // layer, so an unsafe value never reaches init at all. That closes the same
+    // gap an earlier load-side-only guard was left open by: `ws init` writes an
+    // unsafe pin into a fresh `.ws.json`, then refuses to overwrite it on retry —
+    // and every later `ws` command fails at load. This test locks in that a bad
+    // value doesn't persist, regardless of which layer refuses it.
+    let out = ws.run(&["init", "--runtime", "../evil"]);
+    assert!(!out.status.success(), "must reject an unsafe runtime: {}", stderr(&out));
+    assert!(
+        !ws.path().join(".ws.json").exists(),
+        "nothing may be written when the runtime is refused — a persisted bad value wedges the workspace"
+    );
+
+    // And the workspace is still initializable, which is the whole point.
+    ws.run_ok(&["init", "--runtime", "docker"]);
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("\"runtime\": \"docker\""), "{cfg}");
+}
