@@ -216,7 +216,7 @@ fn container_override_deconflicts_raw_tcp_ports() {
 }
 
 #[test]
-fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
+fn a_declared_compose_repo_is_namespaced_per_worktree() {
     if !compose_available() {
         eprintln!("skipping: `docker compose` not available");
         return;
@@ -232,6 +232,13 @@ fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
     // lifecycle for it, so the project must be namespaced all the same; otherwise
     // every worktree's stack is compose's default project `api` and they collide.
     f.write_ws_json(r#"{"domain":"myapp.test","runtime":"docker","repos":["api"]}"#);
+    // NOTE: this does not exercise `RepoEntry::Name`, despite the config written
+    // above. `add_hook` must declare a `scripts` entry, and the fixture promotes a
+    // bare string to `{"name": …}` to do it — a bare-name entry and a declared
+    // script are mutually exclusive by schema. The bare-name path is covered by
+    // `a_bare_name_compose_repo_gets_a_namespaced_override` below, which observes
+    // the generated override instead of a hook's environment.
+    //
     // A declared `up` script stands in for the default `docker compose up -d`
     // (same resolution path, same env) so the test starts no containers.
     f.add_hook("api", "up", "echo PROJ=[$COMPOSE_PROJECT_NAME]");
@@ -279,6 +286,37 @@ fn container_override_injects_declared_env() {
 }
 
 /// Read a worktree's generated compose override from `.ws-meta`.
+#[test]
+fn a_bare_name_compose_repo_gets_a_namespaced_override() {
+    if !compose_available() {
+        eprintln!("skipping: `docker compose` not available");
+        return;
+    }
+
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    commit_compose(&f, "services:\n  db:\n    image: mysql:8\n    ports: [\"3306:3306\"]\n");
+    // The genuine `RepoEntry::Name` path — no `scripts`, so nothing rewrites the
+    // entry into an object. Observing the *override* rather than a hook's env is
+    // what makes that possible, and `ws new` writes it, so no stack is started.
+    f.write_ws_json(r#"{"domain":"myapp.test","runtime":"docker","repos":["api"]}"#);
+
+    f.run_ok(&["new", "api", "feat/a"]);
+    f.run_ok(&["new", "api", "feat/b"]);
+
+    let cfg = std::fs::read_to_string(f.path().join(".ws.json")).unwrap();
+    let compact: String = cfg.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains(r#""repos":["api"]"#),
+        "the entry must still be a bare name — otherwise this covers the object path:\n{cfg}"
+    );
+
+    let a = override_port(&read_override(&f, "feat-a-api"));
+    let b = override_port(&read_override(&f, "feat-b-api"));
+    assert!((20000..40000).contains(&a), "db host port out of range ({a})");
+    assert_ne!(a, b, "parallel worktrees of a bare-name repo must reissue on distinct ports");
+}
+
 fn read_override(f: &WorkspaceFixture, stem: &str) -> String {
     std::fs::read_to_string(f.path().join(".ws-meta").join(format!("{stem}.override.yml")))
         .unwrap_or_else(|e| panic!("read override for {stem}: {e}"))
