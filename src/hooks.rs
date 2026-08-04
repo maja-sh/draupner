@@ -209,6 +209,34 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
 /// Fail when an executable `.ws-hooks/<repo>/<event>` is left over from the
 /// removed hook-file mechanism, naming the `scripts` entry that replaces it and
 /// the two contract changes that come with the move.
+/// Raise the migration refusal for every `(repo, event)` an op is about to
+/// dispatch, **before** it does anything. The check is purely static — config
+/// plus one `stat` — so there is no reason for it to surface halfway through.
+///
+/// It surfaced through `resolve` inside `ws new`'s per-repo loop, which meant a
+/// leftover hook file aborted the op after `git worktree add`, seeding and
+/// mutagen session creation had already happened for that repo and any repo
+/// before it. Worse, the message asks the user to edit `.ws.json` and re-run,
+/// and the re-run then fails on the worktrees the aborted attempt left behind.
+///
+/// Mirrors `resolve`'s condition exactly: a declared `scripts` entry wins, so a
+/// repo that has already migrated is not refused for still owning the old file.
+pub fn preflight_legacy_hook_files(
+    cfg: &WsConfig,
+    workspace_root: &Path,
+    repos: &[String],
+    events: &[&str],
+) -> Result<()> {
+    for repo in repos {
+        for event in events {
+            if cfg.script_command(repo, event).is_none() {
+                refuse_legacy_hook_file(workspace_root, repo, event)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn refuse_legacy_hook_file(workspace_root: &Path, repo: &str, event: &str) -> Result<()> {
     let rel = format!(".ws-hooks/{repo}/{event}");
     if !is_executable(&workspace_root.join(&rel)) {
