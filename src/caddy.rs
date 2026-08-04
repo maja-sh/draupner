@@ -239,11 +239,25 @@ pub struct RouteSpec {
     pub wildcard: bool,
 }
 
+/// Refuse to drive a runtime that isn't installed, before the first spawn turns
+/// it into `No such file or directory`.
+///
+/// **Local sites only.** A remote site's binaries live on the server, and this
+/// looks at the client's PATH — checking there would refuse a perfectly good
+/// offload workspace because the laptop lacks the server's runtime.
+fn runtime_available(site: &Site, runtime: &str) -> Result<()> {
+    if site.is_remote() {
+        return Ok(());
+    }
+    crate::config::ensure_available(runtime)
+}
+
 /// Ensure the shared `ws-net` exists (idempotent rootless create) at `site`.
 pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     if externally_managed() {
         return Ok(());
     }
+    runtime_available(site, runtime)?;
     let out = site
         .command(&[runtime, "network", "create", WS_NET])
         .output()
@@ -275,6 +289,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     if externally_managed() {
         return Ok(());
     }
+    runtime_available(site, runtime)?;
     if container_running(site, runtime, CADDY_CONTAINER) {
         // A running Caddy is normally left strictly alone (its live routes are the
         // whole point). The one exception is a deliberate **port move**: `--resume`
