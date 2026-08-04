@@ -83,6 +83,16 @@ fn read_pidfile(pid: &str) -> String {
 /// A process-*group* kill would be the obvious answer and isn't available: job
 /// control needs a tty (`set -m`) and macOS ships no `setsid`. Walking `ps` is
 /// portable to both sites and costs one extra invocation.
+///
+/// The trailing `tr` is what makes the output a single space-separated line in
+/// *every* shell: `awk` hands back one pid per line, so `all` carries embedded
+/// newlines as soon as any generation branches, and the bare `echo $all` that
+/// used to end this function only flattened them where the shell word-splits an
+/// unquoted expansion. zsh doesn't — and zsh is what runs this on a remote site,
+/// since `Site::shell` hands the script to the server's login shell. The two
+/// call sites that read the tree through `$(…)` split it anyway; `ws_owner`,
+/// which matches space-delimited pids inside one string, did not — so a healthy
+/// branching server read as `Squatted` on its own port.
 fn tree_fn() -> &'static str {
     "ws_tree() {\n\
      \x20 all=$1; frontier=$1\n\
@@ -92,7 +102,7 @@ fn tree_fn() -> &'static str {
      \x20   [ -n \"$kids\" ] || break\n\
      \x20   all=\"$all $kids\"; frontier=$kids\n\
      \x20 done\n\
-     \x20 echo $all\n\
+     \x20 echo $all | tr '\\n' ' '\n\
      }"
 }
 
