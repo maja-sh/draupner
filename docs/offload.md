@@ -38,6 +38,11 @@ Make sure you can `ssh` to it non-interactively first — `ws` drives everything
 over that connection, and an SSH host alias in `~/.ssh/config` is the tidiest way
 to name it.
 
+The server runs **podman** — that's what the script installs, and what a
+workspace with a `remote` block and no `runtime` uses. Your own machine can run
+docker regardless; `runtime` describes where the stacks run, not where you type
+`ws`. See [configuration.md](configuration.md#runtime-is-per-site-not-per-machine).
+
 ### 2. Point the workspace at it
 
 For a new workspace:
@@ -73,7 +78,7 @@ ws remote check
 ```
 
 Read-only. It probes SSH reachability and `mutagen` locally, then in a single
-round trip on the server: `mutagen`, rootless podman, whether the routing Caddy
+round trip on the server: `mutagen`, the container runtime, whether the routing Caddy
 is running, whether the workspace directory exists and is writable, and — when
 the workspace has a `domain` — whether the server resolves `*.<domain>` to
 itself. `-v` shows the exact command behind each probe.

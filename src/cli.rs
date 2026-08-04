@@ -23,8 +23,8 @@ enum Cmd {
         /// Private TLD for per-worktree hostnames (routing; local or remote)
         #[arg(long, value_name = "DOMAIN")]
         domain: Option<String>,
-        /// Container runtime for compose introspection + routing (default: podman)
-        #[arg(long, value_name = "RUNTIME")]
+        /// Pin the container runtime (default: detected on PATH, docker first)
+        #[arg(long, value_name = "RUNTIME", value_parser = crate::config::RUNTIMES)]
         runtime: Option<String>,
         /// Skip the SSH reachability check (init refuses an unreachable host by default)
         #[arg(long, requires = "remote")]

