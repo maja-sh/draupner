@@ -450,6 +450,9 @@ local_resolver() {
 
   local backup="/etc/resolv.conf.ws-backup"
   sudo cp /etc/resolv.conf "$backup"
+  # An earlier run may have frozen the file (see `freeze_resolver`); both the
+  # write below and the restore on failure fail outright while it is immutable.
+  thaw_resolver
   # Keep the old servers as fallbacks. glibc only falls through on timeout, not
   # on NXDOMAIN, so this can't leak `*.$domain` to the upstream — it only means
   # a dead dnsmasq degrades to the previous behaviour instead of no DNS at all.
@@ -488,6 +491,60 @@ local_resolver() {
 # play rather than assume. Where it isn't determinable, or where the fix means
 # editing a profile only the operator can pick, print the exact thing to do
 # instead of guessing at someone else's network config.
+
+# Whether /etc/resolv.conf carries the immutable attribute.
+resolver_frozen() {
+  command -v lsattr >/dev/null 2>&1 || return 1
+  lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q i
+}
+
+# Drop that attribute so this script can rewrite the file — a no-op when it was
+# never frozen. Anything here that writes /etc/resolv.conf must go through this
+# first, or an earlier run's freeze turns the write into a fatal error.
+thaw_resolver() {
+  resolver_frozen || return 0
+  sudo chattr -i /etc/resolv.conf
+}
+
+# Freeze /etc/resolv.conf so that nothing can rewrite it. Non-zero when that
+# isn't safe or possible here, which falls the caller through to the
+# per-manager guidance below.
+#
+# Safe only once dnsmasq has `no-resolv`: it then takes its upstreams from its
+# own config, which leaves /etc/resolv.conf with no remaining job but to name
+# the local resolver — a static fact with nothing left to learn from a lease.
+# Every other mechanism below *races* the rewrite (get the right line into the
+# right DHCP client's config, then hope that client re-reads it); freezing
+# removes the race instead of winning it.
+#
+# A symlinked resolv.conf is left alone — resolvconf/openresolv keep the real
+# file elsewhere, so the attribute would land on the link and defend nothing.
+freeze_resolver() {
+  local up_conf="/etc/dnsmasq.d/ws-upstream.conf"
+  grep -qE '^[[:space:]]*no-resolv[[:space:]]*$' "$up_conf" 2>/dev/null || return 1
+  [ ! -L /etc/resolv.conf ] || return 1
+  command -v chattr >/dev/null 2>&1 || return 1
+
+  if resolver_frozen; then
+    note "/etc/resolv.conf is already frozen — no renewal can rewrite it."
+  else
+    # Not every filesystem carries the attribute; that's a fallthrough to the
+    # advice below, not a failure worth aborting the whole setup for.
+    if ! sudo chattr +i /etc/resolv.conf 2>/dev/null; then
+      note "couldn't set the immutable attribute on /etc/resolv.conf"
+      note "  (the filesystem may not support it) — falling back."
+      return 1
+    fi
+    note "froze /etc/resolv.conf — no lease renewal can rewrite it."
+  fi
+  note "  dnsmasq has \`no-resolv\`, so its upstreams live in $up_conf and this"
+  note "  file only has to name the local resolver."
+  note "  to edit it later:  sudo chattr -i /etc/resolv.conf"
+  note "  if this box moves to another network, update the \`server=\` line in"
+  note "  $up_conf too — \`no-resolv\` means DHCP no longer supplies it."
+  return 0
+}
+
 persist_resolver() {
   # systemd-resolved owns the file and the drop-in written above is persistent
   # config, not a file DHCP rewrites — nothing to defend.
@@ -498,6 +555,16 @@ persist_resolver() {
   grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' /etc/resolv.conf 2>/dev/null || return 0
 
   say "Keep /etc/resolv.conf pointing at dnsmasq across DHCP renewals"
+
+  # Freezing the file outright is the strongest option and the only one that
+  # doesn't depend on which DHCP client runs here, on when it last parsed its
+  # config, or on it being restarted afterwards — so try it before the
+  # per-manager mechanisms. That dependency is exactly what failed in practice:
+  # the `prepend` below was correct on disk and ignored for a month by a
+  # dhclient that had started before the line existed.
+  if freeze_resolver; then
+    return 0
+  fi
 
   if systemctl is-active --quiet NetworkManager 2>/dev/null; then
     # NetworkManager uses its own internal DHCP client by default, which doesn't
