@@ -98,6 +98,16 @@ fn read_pidfile(pid: &str) -> String {
 /// A process-*group* kill would be the obvious answer and isn't available: job
 /// control needs a tty (`set -m`) and macOS ships no `setsid`. Walking `ps` is
 /// portable to both sites and costs one extra invocation.
+///
+/// The trailing `tr` is what makes the output a single space-separated line in
+/// *every* shell: `awk` hands back one pid per line, so `all` carries embedded
+/// newlines as soon as any generation branches, and the bare `echo $all` that
+/// used to end this function only flattened them where the shell word-splits an
+/// unquoted expansion. zsh doesn't — and zsh is what runs this on a remote site,
+/// since `Site::shell` hands the script to the server's login shell. The two
+/// call sites that read the tree through `$(…)` split it anyway; `ws_owner`,
+/// which matches space-delimited pids inside one string, did not — so a healthy
+/// branching server read as `Squatted` on its own port.
 fn tree_fn() -> &'static str {
     "ws_tree() {\n\
      \x20 all=$1; frontier=$1\n\
@@ -107,7 +117,7 @@ fn tree_fn() -> &'static str {
      \x20   [ -n \"$kids\" ] || break\n\
      \x20   all=\"$all $kids\"; frontier=$kids\n\
      \x20 done\n\
-     \x20 echo $all\n\
+     \x20 echo $all | tr '\\n' ' '\n\
      }"
 }
 
@@ -760,6 +770,86 @@ mod tests {
                 "{shell}: a port nobody listens on must read as free"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn port_attribution_survives_a_branching_tree_in_every_shell() {
+        // The sibling test above hands `ws_owner` a hand-written pid list through
+        // argv, so it proves nothing about the list `ws_tree` actually produces.
+        // That gap hid a second half of the same zsh bug: `awk` prints one pid per
+        // line, so `all` carries newlines the moment a generation branches, and the
+        // bare `echo $all` that ended `tree_fn` only flattened them in a shell that
+        // word-splits unquoted expansions. Under zsh the tree reached `ws_owner` as
+        // "111\n222", its space-delimited match missed every pid next to a newline,
+        // and a healthy server was reported as squatting its own port. Drive the
+        // real `ws_tree` here, with a tree that branches, or the bug reappears.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("tree-owner");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+
+        // A parent with *two* children — one child would leave `all` on a single
+        // line and the bug invisible.
+        let mut parent = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a branching tree");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let ps = std::process::Command::new("ps")
+            .args(["-eo", "pid=,ppid="])
+            .output()
+            .expect("ps");
+        let kids: Vec<String> = String::from_utf8_lossy(&ps.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (pid, ppid) = (f.next()?, f.next()?);
+                (ppid == parent.id().to_string()).then(|| pid.to_string())
+            })
+            .collect();
+        assert_eq!(kids.len(), 2, "expected a branching tree, got {kids:?}");
+
+        // Stand-in `ss` naming the *last* child as the listener: the first pid on a
+        // line matched even while the bug was live, so only a later one detects it.
+        let ss = bin.join("ss");
+        std::fs::write(
+            &ss,
+            format!(
+                "#!/bin/sh\necho 'LISTEN 0 511 0.0.0.0:20000 0.0.0.0:* \
+                 users:((\"node\",pid={},fd=3))'\n",
+                kids[1]
+            ),
+        )
+        .expect("write fake ss");
+        std::fs::set_permissions(&ss, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+        let script =
+            format!("{}\n{}\nt=$(ws_tree \"$1\"); ws_owner \"$2\" \"$t\"", tree_fn(), owner_fn());
+        for shell in ["sh", "zsh", "bash", "dash"] {
+            if !have(shell) {
+                continue;
+            }
+            let out = std::process::Command::new(shell)
+                .args(["-c", script.as_str(), "ws-tree-test", &parent.id().to_string(), "20000"])
+                .env("PATH", &path)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run ws_tree + ws_owner");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "ours",
+                "{shell}: a port held by a descendant of our own process must read as ours"
+            );
+        }
+
+        let _ = parent.kill();
+        let _ = parent.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
