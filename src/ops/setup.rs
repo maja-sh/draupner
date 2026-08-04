@@ -35,10 +35,7 @@ pub fn run(yes: bool, port: Option<u16>, admin_port: Option<u16>) -> Result<()> 
     // a server (bind all interfaces, dial its routable address).
     let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
     let publish = crate::caddy::publish_address(&site, configured);
-    // `require_runtime`: readying the host starts by running Caddy, so "nothing to
-    // run it with" is the first thing to say, not a failed container spinup.
-    let runtime = cfg.require_runtime().map_err(|e| crate::ops::preflight(e.to_string()))?;
-    crate::setup::run(&site, cfg.domain.as_deref(), runtime, yes, &address, &publish)
+    crate::setup::run(&site, cfg.domain.as_deref(), cfg.runtime(), yes, &address, &publish)
 }
 
 /// The address this machine must reach the routing Caddy at.

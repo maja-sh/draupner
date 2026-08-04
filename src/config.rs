@@ -310,6 +310,34 @@ pub fn detect_runtime() -> Option<&'static str> {
     *DETECTED.get_or_init(|| RUNTIMES.into_iter().find(|r| on_path(r)))
 }
 
+/// Fail with an explanation rather than a bare spawn error when the runtime
+/// about to be driven isn't on this machine's PATH.
+///
+/// Deliberately **not** a preflight on any op: `ws setup` with no `domain`, and
+/// anything running against an externally-managed Caddy, never spawn a runtime
+/// at all, and demanding one there turns a legitimate no-op into a failure. The
+/// callers are the two `caddy` functions that actually spawn (see
+/// `caddy::ensure_net` / `ensure_running`), which is also why this takes a
+/// resolved runtime rather than the config.
+pub fn ensure_available(runtime: &str) -> Result<()> {
+    if on_path(runtime) {
+        return Ok(());
+    }
+    // The two cases want different advice: nothing installed is a "go install
+    // one", a pin naming something absent is a "fix the pin".
+    match detect_runtime() {
+        None => anyhow::bail!(
+            "no container runtime found — `ws` drives {}. Install one, or set \
+             `runtime` in .ws.json if yours is under another name.",
+            RUNTIMES.join(" or ")
+        ),
+        Some(found) => anyhow::bail!(
+            "`{runtime}` isn't on PATH, but `{found}` is. Either install `{runtime}` \
+             or change `runtime` in .ws.json."
+        ),
+    }
+}
+
 /// Whether `bin` is an executable `ws` can spawn. Asks the same question the
 /// spawn will (`Command` resolves against PATH) rather than reading `$PATH`
 /// ourselves, so a shell alias or a PATH quirk can't make the two disagree.
@@ -331,8 +359,9 @@ impl WsConfig {
     /// Infallible so every call site that only *names* the runtime (the
     /// `WS_RUNTIME` hook env, a default script, an error message) keeps rendering
     /// on a machine with neither installed. The paths that are about to actually
-    /// spawn it use [`WsConfig::require_runtime`] instead, so the failure lands
-    /// with an explanation rather than as a bare `No such file or directory`.
+    /// spawn it go through [`ensure_available`] at the spawn site instead, so the
+    /// failure lands with an explanation rather than a bare `No such file or
+    /// directory` — and so the paths that never spawn one stay unaffected.
     pub fn runtime(&self) -> &str {
         if let Some(r) = self.runtime.as_deref() {
             return r;
@@ -348,23 +377,6 @@ impl WsConfig {
         detect_runtime().unwrap_or(RUNTIME_FALLBACK)
     }
 
-    /// [`WsConfig::runtime`] for the paths that immediately drive containers, with
-    /// the "nothing is installed" case named as an error instead of resolved to a
-    /// binary that isn't there.
-    pub fn require_runtime(&self) -> Result<&str> {
-        // A pinned runtime is the user's assertion, and a remote one describes the
-        // server — neither is ours to second-guess against the local PATH.
-        if self.runtime.is_some() || self.remote.is_some() {
-            return Ok(self.runtime());
-        }
-        detect_runtime().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no container runtime found — `ws` drives {}. Install one, or set \
-                 `runtime` in .ws.json if yours is under another name.",
-                RUNTIMES.join(" or ")
-            )
-        })
-    }
 
     /// The extended config for `repo`, if it's an object entry (not a bare
     /// name). The single repo→config lookup shared by script/hook resolution.
@@ -800,17 +812,23 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap().runtime(), "podman");
     }
 
-    /// A pinned runtime is the user's assertion about their machine (or their
-    /// server), so `require_runtime` passes it through rather than refusing a
-    /// name it can't find on the local PATH.
+    /// A missing runtime is named, and the two cases give different advice: a box
+    /// with nothing installed needs an install, a pin naming an absent binary
+    /// needs the pin changed.
     #[test]
-    fn require_runtime_trusts_a_pin_it_cannot_see() {
-        let cfg: WsConfig = serde_json::from_str(r#"{"runtime":"nerdctl","repos":[]}"#).unwrap();
-        assert_eq!(cfg.require_runtime().unwrap(), "nerdctl");
-
-        let remote: WsConfig =
-            serde_json::from_str(r#"{"repos":[],"remote":{"connection":"srv"}}"#).unwrap();
-        assert_eq!(remote.require_runtime().unwrap(), "podman");
+    fn ensure_available_explains_which_kind_of_missing_it_is() {
+        let err = ensure_available("definitely-not-a-runtime").unwrap_err().to_string();
+        match detect_runtime() {
+            Some(found) => {
+                assert!(err.contains(found), "should name the runtime that IS here: {err}");
+                assert!(err.contains(".ws.json"), "should point at the pin: {err}");
+            }
+            None => assert!(err.contains("no container runtime found"), "{err}"),
+        }
+        // A present binary passes. `git` stands in for a runtime: which container
+        // runtimes exist is exactly the CI variable this test can't pin down, and
+        // `git` is already a hard requirement of every `ws` command.
+        assert!(ensure_available("git").is_ok());
     }
 
     #[test]
