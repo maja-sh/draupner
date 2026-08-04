@@ -33,8 +33,12 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // external `ws-net`; ensure it exists first so a post-create that runs compose
     // (`compose run --rm app composer install`) doesn't fail on a missing network.
     if cfg.routing_active() {
-        if let Err(e) = crate::caddy::ensure_net(&site, cfg.runtime()) {
-            crate::ui::note(&format!("ws-net: {e}"));
+        // `require_runtime` rather than `runtime`: this is the first call that
+        // spawns it, so a box with neither installed says so here instead of
+        // surfacing as a bare spawn failure.
+        match cfg.require_runtime().and_then(|rt| crate::caddy::ensure_net(&site, rt)) {
+            Ok(()) => {}
+            Err(e) => crate::ui::note(&format!("ws-net: {e}")),
         }
     }
 
