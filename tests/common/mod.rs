@@ -89,6 +89,7 @@ fn content_length(headers: &[u8]) -> usize {
 pub struct WorkspaceFixture {
     pub root: TempDir,
     admin: AdminStub,
+    port_base: Option<u16>,
 }
 
 impl WorkspaceFixture {
@@ -97,7 +98,17 @@ impl WorkspaceFixture {
             .prefix("wsfix-")
             .tempdir()
             .expect("tempdir");
-        Self { root, admin: AdminStub::start() }
+        Self { root, admin: AdminStub::start(), port_base: None }
+    }
+
+    /// Give this fixture its own port window, so a test that asserts on a
+    /// *specific* allocation can't be handed the same port as a concurrent one.
+    /// Only tests making that kind of assertion need it — everything else is
+    /// indifferent to which port it got. Pick bases at least
+    /// `MOVED_WIDTH` (500) apart, and outside the default 20000..40000 window.
+    pub fn with_port_base(mut self, base: u16) -> Self {
+        self.port_base = Some(base);
+        self
     }
 
     /// Create a workspace with the given repos and a `.ws.json` referencing them.
@@ -285,6 +296,9 @@ impl WorkspaceFixture {
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "test")
             .env("GIT_COMMITTER_EMAIL", "test@example.com");
+        if let Some(base) = self.port_base {
+            cmd.env("WS_PORT_BASE", base.to_string());
+        }
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
