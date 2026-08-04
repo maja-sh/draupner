@@ -152,6 +152,30 @@ fn remote_set_treats_an_empty_path_as_absent() {
 }
 
 #[test]
+fn remote_set_keeps_a_pinned_publish_address_across_a_repoint() {
+    let ws = WorkspaceFixture::with_repos(&["api"]);
+    // `publish_address` is how a user narrows the server's Caddy off every
+    // interface. Re-pointing the workspace at a different server is not a
+    // request to widen that again, and losing it is invisible until something
+    // on the LAN reaches a dev stack — so the flip must carry it, exactly as it
+    // already carries `workspace_path`.
+    ws.write_ws_json(
+        r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj",
+            "publish_address":"100.64.1.3"}}"#,
+    );
+
+    let out = ws.run(&["remote", "set", "new-host", "--no-verify"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("\"connection\": \"new-host\""), "the re-point must land:\n{cfg}");
+    assert!(
+        cfg.contains("\"publish_address\": \"100.64.1.3\""),
+        "a pinned publish_address must survive the re-point:\n{cfg}"
+    );
+}
+
+#[test]
 fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);

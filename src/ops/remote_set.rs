@@ -65,7 +65,15 @@ pub fn set(
         .filter(|p| !p.is_empty())
         .or_else(|| cfg.remote.as_ref().and_then(|r| r.workspace_path.clone()))
         .unwrap_or_else(|| config::default_worktree_base(&ws.root));
-    let new_remote = RemoteConfig::new(connection.clone(), Some(workspace_path));
+    // Carry a pinned `publish_address` across the re-point for the same reason
+    // `workspace_path` is carried: it is deliberate configuration the user wrote,
+    // and `RemoteConfig::new` leaves it unset. Dropping it silently widens Caddy
+    // back to every interface on the next `up` — the one direction this setting
+    // must never move on its own.
+    let new_remote = RemoteConfig {
+        publish_address: cfg.remote.as_ref().and_then(|r| r.publish_address.clone()),
+        ..RemoteConfig::new(connection.clone(), Some(workspace_path))
+    };
     let base = new_remote.worktree_base(&ws.root);
     let new_answer = expected_wildcard(Some(&new_remote));
 
