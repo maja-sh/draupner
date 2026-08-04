@@ -129,13 +129,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                      the server's networks; pin one with `remote.publish_address` in .ws.json",
                 );
             }
-            // `require_runtime`, not `runtime`: routing is active, so this is about
-            // to spawn the runtime — a machine with none installed should read that
-            // as the reason rather than as a Caddy that mysteriously won't start.
-            let ready = cfg
-                .require_runtime()
-                .and_then(|rt| crate::caddy::ensure_routing(&site, rt, domain, &publish));
-            let dns = match ready {
+            let dns = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
                 Ok(state) => {
                     if let Some(h) = crate::caddy::resolve_hint(&site, domain, &state) {
                         crate::ui::note(&h);
