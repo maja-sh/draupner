@@ -8,6 +8,12 @@
 # rest lives here — a readable script you run yourself. That's the transparency
 # contract: nothing privileged happens invisibly.
 #
+# Podman only, deliberately. `ws` drives either podman or docker on the machine
+# you run it *from*, but a server is podman: rootless by default, no daemon, and
+# no root-equivalent group to join. Debian's docker packages are also too old for
+# the Compose features `ws` generates. So a workspace that offloads here runs on
+# podman — which is exactly what an absent `runtime` in `.ws.json` resolves to.
+#
 #   0. Prerequisites  → podman, a Compose provider, iproute2, mutagen, curl, sshd.
 #   1. Trust Caddy's internal root CA  → browsers stop warning on the TLS cert.
 #   2. Wildcard DNS  *.<domain> → <address>  → per-worktree hostnames resolve.
@@ -53,7 +59,6 @@ MUTAGEN_SHA256_arm64="bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd5
 # only understands from this version on.
 COMPOSE_MIN="2.24.4"
 
-runtime="${WS_RUNTIME:-podman}"
 domain="${WS_DOMAIN:-}"
 # What `*.<domain>` should answer with. Loopback is right when the workspaces
 # live on this same machine; an offload box wants the address its clients
@@ -210,7 +215,7 @@ prerequisites() {
   if compose_provider_present; then
     note "✓ compose provider"
   else
-    note "✗ compose provider — the Compose binary \`$runtime compose\` calls"
+    note "✗ compose provider — the Compose binary \`podman compose\` calls"
     missing+=(docker-compose)
   fi
 
@@ -232,9 +237,9 @@ prerequisites() {
 # so plainly rather than letting `ws up` fail later with a YAML parse error.
 check_compose() {
   local v
-  if ! "$runtime" compose version >/dev/null 2>&1; then
-    note "✗ \`$runtime compose\` does not work on this box."
-    note "    ws needs $runtime >= 4.7 (older ones have no \`compose\` subcommand)"
+  if ! podman compose version >/dev/null 2>&1; then
+    note "✗ \`podman compose\` does not work on this box."
+    note "    ws needs podman >= 4.7 (older ones have no \`compose\` subcommand)"
     note "    and a Compose provider >= $COMPOSE_MIN (for the \`!override\` tag)."
     note "    Debian 12 ships podman 4.3.1 + docker-compose 1.29.2 — both too old."
     note "    Use Debian 13 (trixie) or newer, or install them from upstream."
@@ -243,7 +248,7 @@ check_compose() {
   fi
   # `|| true`: not every provider implements `--short`, and pipefail would
   # otherwise abort the whole script over a version string we can live without.
-  v="$("$runtime" compose version --short 2>/dev/null || true)"
+  v="$(podman compose version --short 2>/dev/null || true)"
   v="${v#v}"
   if [ -n "$v" ] &&
      [ "$(printf '%s\n%s\n' "$COMPOSE_MIN" "$v" | sort -V | head -1)" != "$COMPOSE_MIN" ]; then
@@ -251,7 +256,7 @@ check_compose() {
     note "    Container repos will fail at \`ws up\` until this is upgraded."
     return 0
   fi
-  note "✓ $runtime compose${v:+ (provider $v)}"
+  note "✓ podman compose${v:+ (provider $v)}"
 }
 
 # ---------------------------------------------------------------------------
@@ -285,14 +290,14 @@ check_ca() {
 
 trust_ca() {
   say "Trust Caddy's root CA"
-  if ! "$runtime" container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
+  if ! podman container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
     note "skip: the $CADDY_CONTAINER container isn't running yet."
     note "      start it from the machine running \`ws\` (\`ws setup\`, which reaches"
     note "      this box over SSH when it's remote), then re-run this script."
     return 0
   fi
   local root
-  root="$("$runtime" exec "$CADDY_CONTAINER" \
+  root="$(podman exec "$CADDY_CONTAINER" \
     cat /data/caddy/pki/authorities/local/root.crt 2>/dev/null || true)"
   if [ -z "$root" ]; then
     note "skip: couldn't read Caddy's root CA from $CADDY_CONTAINER."
@@ -685,10 +690,9 @@ enable_linger() {
 # is a `systemd --user` unit, and `ws` connects over a non-login SSH session
 # where the user manager only exists if lingering is on.
 podman_socket() {
-  [ "$runtime" = "podman" ] || return 0
   say "Podman API socket"
   local path
-  path="$("$runtime" info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+  path="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
   # Test the path itself. podman's own `RemoteSocket.Exists` reports true for a
   # socket that isn't there, so trusting it skips the work and `ws up` then
   # fails with a bare "Cannot connect to the Docker daemon".
