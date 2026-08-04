@@ -50,6 +50,15 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         )));
     }
 
+    // Raise the 0.6 hook-file migration refusal here, alongside the other static
+    // preflights, rather than from `ctx.command` in the middle of the creation
+    // loop. It is a config-plus-`stat` check with no reason to land after
+    // worktrees and sync sessions already exist — and the fix it asks for
+    // (declare the script in `.ws.json`) is unreachable while the half-created
+    // task blocks the re-run.
+    crate::hooks::preflight_legacy_hook_files(&cfg, &ws.root, &requested, &["post-create"])
+        .map_err(|e| super::preflight(e.to_string()))?;
+
     std::fs::create_dir_all(&task_dir)
         .with_context(|| format!("create {}", task_dir.display()))?;
 
