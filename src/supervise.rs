@@ -789,15 +789,28 @@ mod tests {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).expect("bin dir");
 
+        // Reaped on drop, so an assertion failure anywhere below still tears the
+        // tree down instead of leaving `sleep`s running for the rest of the suite.
+        struct Reaper(std::process::Child);
+        impl Drop for Reaper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
         // A parent with *two* children — one child would leave `all` on a single
         // line and the bug invisible.
-        let mut parent = std::process::Command::new("sh")
-            .args(["-c", "sleep 30 & sleep 30 & wait"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn a branching tree");
+        let parent = Reaper(
+            std::process::Command::new("sh")
+                .args(["-c", "sleep 30 & sleep 30 & wait"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a branching tree"),
+        );
+        let parent_pid = parent.0.id().to_string();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         let ps = std::process::Command::new("ps")
@@ -809,7 +822,7 @@ mod tests {
             .filter_map(|l| {
                 let mut f = l.split_whitespace();
                 let (pid, ppid) = (f.next()?, f.next()?);
-                (ppid == parent.id().to_string()).then(|| pid.to_string())
+                (ppid == parent_pid).then(|| pid.to_string())
             })
             .collect();
         assert_eq!(kids.len(), 2, "expected a branching tree, got {kids:?}");
@@ -831,25 +844,30 @@ mod tests {
 
         let script =
             format!("{}\n{}\nt=$(ws_tree \"$1\"); ws_owner \"$2\" \"$t\"", tree_fn(), owner_fn());
-        for shell in ["sh", "zsh", "bash", "dash"] {
-            if !have(shell) {
-                continue;
-            }
-            let out = std::process::Command::new(shell)
-                .args(["-c", script.as_str(), "ws-tree-test", &parent.id().to_string(), "20000"])
-                .env("PATH", &path)
-                .stdin(Stdio::null())
-                .output()
-                .expect("run ws_tree + ws_owner");
+        // Collect first, assert after cleanup: a panic mid-loop would otherwise
+        // leave the tree of `sleep`s running for the rest of the suite.
+        let verdicts: Vec<(&str, String)> = ["sh", "zsh", "bash", "dash"]
+            .into_iter()
+            .filter(|s| have(s))
+            .map(|shell| {
+                let out = std::process::Command::new(shell)
+                    .args(["-c", script.as_str(), "ws-tree-test", &parent_pid, "20000"])
+                    .env("PATH", &path)
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("run ws_tree + ws_owner");
+                (shell, String::from_utf8_lossy(&out.stdout).trim().to_string())
+            })
+            .collect();
+
+        drop(parent);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (shell, verdict) in verdicts {
             assert_eq!(
-                String::from_utf8_lossy(&out.stdout).trim(),
-                "ours",
+                verdict, "ours",
                 "{shell}: a port held by a descendant of our own process must read as ours"
             );
         }
-
-        let _ = parent.kill();
-        let _ = parent.wait();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
