@@ -4,7 +4,7 @@ For someone changing `ws`. If you want to *use* it, start at the
 [README](README.md) and [docs/](docs/) — this page deliberately doesn't repeat
 them.
 
-`ws` is ~9k lines of Rust across 38 files, but it is four ideas and one call
+`ws` is ~9k lines of Rust across 36 files, but it is four ideas and one call
 chain. This page names both, then traces `ws up` end to end, so the rest of the
 tree reads as variations on a path you have already seen.
 
@@ -366,10 +366,10 @@ client re-trusts a new root.
 - **`remote.rs` below `Site`** is ~800 lines of SSH detail (multiplexing options,
   the login-`PATH` probe, `env`-word rendering, the `.ws-hooks/` tar push). You
   almost never need it. `Site` is the part that matters.
-- **`specs/`** is gitignored and pre-implementation. A clone doesn't have it. Five
-  comments in committed source cite `spec-*.md` files (`ui.rs`, `hooks.rs`,
-  `ops/list.rs`, `mutagen.rs`) — those pointers are dead for anyone but the
-  author. The code and `docs/` are authoritative.
+- **`specs/`** is gitignored and pre-implementation. A clone doesn't have it. Three
+  comments in committed source cite `spec-*.md` files (`ui.rs`, `ops/list.rs`,
+  `mutagen.rs`) — those pointers are dead for anyone but the author. The code and
+  `docs/` are authoritative.
 - **`src/skills.rs` and `skills/`** are the `ws claude` payload, not part of any
   op's execution path.
 
@@ -422,7 +422,7 @@ comment above it.
 
 ```sh
 cargo build
-cargo test           # 381 tests, ~20s warm
+cargo test           # ~400 tests, ~20s warm
 cargo clippy --all-targets -- -D warnings
 ```
 
