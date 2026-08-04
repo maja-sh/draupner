@@ -20,6 +20,51 @@ lives in it directly rather than in a separate overlay.
 
 ---
 
+## Container runtime
+
+`ws` drives **docker** or **podman** — for `compose config` derivation, the
+shared `ws-net` network, and the routing Caddy container.
+
+Leave `runtime` out and `ws` detects one on PATH, **docker first**. That's why
+`ws init` doesn't write the key: an omitted `runtime` re-detects on whatever
+machine opens the workspace, while a pinned one would freeze the answer from the
+box that ran `init`.
+
+Pin it when the detected choice is wrong for you — both installed and you want
+podman, or your binary is under another name:
+
+```sh
+ws init --runtime podman     # or: add "runtime": "podman" to .ws.json
+```
+
+With neither installed, the operations that need one (`ws new` into a routed
+workspace, `ws up`, `ws setup`) say so directly instead of failing on a missing
+binary.
+
+### `runtime` is per *site*, not per machine
+
+For a workspace with a `remote` block, everything that spawns the runtime —
+`compose config`, the `ws-net` network, the Caddy container — spawns it **on the
+server**, over SSH. So `runtime` describes wherever this workspace's stacks
+actually run, and the machine you type `ws` on doesn't come into it.
+
+That makes the supported topology **docker or podman on your machine, podman on
+the server** ([server-setup](../server-setup/) provisions podman: rootless, no
+daemon, no root-equivalent group to join). A `remote` block with no `runtime`
+therefore resolves to podman rather than detecting, because the client's PATH
+says nothing about the server's.
+
+The practical consequence: **leave `runtime` out** and a workspace gets docker
+locally and podman when you offload it, with no edit in between. Pin it only to
+override one of those.
+
+One rough edge: the compose isolation lint on `ws new` is a static check over
+the committed files, so it always runs locally. On a docker-only machine with a
+podman-pinned workspace it yields nothing rather than erroring — you lose a
+lint, not a command.
+
+---
+
 ## Repos
 
 A repo entry is either a bare name or an object:

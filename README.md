@@ -45,7 +45,7 @@ On the machine you run `ws` from:
 | Need | For |
 |---|---|
 | `git` | worktrees — always |
-| `podman` (default) or `docker` | `kind: container` repos |
+| `docker` or `podman` | `kind: container` repos — whichever is installed, docker first |
 | `ss` (Linux) / `lsof` (macOS) | reporting whether a host process is serving its port |
 | `mutagen` | offloading a workspace to a server ([docs/offload.md](docs/offload.md)) |
 

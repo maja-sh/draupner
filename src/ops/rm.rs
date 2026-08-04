@@ -18,15 +18,16 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     // aborted the loop part-way — some repos torn down, the rest left behind —
     // and made the branch permanently unremovable until the stray dir was
     // deleted by hand.
-    //
-    // A registration whose directory is gone is excluded too: `git worktree
-    // remove` fails on those, and before this enumeration change they were
-    // simply invisible here (that's `git worktree prune`'s job, not `ws rm`'s).
     let known = workspace::worktrees(&ws.root, &cfg);
     let task = workspace::sanitize_branch(branch);
     let worktrees: Vec<(String, PathBuf)> = known
         .iter()
-        .filter(|w| w.task.as_deref() == Some(task.as_str()) && w.path.is_dir())
+        // Branch-or-task: the branch match catches a detached worktree, which has
+        // no branch for the task-name comparison to hit. Stale registrations
+        // (directory gone) are KEPT: `git worktree remove --force` prunes them,
+        // and skipping them would leave the branch pinned by a registration `ws`
+        // silently ignored — main's rm-clears-a-registration test is what fires.
+        .filter(|w| w.branch.as_deref() == Some(branch) || w.task.as_deref() == Some(task.as_str()))
         .map(|w| (w.repo.clone(), w.path.clone()))
         .collect();
 

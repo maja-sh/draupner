@@ -12,7 +12,18 @@ use std::path::PathBuf;
 /// A host repo whose `up` records the injected env, then runs a long sleep as the
 /// supervised (tracked) process.
 fn host_fixture() -> WorkspaceFixture {
-    let f = WorkspaceFixture::empty();
+    host_fixture_in(WorkspaceFixture::empty())
+}
+
+/// [`host_fixture`] in a private port window, for the tests that assert on which
+/// port `ws` handed out. See [`WorkspaceFixture::with_port_base`] — the bases are
+/// deliberately above the default 20000..40000 window so these can't collide with
+/// each other *or* with any other test's allocation.
+fn host_fixture_at(port_base: u16) -> WorkspaceFixture {
+    host_fixture_in(WorkspaceFixture::empty().with_port_base(port_base))
+}
+
+fn host_fixture_in(f: WorkspaceFixture) -> WorkspaceFixture {
     f.add_repo("api");
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api","kind":"host",
@@ -100,20 +111,23 @@ fn allocated_port(out: &str) -> u16 {
         .expect("a numeric port after `web:`")
 }
 
-/// Serialises the tests that care about *which* process holds an allocated port.
+/// Private port windows for the tests that care about *which* process holds an
+/// allocated port.
 ///
 /// Allocation scans `.ws-meta` per workspace root and confirms the choice with a
 /// live bind, so two fixtures running in parallel can be handed the same port
 /// while neither is holding it yet — and then one test's listener gets attributed
 /// to the other test's process. That collision is real (a known cross-workspace
 /// limitation) but it isn't what these tests are about.
-static PORT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Take the port lock, ignoring poisoning: one test failing shouldn't turn the
-/// others into spurious failures that hide it.
-fn port_lock() -> std::sync::MutexGuard<'static, ()> {
-    PORT_TESTS.lock().unwrap_or_else(|e| e.into_inner())
-}
+///
+/// This used to be a `Mutex`, which only worked because `cargo test` runs each
+/// test binary sequentially and these three shared one process. Under a
+/// per-test-process runner every test locks its own private copy and the lock
+/// quietly stops serialising anything, so the constraint is expressed as
+/// non-overlapping windows instead — which also lets the three run in parallel.
+const PORT_BASE_NEVER_BOUND: u16 = 41000;
+const PORT_BASE_SQUATTED: u16 = 42000;
+const PORT_BASE_SERVING: u16 = 43000;
 
 /// Can the site attribute a listening socket to a pid? `ss` (Linux) or `lsof`
 /// (macOS); without either, ws reports plain liveness and these assertions
@@ -175,7 +189,6 @@ fn list_reports_a_host_process_that_crashed() {
 
 #[test]
 fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
-    let _ports = port_lock();
     // Alive is not the same as serving. The fixture's `up` is a bare `sleep`: it
     // runs happily forever and never listens on the port ws handed it, which is
     // indistinguishable from a working dev server to a pid check.
@@ -183,7 +196,7 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
     }
-    let f = host_fixture();
+    let f = host_fixture_at(PORT_BASE_NEVER_BOUND);
     f.run_ok(&["new", "api", "feat/foo"]);
 
     let out = f.run_ok(&["up", "feat/foo"]);
@@ -205,7 +218,6 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
 
 #[test]
 fn up_warns_when_another_process_holds_the_allocated_port() {
-    let _ports = port_lock();
     // The expensive one. An orphan from an earlier run still held the port, so the
     // dev server found it busy and silently moved to another — while ws reported
     // the port it had allocated, and everything downstream dialled that.
@@ -213,7 +225,7 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
     }
-    let f = host_fixture();
+    let f = host_fixture_at(PORT_BASE_SQUATTED);
     f.run_ok(&["new", "api", "feat/foo"]);
 
     // First up allocates the port. The supervised process is a bare `sleep`, so it
@@ -245,7 +257,6 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
 
 #[test]
 fn up_and_list_confirm_a_process_serving_its_allocated_port() {
-    let _ports = port_lock();
     // The green path: when the process really is listening on the port ws
     // allocated, ws says so plainly and adds no caveat.
     if !port_tools_available() {
@@ -262,7 +273,7 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
         return;
     }
 
-    let f = WorkspaceFixture::empty();
+    let f = WorkspaceFixture::empty().with_port_base(PORT_BASE_SERVING);
     f.add_repo("api");
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}},

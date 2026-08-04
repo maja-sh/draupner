@@ -31,6 +31,25 @@ fn setup_on_linux_reports_gaps_and_points_at_the_script() {
     );
 }
 
+// A runtime that isn't installed must only fail the commands that actually spawn
+// one. `ws` used to check for a runtime as a preflight on `ws setup`, which broke
+// both paths that legitimately never touch it: an externally-managed Caddy and a
+// workspace with no `domain`. It surfaced as macOS CI (no docker, no podman)
+// failing every setup test.
+#[test]
+fn setup_survives_a_runtime_that_isnt_installed() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(r#"{"runtime":"definitely-not-a-runtime","repos":["api"]}"#);
+
+    let out = f.run_ok(&["setup"]);
+    assert!(
+        stderr(&out).contains("No `domain` set"),
+        "an absent runtime must not fail a setup that never spawns one:\n{}",
+        stderr(&out)
+    );
+}
+
 // With no `domain`, routing isn't configured, so there are no privileged bits —
 // `ws setup` says so and exits cleanly.
 #[test]

@@ -8,6 +8,12 @@
 # rest lives here — a readable script you run yourself. That's the transparency
 # contract: nothing privileged happens invisibly.
 #
+# Podman only, deliberately. `ws` drives either podman or docker on the machine
+# you run it *from*, but a server is podman: rootless by default, no daemon, and
+# no root-equivalent group to join. Debian's docker packages are also too old for
+# the Compose features `ws` generates. So a workspace that offloads here runs on
+# podman — which is exactly what an absent `runtime` in `.ws.json` resolves to.
+#
 #   0. Prerequisites  → podman, a Compose provider, iproute2, mutagen, curl, sshd.
 #   1. Trust Caddy's internal root CA  → browsers stop warning on the TLS cert.
 #   2. Wildcard DNS  *.<domain> → <address>  → per-worktree hostnames resolve.
@@ -53,7 +59,6 @@ MUTAGEN_SHA256_arm64="bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd5
 # only understands from this version on.
 COMPOSE_MIN="2.24.4"
 
-runtime="${WS_RUNTIME:-podman}"
 domain="${WS_DOMAIN:-}"
 # What `*.<domain>` should answer with. Loopback is right when the workspaces
 # live on this same machine; an offload box wants the address its clients
@@ -210,7 +215,7 @@ prerequisites() {
   if compose_provider_present; then
     note "✓ compose provider"
   else
-    note "✗ compose provider — the Compose binary \`$runtime compose\` calls"
+    note "✗ compose provider — the Compose binary \`podman compose\` calls"
     missing+=(docker-compose)
   fi
 
@@ -232,9 +237,9 @@ prerequisites() {
 # so plainly rather than letting `ws up` fail later with a YAML parse error.
 check_compose() {
   local v
-  if ! "$runtime" compose version >/dev/null 2>&1; then
-    note "✗ \`$runtime compose\` does not work on this box."
-    note "    ws needs $runtime >= 4.7 (older ones have no \`compose\` subcommand)"
+  if ! podman compose version >/dev/null 2>&1; then
+    note "✗ \`podman compose\` does not work on this box."
+    note "    ws needs podman >= 4.7 (older ones have no \`compose\` subcommand)"
     note "    and a Compose provider >= $COMPOSE_MIN (for the \`!override\` tag)."
     note "    Debian 12 ships podman 4.3.1 + docker-compose 1.29.2 — both too old."
     note "    Use Debian 13 (trixie) or newer, or install them from upstream."
@@ -243,7 +248,7 @@ check_compose() {
   fi
   # `|| true`: not every provider implements `--short`, and pipefail would
   # otherwise abort the whole script over a version string we can live without.
-  v="$("$runtime" compose version --short 2>/dev/null || true)"
+  v="$(podman compose version --short 2>/dev/null || true)"
   v="${v#v}"
   if [ -n "$v" ] &&
      [ "$(printf '%s\n%s\n' "$COMPOSE_MIN" "$v" | sort -V | head -1)" != "$COMPOSE_MIN" ]; then
@@ -251,7 +256,7 @@ check_compose() {
     note "    Container repos will fail at \`ws up\` until this is upgraded."
     return 0
   fi
-  note "✓ $runtime compose${v:+ (provider $v)}"
+  note "✓ podman compose${v:+ (provider $v)}"
 }
 
 # ---------------------------------------------------------------------------
@@ -285,14 +290,14 @@ check_ca() {
 
 trust_ca() {
   say "Trust Caddy's root CA"
-  if ! "$runtime" container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
+  if ! podman container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
     note "skip: the $CADDY_CONTAINER container isn't running yet."
     note "      start it from the machine running \`ws\` (\`ws setup\`, which reaches"
     note "      this box over SSH when it's remote), then re-run this script."
     return 0
   fi
   local root
-  root="$("$runtime" exec "$CADDY_CONTAINER" \
+  root="$(podman exec "$CADDY_CONTAINER" \
     cat /data/caddy/pki/authorities/local/root.crt 2>/dev/null || true)"
   if [ -z "$root" ]; then
     note "skip: couldn't read Caddy's root CA from $CADDY_CONTAINER."
@@ -450,6 +455,9 @@ local_resolver() {
 
   local backup="/etc/resolv.conf.ws-backup"
   sudo cp /etc/resolv.conf "$backup"
+  # An earlier run may have frozen the file (see `freeze_resolver`); both the
+  # write below and the restore on failure fail outright while it is immutable.
+  thaw_resolver
   # Keep the old servers as fallbacks. glibc only falls through on timeout, not
   # on NXDOMAIN, so this can't leak `*.$domain` to the upstream — it only means
   # a dead dnsmasq degrades to the previous behaviour instead of no DNS at all.
@@ -488,6 +496,60 @@ local_resolver() {
 # play rather than assume. Where it isn't determinable, or where the fix means
 # editing a profile only the operator can pick, print the exact thing to do
 # instead of guessing at someone else's network config.
+
+# Whether /etc/resolv.conf carries the immutable attribute.
+resolver_frozen() {
+  command -v lsattr >/dev/null 2>&1 || return 1
+  lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q i
+}
+
+# Drop that attribute so this script can rewrite the file — a no-op when it was
+# never frozen. Anything here that writes /etc/resolv.conf must go through this
+# first, or an earlier run's freeze turns the write into a fatal error.
+thaw_resolver() {
+  resolver_frozen || return 0
+  sudo chattr -i /etc/resolv.conf
+}
+
+# Freeze /etc/resolv.conf so that nothing can rewrite it. Non-zero when that
+# isn't safe or possible here, which falls the caller through to the
+# per-manager guidance below.
+#
+# Safe only once dnsmasq has `no-resolv`: it then takes its upstreams from its
+# own config, which leaves /etc/resolv.conf with no remaining job but to name
+# the local resolver — a static fact with nothing left to learn from a lease.
+# Every other mechanism below *races* the rewrite (get the right line into the
+# right DHCP client's config, then hope that client re-reads it); freezing
+# removes the race instead of winning it.
+#
+# A symlinked resolv.conf is left alone — resolvconf/openresolv keep the real
+# file elsewhere, so the attribute would land on the link and defend nothing.
+freeze_resolver() {
+  local up_conf="/etc/dnsmasq.d/ws-upstream.conf"
+  grep -qE '^[[:space:]]*no-resolv[[:space:]]*$' "$up_conf" 2>/dev/null || return 1
+  [ ! -L /etc/resolv.conf ] || return 1
+  command -v chattr >/dev/null 2>&1 || return 1
+
+  if resolver_frozen; then
+    note "/etc/resolv.conf is already frozen — no renewal can rewrite it."
+  else
+    # Not every filesystem carries the attribute; that's a fallthrough to the
+    # advice below, not a failure worth aborting the whole setup for.
+    if ! sudo chattr +i /etc/resolv.conf 2>/dev/null; then
+      note "couldn't set the immutable attribute on /etc/resolv.conf"
+      note "  (the filesystem may not support it) — falling back."
+      return 1
+    fi
+    note "froze /etc/resolv.conf — no lease renewal can rewrite it."
+  fi
+  note "  dnsmasq has \`no-resolv\`, so its upstreams live in $up_conf and this"
+  note "  file only has to name the local resolver."
+  note "  to edit it later:  sudo chattr -i /etc/resolv.conf"
+  note "  if this box moves to another network, update the \`server=\` line in"
+  note "  $up_conf too — \`no-resolv\` means DHCP no longer supplies it."
+  return 0
+}
+
 persist_resolver() {
   # systemd-resolved owns the file and the drop-in written above is persistent
   # config, not a file DHCP rewrites — nothing to defend.
@@ -498,6 +560,16 @@ persist_resolver() {
   grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.' /etc/resolv.conf 2>/dev/null || return 0
 
   say "Keep /etc/resolv.conf pointing at dnsmasq across DHCP renewals"
+
+  # Freezing the file outright is the strongest option and the only one that
+  # doesn't depend on which DHCP client runs here, on when it last parsed its
+  # config, or on it being restarted afterwards — so try it before the
+  # per-manager mechanisms. That dependency is exactly what failed in practice:
+  # the `prepend` below was correct on disk and ignored for a month by a
+  # dhclient that had started before the line existed.
+  if freeze_resolver; then
+    return 0
+  fi
 
   if systemctl is-active --quiet NetworkManager 2>/dev/null; then
     # NetworkManager uses its own internal DHCP client by default, which doesn't
@@ -530,7 +602,24 @@ persist_resolver() {
         echo "prepend domain-name-servers 127.0.0.1;"
       } | sudo tee -a "$dh" >/dev/null
       note "added \`prepend domain-name-servers 127.0.0.1;\` to $dh."
-      note "  takes effect on the next renewal; the file is correct until then."
+    fi
+    # dhclient parses its config at startup only — a renewal re-applies what the
+    # running process read back then, so a dhclient older than the prepend line
+    # keeps rewriting resolv.conf without it until restarted.
+    local pid started
+    pid="$(pgrep -o -x dhclient 2>/dev/null || true)"
+    if [ -z "$pid" ]; then
+      note "no dhclient is running right now — the prepend applies when one starts."
+      return 0
+    fi
+    started="$(( $(date +%s) - $(ps -o etimes= -p "$pid" | tr -d ' ') ))"
+    if [ "$started" -lt "$(stat -c %Y "$dh")" ]; then
+      note "the running dhclient (pid $pid) started before that line existed and"
+      note "  won't read it until restarted — until then a lease renewal still"
+      note "  rewrites /etc/resolv.conf without dnsmasq. Restart it in place"
+      note "  (the lease and the interface stay up):"
+      note "    sudo kill $pid"
+      note "    sudo $(tr '\0' ' ' <"/proc/$pid/cmdline")"
     fi
     return 0
   fi
@@ -601,10 +690,9 @@ enable_linger() {
 # is a `systemd --user` unit, and `ws` connects over a non-login SSH session
 # where the user manager only exists if lingering is on.
 podman_socket() {
-  [ "$runtime" = "podman" ] || return 0
   say "Podman API socket"
   local path
-  path="$("$runtime" info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+  path="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
   # Test the path itself. podman's own `RemoteSocket.Exists` reports true for a
   # socket that isn't there, so trusting it skips the work and `ws up` then
   # fails with a bare "Cannot connect to the Docker daemon".

@@ -32,22 +32,28 @@ pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
         Some((conn, workspace_path)) => {
             crate::remote::ensure_connection_safe(&conn)
                 .map_err(|e| super::preflight(e.to_string()))?;
-            check_remote(&conn, &workspace_path, cfg.domain.as_deref(), verbose)
+            check_remote(&conn, &workspace_path, cfg.runtime(), cfg.domain.as_deref(), verbose)
         }
         None => check_local(&cfg, verbose),
     }
 }
 
 /// Probe the offload server: SSH reachable + mutagen local (client side), then a
-/// single read-only SSH script (mutagen / podman / Caddy / workspace dir, plus
-/// wildcard DNS when the workspace routes).
-fn check_remote(connection: &str, workspace_path: &str, domain: Option<&str>, verbose: bool) -> Result<()> {
+/// single read-only SSH script (mutagen / the runtime / Caddy / workspace dir,
+/// plus wildcard DNS when the workspace routes).
+fn check_remote(
+    connection: &str,
+    workspace_path: &str,
+    runtime: &str,
+    domain: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
     crate::ui::header("ws-remote-check", connection);
 
     // One SSH connection: `server_probes` returns `None` precisely when SSH
     // couldn't connect, so we derive the reachability line from that instead of
     // paying a second handshake just to test it.
-    let server = probe::server_probes(connection, workspace_path, domain);
+    let server = probe::server_probes(connection, workspace_path, runtime, domain);
 
     // Render the ssh verdict as a plain status line — we derived it from the
     // server-probe connection, so we don't show a separate `ssh … true` command
@@ -65,7 +71,7 @@ fn check_remote(connection: &str, workspace_path: &str, domain: Option<&str>, ve
             if verbose {
                 crate::ui::command_block(&[format!(
                     "ssh {connection} {}",
-                    probe::server_script(workspace_path, domain)
+                    probe::server_script(workspace_path, runtime, domain)
                 )]);
             }
             for p in &probes {
@@ -132,7 +138,8 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
         return Err(super::op_failure("local routing setup is incomplete"));
     }
     crate::ui::summary_ok(&[format!(
-        "local routing ready — reach a worktree at https://<branch>.<svc>.{domain}"
+        "local routing ready — reach a worktree at https://<branch>.<svc>.{domain}{}",
+        crate::caddy::port_suffix(report.port)
     )]);
     Ok(())
 }

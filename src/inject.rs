@@ -425,7 +425,7 @@ fn route_specs(
         let upstream = if host {
             // A host process is reached at its allocated port on the host.
             match port_map.get(name) {
-                Some(port) => format!("host.containers.internal:{port}"),
+                Some(port) => format!("{}:{port}", crate::caddy::HOST_ALIAS),
                 None => continue,
             }
         } else {
@@ -728,10 +728,12 @@ mod tests {
     fn workspace_context_reports_runtime_and_remoteness() {
         use crate::config::{RemoteConfig, WsConfig};
 
-        // Default runtime, local workspace.
+        // Local workspace with no pin: hooks see whatever `ws` itself will drive,
+        // so this tracks detection rather than asserting a fixed binary.
         let local = WsConfig::default();
         let ctx = workspace_context(&local);
-        assert!(ctx.contains(&("WS_RUNTIME".to_string(), "podman".to_string())), "{ctx:?}");
+        let detected = crate::config::detect_runtime().unwrap_or("podman").to_string();
+        assert!(ctx.contains(&("WS_RUNTIME".to_string(), detected)), "{ctx:?}");
         assert!(ctx.contains(&("WS_REMOTE".to_string(), "0".to_string())), "{ctx:?}");
         // Always present, so a hook can test it without an unset-variable guard.
         assert!(ctx.contains(&("WS_CONNECTION".to_string(), String::new())), "{ctx:?}");

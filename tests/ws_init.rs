@@ -125,6 +125,43 @@ fn init_without_remote_writes_no_remote_block() {
     assert!(!cfg.contains("\"remote\""), "no remote block expected without --remote:\n{cfg}");
 }
 
+/// A detected runtime is this machine's answer, not the workspace's, so it stays
+/// out of `.ws.json` — pinning it would freeze one box's install into a file
+/// meant to work on every box. The summary still says which one was picked, so
+/// the choice isn't invisible.
+#[test]
+fn init_leaves_a_detected_runtime_out_of_the_config() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let err = stderr(&ws.run_ok(&["init"]));
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(!cfg.contains("\"runtime\""), "a detected runtime must not be pinned:\n{cfg}");
+    assert!(err.contains("runtime →"), "the detected runtime should be reported:\n{err}");
+    assert!(err.contains("detected"), "the summary should say it was detected:\n{err}");
+}
+
+/// `--runtime` is the opposite assertion: the user named one, so it's written.
+#[test]
+fn init_pins_an_explicit_runtime() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let err = stderr(&ws.run_ok(&["init", "--runtime", "podman"]));
+    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(cfg.contains("\"runtime\": \"podman\""), "--runtime must be pinned:\n{cfg}");
+    assert!(err.contains("pinned"), "the summary should say it was pinned:\n{err}");
+}
+
+/// Only the runtimes `ws` can actually drive are accepted — a typo'd one used to
+/// reach `.ws.json` and only surface as a failed spawn much later.
+#[test]
+fn init_rejects_an_unknown_runtime() {
+    let ws = WorkspaceFixture::empty();
+    ws.add_repo("api");
+    let out = ws.run(&["init", "--runtime", "dokcer"]);
+    assert_ne!(out.status.code(), Some(0), "an unknown runtime must be refused");
+    assert!(!ws.path().join(".ws.json").exists(), "nothing should be written on a refusal");
+}
+
 #[test]
 fn init_refuses_when_ws_json_exists() {
     let ws = WorkspaceFixture::empty();

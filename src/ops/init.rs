@@ -81,7 +81,12 @@ fn init_local(
 ) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
-    let runtime = runtime.unwrap_or_else(|| "podman".to_string());
+    // The runtime the scaffolding itself derives with (`compose config` needs a
+    // concrete binary), kept apart from whether it gets *written*: `--runtime` is
+    // a pin the user asked for, a detected one is just this machine's answer and
+    // stays out of `.ws.json` so the workspace re-detects wherever it's opened.
+    let effective =
+        runtime.clone().unwrap_or_else(|| crate::config::detect_runtime().unwrap_or("podman").to_string());
 
     // Blocks *creating* a nested root, not running `ws` from a subdir (that
     // still resolves upward). The hazard: under the outer's `.worktrees/`, an
@@ -117,14 +122,17 @@ fn init_local(
     let repos = detect_repos(root)?;
 
     let remote_note = remote.as_ref().map(|r| r.connection.clone());
+    // `pinned` gates the "runtime → …" line in the summary below. `step_config`
+    // isn't needed here — this branch routes the write through `write_ws_json`,
+    // which reports its own step (its whole point is that ws init / remote set /
+    // remote unset can't drift on the filename or the label).
+    let pinned = runtime.is_some();
     let cfg = WsConfig {
         schema: Some("./.ws.schema.json".to_string()),
         domain,
-        // Written explicitly (like workspace_path) so the routing runtime is
-        // visible/discoverable in the scaffolded .ws.json.
-        runtime: Some(runtime.clone()),
+        runtime,
         remote,
-        repos: repos.iter().map(|r| scaffold_repo(root, r, &runtime)).collect(),
+        repos: repos.iter().map(|r| scaffold_repo(root, r, &effective)).collect(),
     };
     super::write_ws_json(root, &cfg)?;
     write_schema(root)?;
@@ -138,6 +146,14 @@ fn init_local(
     if let Some(conn) = &remote_note {
         summary.push(format!("remote  → {conn}"));
     }
+    // The runtime no longer appears in the scaffold when it was detected, so say
+    // it here — otherwise a detected choice would be invisible until something
+    // used it.
+    summary.push(if pinned {
+        format!("runtime → {effective} (pinned in .ws.json)")
+    } else {
+        format!("runtime → {effective} (detected — add `runtime` to .ws.json to pin it)")
+    });
     summary.push(".ws.schema.json".to_string());
     summary.push(".ws-hooks/".to_string());
     crate::ui::summary_ok(&summary);

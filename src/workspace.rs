@@ -55,8 +55,10 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Return all repo worktrees for a branch (repo name + path pairs).
-pub fn all_worktrees_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
+/// Every repo directory under a branch's task dir. A *filesystem* view — see
+/// [`worktrees`] for the authoritative one. Kept because a directory git
+/// doesn't know may still hold resources a teardown has to release.
+pub fn all_worktree_dirs_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
     list_child_dirs(&task_dir(root, branch))
         .into_iter()
         .filter_map(|(name, path)| name.map(|n| (n, path)))

@@ -118,6 +118,7 @@ pub struct WorkspaceFixture {
     /// hooks and write their config in either order, and a raw `write_ws_json`
     /// would otherwise drop the entries added before it.
     hooks: std::cell::RefCell<Vec<(String, String, String)>>,
+    port_base: Option<u16>,
 }
 
 impl WorkspaceFixture {
@@ -126,7 +127,17 @@ impl WorkspaceFixture {
             .prefix("wsfix-")
             .tempdir()
             .expect("tempdir");
-        Self { root, admin: AdminStub::start(), hooks: Default::default() }
+        Self { root, admin: AdminStub::start(), hooks: Default::default(), port_base: None }
+    }
+
+    /// Give this fixture its own port window, so a test that asserts on a
+    /// *specific* allocation can't be handed the same port as a concurrent one.
+    /// Only tests making that kind of assertion need it — everything else is
+    /// indifferent to which port it got. Pick bases at least
+    /// `MOVED_WIDTH` (500) apart, and outside the default 20000..40000 window.
+    pub fn with_port_base(mut self, base: u16) -> Self {
+        self.port_base = Some(base);
+        self
     }
 
     /// Create a workspace with the given repos and a `.ws.json` referencing them.
@@ -158,15 +169,21 @@ impl WorkspaceFixture {
     /// Panics on failure. Lets tests drive git directly to set up scenarios
     /// (commits, upstreams, dirty state).
     pub fn git(&self, repo_rel: &str, args: &[&str]) {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(self.path().join(repo_rel));
-        git_env(&mut cmd);
-        let out = cmd.output().expect("git");
+        let out = self.git_out(repo_rel, args);
         assert!(
             out.status.success(),
             "git {args:?} in {repo_rel} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Like `git`, but hands back the output instead of asserting success — for
+    /// tests that read git's own view of a repo rather than driving it.
+    pub fn git_out(&self, repo_rel: &str, args: &[&str]) -> Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(self.path().join(repo_rel));
+        git_env(&mut cmd);
+        cmd.output().expect("git")
     }
 
     /// Add a repo with a real bare `origin` remote (under `.origins/`) and its
@@ -312,6 +329,9 @@ impl WorkspaceFixture {
             // endpoint) to drive the routing-failure path.
             .env("WS_CADDY_ADMIN", self.admin.url.as_str());
         git_env(&mut cmd);
+        if let Some(base) = self.port_base {
+            cmd.env("WS_PORT_BASE", base.to_string());
+        }
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

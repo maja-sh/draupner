@@ -365,8 +365,11 @@ mod tests {
 
     #[test]
     fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
-        let cfg: WsConfig =
-            serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
+        // `runtime` pinned so the assertion doesn't depend on what's installed on
+        // the test host — main's `detect_runtime()` returns docker on any box that
+        // has both, and the point here is the resolution logic, not the picker.
+        let cfg: WsConfig = serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#)
+            .expect("parse config");
         // No declared script: a container repo gets the compose default,
         // everything else resolves to nothing (a dim skip for the caller).
         let cmd = resolve(&cfg, Path::new("/ws"), "api", "up", true)
@@ -389,8 +392,11 @@ mod tests {
         let file = hooks.join("up");
         std::fs::write(&file, "#!/bin/sh\necho hi\n").expect("write hook");
 
-        let cfg: WsConfig =
-            serde_json::from_str(r#"{"repos":[{"name":"api"}]}"#).expect("parse config");
+        // `runtime` pinned so the assertion doesn't depend on what's installed on
+        // the test host — main's `detect_runtime()` returns docker on any box that
+        // has both, and the point here is the resolution logic, not the picker.
+        let cfg: WsConfig = serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#)
+            .expect("parse config");
 
         // Not executable: it was already inert before the removal, so nothing to
         // migrate — a container repo still gets its default.
