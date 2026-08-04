@@ -26,5 +26,10 @@ jobs:
       # Debug profile on purpose: the release profile sets `panic = "abort"`,
       # which the test harness can't use. Container-dependent integration tests
       # skip themselves when no runtime is present, so this is green without one.
+      #
+      # nextest over `cargo test`: it runs each test in its own process and
+      # schedules across all test binaries at once, which roughly halves the
+      # phase here. There are no doctests to lose (nextest doesn't run them).
+      - uses: taiki-e/install-action@nextest
       - name: Test
-        run: cargo test
+        run: cargo nextest run

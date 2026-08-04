@@ -31,6 +31,40 @@ use crate::remote::Site;
 /// range, with room for many parallel worktrees.
 const RANGE: std::ops::Range<u16> = 20000..40000;
 
+/// Width of the window when [`WS_PORT_BASE`](range) moves its start. Far smaller
+/// than the default window because a relocated window serves one workspace, not
+/// every worktree on the machine.
+const MOVED_WIDTH: u16 = 500;
+
+/// The window [`free_port`] scans, honouring the `WS_PORT_BASE` seam.
+///
+/// Allocation reserves a port in `.ws-meta` and probes that nothing holds it
+/// *right now* — so two workspaces allocating concurrently are both told the
+/// same port is free, and whichever binds first wins. That's a real
+/// cross-workspace limitation (`ws` reports it as "port held by another
+/// process" rather than preventing it), and it makes any test asserting on a
+/// *specific* allocation race every other such test on the machine.
+///
+/// Moving the start is enough to give those tests non-overlapping windows;
+/// nothing else about allocation changes. Kept a seam rather than a `.ws.json`
+/// field: it exists to isolate concurrent test runs, not to configure a
+/// workspace.
+fn range() -> std::ops::Range<u16> {
+    window_from(std::env::var("WS_PORT_BASE").ok().and_then(|v| v.trim().parse().ok()))
+}
+
+/// The pure core of [`range`], so the seam's rules are testable without mutating
+/// the process environment — the shared-state hazard that made the port tests
+/// race in the first place.
+fn window_from(base: Option<u16>) -> std::ops::Range<u16> {
+    match base {
+        // A base below 1024 would hand out privileged ports, which no rootless
+        // process can bind. Ignore it rather than allocate something unusable.
+        Some(base) if base >= 1024 => base..base.saturating_add(MOVED_WIDTH),
+        _ => RANGE,
+    }
+}
+
 /// The `.ws-meta` dir under a workspace root (per-machine allocation state).
 pub fn meta_dir(root: &Path) -> PathBuf {
     root.join(".ws-meta")
@@ -173,11 +207,12 @@ fn used_ports(dir: &Path) -> HashSet<u16> {
     set
 }
 
-/// First port in `RANGE` that isn't already recorded and is free at `site` right
-/// now. The reservation is the `.ws-meta` record; the probe just confirms nothing
-/// else currently holds the port on the machine that will publish it.
+/// First port in the [`range`] that isn't already recorded and is free at `site`
+/// right now. The reservation is the `.ws-meta` record; the probe just confirms
+/// nothing else currently holds the port on the machine that will publish it.
 fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
-    for port in RANGE {
+    let window = range();
+    for port in window.clone() {
         if used.contains(&port) {
             continue;
         }
@@ -185,7 +220,7 @@ fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
             return Ok(port);
         }
     }
-    anyhow::bail!("no free host port in {}..{}", RANGE.start, RANGE.end)
+    anyhow::bail!("no free host port in {}..{}", window.start, window.end)
 }
 
 /// Whether `port` is free at `site`. Local: try to bind it (the listener is
@@ -295,6 +330,39 @@ mod tests {
         let a = resolve(&Site::Local, root, "feat-a", "api", &["mysql".into()]).unwrap()["mysql"];
         let b = resolve(&Site::Local, root, "feat-b", "api", &["mysql".into()]).unwrap()["mysql"];
         assert_ne!(a, b, "parallel worktrees must not share a host port");
+    }
+
+    /// The seam exists so concurrent test workspaces get windows that cannot
+    /// overlap, so the moved window must actually leave the default one.
+    #[test]
+    fn a_moved_window_is_disjoint_from_the_default() {
+        let moved = window_from(Some(41000));
+        assert_eq!(moved, 41000..41000 + MOVED_WIDTH);
+        assert!(moved.start >= RANGE.end, "a moved window must clear the default: {moved:?}");
+
+        // Two bases a full width apart don't overlap — the property the port
+        // tests depend on.
+        let a = window_from(Some(41000));
+        let b = window_from(Some(41000 + MOVED_WIDTH));
+        assert!(a.end <= b.start, "{a:?} and {b:?} must not overlap");
+    }
+
+    #[test]
+    fn an_absent_or_privileged_base_keeps_the_default_window() {
+        assert_eq!(window_from(None), RANGE);
+        // A privileged base would allocate ports no rootless process can bind.
+        assert_eq!(window_from(Some(80)), RANGE);
+        assert_eq!(window_from(Some(1023)), RANGE);
+        assert_eq!(window_from(Some(1024)), 1024..1024 + MOVED_WIDTH);
+    }
+
+    /// A base near the top of the range must clamp rather than wrap to an empty
+    /// window, which would make every allocation fail with "no free host port".
+    #[test]
+    fn a_base_near_u16_max_clamps_instead_of_wrapping() {
+        let w = window_from(Some(u16::MAX - 10));
+        assert_eq!(w.end, u16::MAX);
+        assert!(w.start < w.end, "window must stay non-empty: {w:?}");
     }
 
     #[test]
