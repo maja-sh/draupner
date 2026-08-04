@@ -140,3 +140,29 @@ fn script_runs_in_the_worktree_dir() {
         "script cwd should be the worktree:\n{err}"
     );
 }
+
+#[test]
+fn a_legacy_post_create_file_is_refused_before_any_worktree_is_created() {
+    let f = WorkspaceFixture::with_repos(&["api", "app"]);
+    // The refusal used to reach `ws new` through the per-repo creation loop, so
+    // it landed after `git worktree add` and the sync session for `api` — and the
+    // migration it asks for then couldn't be retried, because the half-created
+    // task blocked `ws new` for the same branch.
+    write_legacy_hook_file(&f, "app", "post-create");
+
+    let out = f.run(&["new", "api,app", "feat/legacy-pc"]);
+    assert_eq!(out.status.code(), Some(2), "expected a preflight refusal: {}", stderr(&out));
+    assert!(stderr(&out).contains("ws 0.6"), "must be the migration message: {}", stderr(&out));
+
+    // Nothing may exist yet — not even for `api`, which sorts before the repo
+    // that carries the stale file.
+    let task = f.path().join(".worktrees").join("feat-legacy-pc");
+    assert!(!task.join("api").exists(), "no worktree may survive a preflight refusal");
+    assert!(!task.join("app").exists(), "no worktree may survive a preflight refusal");
+
+    // And declaring the script suppresses it — the preflight must mirror
+    // `resolve`'s condition, not refuse a repo that has already migrated while
+    // still owning the old file.
+    f.add_hook("app", "post-create", "echo MIGRATED");
+    f.run_ok(&["new", "api,app", "feat/legacy-pc2"]);
+}
