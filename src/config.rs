@@ -13,7 +13,8 @@ pub struct WsConfig {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub domain: Option<String>,
     /// Container runtime for `ws`'s own calls (compose introspection, the shared
-    /// network, the Caddy container). `"podman"` | `"docker"`; default `"podman"`.
+    /// network, the Caddy container). `"docker"` | `"podman"`. Absent → detected
+    /// on this machine's PATH, docker first (see `runtime`).
     /// Also top-level: routing is location-transparent, not a remote-only concern.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub runtime: Option<String>,
@@ -292,13 +293,77 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// The runtimes `ws` knows how to drive, in the order detection prefers them.
+pub const RUNTIMES: [&str; 2] = ["docker", "podman"];
+
+/// The runtime `ws` falls back to when it can't detect one — the value every
+/// `.ws.json` carried before detection existed, and what `server-setup` installs.
+const RUNTIME_FALLBACK: &str = "podman";
+
+/// The container runtime on **this machine's** PATH, docker first, or `None` when
+/// neither is installed.
+///
+/// Probed once per process: a single `ws` run makes many runtime calls, and PATH
+/// can't meaningfully change underneath one.
+pub fn detect_runtime() -> Option<&'static str> {
+    static DETECTED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(|| RUNTIMES.into_iter().find(|r| on_path(r)))
+}
+
+/// Whether `bin` is an executable `ws` can spawn. Asks the same question the
+/// spawn will (`Command` resolves against PATH) rather than reading `$PATH`
+/// ourselves, so a shell alias or a PATH quirk can't make the two disagree.
+fn on_path(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 impl WsConfig {
-    /// Container runtime for `ws`'s own calls, defaulting to `podman`.
-    // Consumed by the routing slices (compose introspection / Caddy); parsed now
-    // so the schema is stable.
-    #[allow(dead_code)]
+    /// Container runtime for `ws`'s own calls: the configured one, else whatever
+    /// is installed here (docker first), else the fallback.
+    ///
+    /// Infallible so every call site that only *names* the runtime (the
+    /// `WS_RUNTIME` hook env, a default script, an error message) keeps rendering
+    /// on a machine with neither installed. The paths that are about to actually
+    /// spawn it use [`WsConfig::require_runtime`] instead, so the failure lands
+    /// with an explanation rather than as a bare `No such file or directory`.
     pub fn runtime(&self) -> &str {
-        self.runtime.as_deref().unwrap_or("podman")
+        if let Some(r) = self.runtime.as_deref() {
+            return r;
+        }
+        // Detection reads the *client's* PATH, which says nothing about a server —
+        // your Mac can have docker while the offload box runs the podman that
+        // `server-setup/debian.sh` installed. So a remote workspace keeps the
+        // fallback until the runtime is pinned (or the server itself is probed;
+        // see docs/offload.md).
+        if self.remote.is_some() {
+            return RUNTIME_FALLBACK;
+        }
+        detect_runtime().unwrap_or(RUNTIME_FALLBACK)
+    }
+
+    /// [`WsConfig::runtime`] for the paths that immediately drive containers, with
+    /// the "nothing is installed" case named as an error instead of resolved to a
+    /// binary that isn't there.
+    pub fn require_runtime(&self) -> Result<&str> {
+        // A pinned runtime is the user's assertion, and a remote one describes the
+        // server — neither is ours to second-guess against the local PATH.
+        if self.runtime.is_some() || self.remote.is_some() {
+            return Ok(self.runtime());
+        }
+        detect_runtime().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no container runtime found — `ws` drives {}. Install one, or set \
+                 `runtime` in .ws.json if yours is under another name.",
+                RUNTIMES.join(" or ")
+            )
+        })
     }
 
     /// The extended config for `repo`, if it's an object entry (not a bare
@@ -678,7 +743,8 @@ mod tests {
         .unwrap();
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.domain.as_deref(), Some("myapp.test"));
-        // runtime absent → defaults to podman via the accessor.
+        // runtime absent on a *remote* workspace → the fallback, never this
+        // machine's PATH (see `an_absent_runtime_detects_locally_but_not_remotely`).
         assert_eq!(cfg.runtime(), "podman");
         let remote = cfg.remote.expect("remote block");
         assert_eq!(remote.connection, "srv");
@@ -707,6 +773,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".ws.json"), r#"{"runtime":"docker","repos":[]}"#).unwrap();
         assert_eq!(load(dir.path()).unwrap().runtime(), "docker");
+    }
+
+    /// Detection order is a contract, not an accident: a box with both installed
+    /// gets docker.
+    #[test]
+    fn detection_prefers_docker() {
+        assert_eq!(RUNTIMES, ["docker", "podman"]);
+        if let Some(found) = detect_runtime() {
+            assert!(RUNTIMES.contains(&found), "detected {found}, which ws can't drive");
+        }
+    }
+
+    /// An absent `runtime` resolves against **this machine's** PATH — which says
+    /// nothing about an offload server, so a remote workspace keeps the fallback
+    /// instead of assuming the client's answer applies there.
+    #[test]
+    fn an_absent_runtime_detects_locally_but_not_remotely() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".ws.json");
+
+        std::fs::write(&path, r#"{"repos":[]}"#).unwrap();
+        assert_eq!(load(dir.path()).unwrap().runtime(), detect_runtime().unwrap_or("podman"));
+
+        std::fs::write(&path, r#"{"repos":[],"remote":{"connection":"srv"}}"#).unwrap();
+        assert_eq!(load(dir.path()).unwrap().runtime(), "podman");
+    }
+
+    /// A pinned runtime is the user's assertion about their machine (or their
+    /// server), so `require_runtime` passes it through rather than refusing a
+    /// name it can't find on the local PATH.
+    #[test]
+    fn require_runtime_trusts_a_pin_it_cannot_see() {
+        let cfg: WsConfig = serde_json::from_str(r#"{"runtime":"nerdctl","repos":[]}"#).unwrap();
+        assert_eq!(cfg.require_runtime().unwrap(), "nerdctl");
+
+        let remote: WsConfig =
+            serde_json::from_str(r#"{"repos":[],"remote":{"connection":"srv"}}"#).unwrap();
+        assert_eq!(remote.require_runtime().unwrap(), "podman");
     }
 
     #[test]

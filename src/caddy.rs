@@ -82,6 +82,10 @@ const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// worktree route falls through to it). Distinct from any `route_id`, so route
 /// CRUD for worktree services never touches it.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
+/// The name a route for a `kind: host` repo dials to reach the host process —
+/// podman's own alias for the machine the containers run on. Owned here because
+/// Caddy is the container that has to resolve it (see [`host_alias_args`]).
+pub const HOST_ALIAS: &str = "host.containers.internal";
 
 /// The curl args to reach the admin API for `path`: the host-loopback-published
 /// TCP admin (default), or the `WS_CADDY_ADMIN` URL verbatim (BYO / test seam).
@@ -539,6 +543,29 @@ pub fn resolve_hint(site: &Site, domain: &str, dns: &Dns) -> Option<String> {
 /// `ws up` re-homes the route to the live container and heals it. A future
 /// refinement (health-check the upstream, or reconcile routes against live
 /// containers on boot) could close the gap.
+/// The `run` args that make [`HOST_ALIAS`] resolve inside the Caddy container.
+///
+/// Podman defines the name itself, so it needs nothing. Docker defines *neither*
+/// it nor its own `host.docker.internal` on Linux, so every `kind: host` route
+/// 502s without this — Caddy resolves the upstream, not `ws`, and Caddy is the
+/// one container `ws` runs, so this is the only place that can fix it.
+/// `host-gateway` is the runtime's own placeholder for the host's address.
+///
+/// Keyed on "not podman" rather than "is docker" so an unrecognized runtime gets
+/// the alias too: podman tolerates the flag (its native answer wins), which makes
+/// adding it the safe side of the guess.
+fn host_alias_args(runtime: &str) -> Vec<&'static str> {
+    /// [`HOST_ALIAS`] mapped to the host — spelled out because `--add-host` takes
+    /// one `name:addr` token and there's no const concatenation. A test pins it
+    /// to `HOST_ALIAS` so the two can't drift.
+    const ALIAS_TO_GATEWAY: &str = "host.containers.internal:host-gateway";
+
+    if runtime.ends_with("podman") {
+        return Vec::new();
+    }
+    vec!["--add-host", ALIAS_TO_GATEWAY]
+}
+
 fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Option<String> {
     let port = https_port();
     let publish = publish_spec(publish_addr, port);
@@ -550,8 +577,11 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
     let data_vol = format!("{DATA_VOLUME}:/data");
     let config_vol = format!("{CONFIG_VOLUME}:/config");
     let config_json = format!("{SOCK_MOUNT}/caddy.json");
-    let out = site.command(&[
+    let mut args = vec![
         runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always",
+    ];
+    args.extend(host_alias_args(runtime));
+    args.extend([
         "-p", &publish,
         "-p", &admin_publish,
         "-v", &sock_mount,
@@ -559,8 +589,8 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
         "-v", &config_vol,
         CADDY_IMAGE,
         "caddy", "run", "--config", &config_json, "--resume",
-    ])
-    .output();
+    ]);
+    let out = site.command(&args).output();
     // `None` on success; `Some(reason)` on failure. The reason is returned rather
     // than printed so the caller surfaces it only on the *terminal* failure — a
     // first attempt that hits a stale-name and recovers on retry stays quiet.
@@ -924,6 +954,29 @@ mod tests {
 
     fn remote_site() -> Site {
         Site::Remote { connection: "server".into(), home: "/home/ws".into() }
+    }
+
+    /// The whole point of the flag: docker resolves neither `host.containers.internal`
+    /// nor its own `host.docker.internal` on Linux, so without it every `kind: host`
+    /// route 502s. Podman defines the name itself and needs nothing.
+    #[test]
+    fn only_a_non_podman_runtime_gets_the_host_alias() {
+        assert_eq!(host_alias_args("docker"), vec!["--add-host", "host.containers.internal:host-gateway"]);
+        assert!(host_alias_args("podman").is_empty());
+        // A runtime given by path is still podman.
+        assert!(host_alias_args("/usr/bin/podman").is_empty());
+        // Anything unrecognized gets the alias: podman tolerates the flag, so
+        // adding it is the safe side of the guess.
+        assert!(!host_alias_args("nerdctl").is_empty());
+    }
+
+    /// `--add-host` takes one `name:addr` token, so the alias is spelled out in
+    /// `host_alias_args` rather than built from `HOST_ALIAS`. Pin them together —
+    /// the flag and the upstream `inject::routes` dials must name the same host.
+    #[test]
+    fn the_host_alias_flag_matches_the_name_routes_dial() {
+        let args = host_alias_args("docker");
+        assert!(args[1].starts_with(&format!("{HOST_ALIAS}:")), "{args:?} must map {HOST_ALIAS}");
     }
 
     #[test]
