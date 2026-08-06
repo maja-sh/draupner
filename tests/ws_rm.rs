@@ -10,12 +10,9 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
         r#"{"repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
     );
     let mg = f.arg_recorder("fake-mutagen");
-    // A remote workspace resolves the server `$HOME` up front on new/rm; stub ssh
-    // to answer that probe (and swallow the server-side override cleanup) so the
-    // op doesn't dial a real host.
+    // Remote workspaces probe the server `$HOME` on new/rm; stub ssh so the op doesn't dial a real host.
     let ssh = f.stub("fake-ssh", "printf /home/test");
 
-    // Create the worktree (also runs `sync create`, recorded elsewhere).
     let create_args = f.path().join("create-args.txt");
     f.run_with_env(
         &["new", "api", "feat/foo"],
@@ -26,7 +23,6 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
         ],
     );
 
-    // Tear it down — should terminate the same session.
     let term_args = f.path().join("term-args.txt");
     let out = f.run_with_env(
         &["rm", "feat/foo"],
@@ -52,13 +48,11 @@ fn happy_path_clean_teardown() {
     let out = f.run_ok(&["rm", "feat/gone"]);
     let err = stderr(&out);
 
-    // Worktrees are gone, task dir cleaned up.
     assert!(!f.path().join(".worktrees/feat-gone/api").exists());
     assert!(!f.path().join(".worktrees/feat-gone/app").exists());
     assert!(!f.path().join(".worktrees/feat-gone").exists());
     assert!(err.contains("Removed worktrees"), "expected summary in:\n{err}");
 
-    // Local branch deleted from the main checkouts.
     let out = f.run_ok(&["list"]);
     assert!(stderr(&out).contains("no worktrees"));
 }
@@ -83,7 +77,6 @@ fn dirty_without_force_blocks() {
     assert!(err.contains("tracked.txt"), "expected modified file listed in:\n{err}");
     assert!(err.contains("--force"), "expected --force hint in:\n{err}");
 
-    // No teardown happened.
     assert!(wt.is_dir(), "worktree should survive a blocked rm");
 }
 
@@ -119,7 +112,6 @@ fn unpushed_without_force_blocks() {
 
     f.run_ok(&["new", "api", "feat/up"]);
 
-    // Commit locally in the worktree — now ahead of origin/feat/up.
     let wt_rel = ".worktrees/feat-up/api";
     f.git(wt_rel, &["commit", "-q", "--allow-empty", "-m", "local work"]);
 
@@ -152,7 +144,6 @@ fn hook_failure_still_removes_but_exits_nonzero() {
     let out = f.run(&["rm", "feat/hookfail"]);
 
     assert_eq!(out.status.code(), Some(1), "expected exit 1 when a hook fails");
-    // Worktree is still removed despite the hook failure.
     assert!(!wt.exists(), "worktree should be removed even when a hook fails");
 
     let err = stderr(&out);
@@ -189,12 +180,10 @@ fn leftover_file_in_task_dir_does_not_fail() {
     let out = f.run_ok(&["rm", "feat/leftover"]);
     let err = stderr(&out);
     assert!(err.contains("Removed worktrees"), "expected success summary in:\n{err}");
-    // Worktree removed even though the task dir couldn't be pruned.
     assert!(!f.path().join(".worktrees/feat-leftover/api").exists());
 }
 
-// `ws list` enumerates from git, so a registration whose directory is gone shows
-// up there; `rm` has to be able to reach the same thing.
+// `ws list` enumerates from git, so `rm` must reach registrations whose directory is gone.
 #[test]
 fn rm_clears_a_registration_whose_directory_is_gone() {
     let f = WorkspaceFixture::with_repos(&["api"]);

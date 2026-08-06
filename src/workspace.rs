@@ -6,7 +6,7 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Walk upward from CWD looking for a `.ws.json` file. Fails if none found.
+/// Walk upward from CWD for the nearest `.ws.json`.
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
@@ -37,9 +37,7 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Every repo directory under a branch's task dir. A *filesystem* view — see
-/// [`worktrees_for`] for the authoritative one. Kept because a directory git
-/// doesn't know may still hold resources a teardown has to release.
+/// Filesystem view of a branch's repo dirs, kept because a directory git doesn't know may still hold teardown resources.
 pub fn all_worktree_dirs_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)> {
     list_child_dirs(&task_dir(root, branch))
         .into_iter()
@@ -47,9 +45,7 @@ pub fn all_worktree_dirs_for(root: &Path, branch: &str) -> Vec<(String, PathBuf)
         .collect()
 }
 
-/// Every task dir under `.worktrees/`. A *filesystem* view — see [`worktrees`]
-/// for the authoritative one. Kept for [`orphan_dirs`], which exists precisely to
-/// compare the two.
+/// Filesystem view of task dirs under `.worktrees/`, kept so [`orphan_dirs`] can compare against git.
 pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
     list_child_dirs(&root.join(".worktrees"))
         .into_iter()
@@ -59,30 +55,17 @@ pub fn all_task_dirs(root: &Path) -> Vec<PathBuf> {
 
 /// One task worktree, as **git** knows it.
 pub struct Worktree {
-    /// The `.ws.json` repo entry this worktree belongs to.
     pub repo: String,
     pub path: PathBuf,
     /// The checked-out branch; `None` for a detached HEAD.
     pub branch: Option<String>,
-    /// The `.worktrees/<task>` dir name when this worktree is `ws`-managed;
-    /// `None` for one the user created elsewhere by hand (`ws list` renders those
-    /// as "(unmanaged)").
+    /// The `.worktrees/<task>` dir when ws-managed; `None` for hand-made worktrees elsewhere.
     pub task: Option<String>,
 }
 
-/// Every task worktree across the workspace's configured repos — **the single
-/// definition of "a worktree exists"**, shared by every op that enumerates.
-///
-/// Sourced from git, not from `.worktrees/` on disk, for four reasons: a
-/// directory is not a worktree (it can be the residue of a failed `ws rm` or a
-/// hand-made copy, and acting on one — syncing it to a server, say — is silent
-/// corruption); git also sees worktrees *outside* `.worktrees/`, which a scan
-/// structurally cannot; git reports the real branch, while a task dir name is the
-/// sanitized form and can't be inverted (`fix/x` and `fix-x` collapse together);
-/// and git alone knows a registration is stale. The scan is cheaper, but by a
-/// margin (a few subprocess spawns) that every caller dwarfs.
-///
-/// The main checkout is excluded — it isn't a task worktree.
+/// Every task worktree across configured repos, sourced from git (not the filesystem) so
+/// stale registrations, out-of-tree worktrees, and sanitized-name collisions are handled
+/// correctly; the main checkout is excluded.
 pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let worktrees_root = canonical_root.join(".worktrees");
@@ -101,9 +84,7 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
             if canon == repo_canon {
                 continue; // the main checkout, not a task worktree
             }
-            // A managed worktree sits at `.worktrees/<task>/<repo>`; the repo
-            // component is implied by which repo reported it, so only the task
-            // name is read back out.
+            // The repo component is implied by which repo reported this, so only the task is read back.
             let task = task_repo_under(&canon, &worktrees_root).map(|(task, _)| task);
             out.push(Worktree { repo: repo.to_string(), path, branch, task });
         }
@@ -111,11 +92,7 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     out
 }
 
-/// One task's worktrees as `(repo, path)` — the branch-scoped form of
-/// [`worktrees`], for ops acting on a single task.
-///
-/// Matches the branch git reports **or** the task dir name; the fallback is what
-/// catches a detached worktree, which has no branch to match on.
+/// Branch-scoped [`worktrees`]; matches on task-dir name as a fallback so detached-HEAD worktrees still resolve.
 pub fn worktrees_for(
     root: &Path,
     cfg: &crate::config::WsConfig,
@@ -129,13 +106,8 @@ pub fn worktrees_for(
         .collect()
 }
 
-/// Directories under `.worktrees/` that git does **not** know as worktrees.
-///
-/// The counterpart to [`worktrees`], and the reason the filesystem view is worth
-/// keeping: these are exactly what the git enumeration deliberately cannot see —
-/// the leftovers of a failed removal, a bare `git worktree remove`, or a copied
-/// directory. They are reported (by `ws clean`), never acted on. Silently leaving
-/// them unexamined is how they end up synced to a server as if they were real.
+/// Directories under `.worktrees/` git doesn't know — reported by `ws clean`, never acted
+/// on, because silently syncing a leftover to a server as if it were real is the failure mode.
 pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {
     let known: Vec<PathBuf> = known
         .iter()
@@ -155,10 +127,8 @@ pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {
     out
 }
 
-/// If `path` is inside `<worktrees_root>/<task>[/<repo>/…]`, return the task dir
-/// name and (when the path reaches into a repo) that repo name. Both paths are
-/// expected to be canonical. The single source of truth for CWD→task/repo
-/// inference used by `ws here`, `ws exec`, and `ws list`.
+/// Given a canonical `path` inside `<worktrees_root>/<task>[/<repo>/…]`, return the task
+/// and optional repo — the shared CWD→task/repo inference.
 pub fn task_repo_under(
     path: &Path,
     worktrees_root: &Path,
@@ -176,9 +146,7 @@ pub fn is_git_repo(p: &Path) -> bool {
     g.is_dir() || g.is_file()
 }
 
-/// List real (non-symlink) child directories of `dir`. Returns pairs of
-/// `(name_or_none_if_not_utf8, path)`. Broken entries and non-directories are
-/// silently skipped. Errors on `read_dir` itself yield an empty vec.
+/// Real (non-symlink) child dirs of `dir` as `(utf8-name-or-None, path)`; missing dir yields empty.
 pub fn list_child_dirs(dir: &Path) -> Vec<(Option<String>, PathBuf)> {
     let Ok(rd) = fs::read_dir(dir) else { return Vec::new(); };
     rd.filter_map(Result::ok)
@@ -217,12 +185,10 @@ mod tests {
             task_repo_under(Path::new("/ws/proj/.worktrees/feat-foo/api/src"), root),
             Some(("feat-foo".into(), Some("api".into())))
         );
-        // Task dir itself — no repo component.
         assert_eq!(
             task_repo_under(Path::new("/ws/proj/.worktrees/bug-bar"), root),
             Some(("bug-bar".into(), None))
         );
-        // Outside the tree, and a sibling-prefix collision, both yield None.
         assert_eq!(task_repo_under(Path::new("/ws/proj/api/src"), root), None);
         assert_eq!(
             task_repo_under(Path::new("/ws/proj/.worktrees-backup/feat-foo/api"), root),

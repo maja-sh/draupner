@@ -3,9 +3,7 @@ use std::process::Command;
 const MATRIX_MIN: u32 = 13;
 
 fn main() {
-    // Use CARGO_CFG_TARGET_OS — the OS being COMPILED FOR — not `cfg!` which
-    // reflects the build host. Matters for cross-compilation (macOS -> Linux
-    // and vice versa).
+    // CARGO_CFG_TARGET_OS is the compile target; cfg! here would reflect the build host and break cross-compilation.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     let matrix = if target_os == "macos" {
@@ -15,20 +13,14 @@ fn main() {
     };
     println!("cargo:rustc-env=WS_COMPAT_MATRIX={matrix}");
 
-    // Rerun triggers:
-    //   - build.rs itself changed
-    //   - target OS changed (rebuild with a different --target)
-    //   - the file `sw_vers` reads for its `-productVersion` output changed
-    //     (busts the cache after an OS upgrade)
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    // Watch the plist sw_vers reads so the cache busts after a macOS upgrade.
     println!("cargo:rerun-if-changed=/System/Library/CoreServices/SystemVersion.plist");
 }
 
 fn macos_matrix() -> String {
-    // Only invoke `sw_vers` when we're actually building on macOS. When
-    // cross-compiling FROM Linux/whatever TO macOS, the host has no `sw_vers`
-    // — emit "unknown" and let compat.rs fail-open.
+    // Cross-compiling to macOS from another host has no `sw_vers`; leave detection to compat.rs.
     if !cfg!(target_os = "macos") {
         return "unknown".to_string();
     }
@@ -41,10 +33,7 @@ fn macos_matrix() -> String {
         return "unknown".to_string();
     };
 
-    // Building on a host older than MATRIX_MIN would produce an inverted
-    // range like `13..=12`, which compat::check() would then reject on every
-    // supported host. Abort the build with a clear message instead of
-    // shipping a poisoned binary.
+    // A host older than MATRIX_MIN would emit an inverted range like `13..=12` that compat::check() rejects everywhere.
     assert!(
         major >= MATRIX_MIN,
         "build host macOS {major} is older than MATRIX_MIN ({MATRIX_MIN}). \
