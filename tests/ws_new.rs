@@ -11,8 +11,7 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     );
     let mg = f.arg_recorder("fake-mutagen");
     let args = f.path().join("mutagen-args.txt");
-    // A remote workspace resolves the server `$HOME` up front (for server-side
-    // paths); stub ssh to answer that probe so the op doesn't dial a real host.
+    // A remote op probes the server for $HOME; stub ssh so it doesn't dial a real host.
     let ssh = f.stub("fake-ssh", "printf /home/test");
 
     let out = f.run_with_env(
@@ -26,13 +25,10 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("mutagen was invoked");
-    // sync create --name ws-feat-foo-api --ignore-vcs <local> srv:workspace/feat-foo/api
     assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
     assert!(rec.contains("ws-feat-foo-api"), "expected the session name:\n{rec}");
     assert!(rec.contains("--ignore-vcs"), "expected --ignore-vcs:\n{rec}");
-    // Mutagen defaults to 0600/0700, which is owner-only — and the owner maps to
-    // root in a rootless container, so a service running as www-data can't read
-    // the code. Without these the synced tree is unservable.
+    // Mutagen's 0600/0700 defaults map to root in a rootless container, leaving the tree unreadable to non-root service users.
     assert!(
         rec.contains("--default-file-mode=0644") && rec.contains("--default-directory-mode=0755"),
         "synced tree must be readable by a container's non-root service user:\n{rec}"
@@ -59,13 +55,10 @@ fn new_without_a_remote_block_does_not_sync() {
 
 #[test]
 fn a_tag_named_main_does_not_shadow_the_default_branch() {
-    // Regression: default-branch resolution must probe fully-qualified refspecs
-    // so a *tag* called `main` can't be picked as the start-point. Here the repo
-    // has no `main`/`master` branch and no origin, only a `main` tag — resolution
-    // must fail rather than branch new work off the tag.
+    // Regression: a tag named `main` must not be picked as the start-point when no main/master branch exists.
     let f = WorkspaceFixture::with_repos(&["api"]);
-    f.git("api", &["branch", "-m", "trunk"]); // rename main -> trunk (no main branch)
-    f.git("api", &["tag", "main"]); // a tag that short-name rev-parse would resolve
+    f.git("api", &["branch", "-m", "trunk"]);
+    f.git("api", &["tag", "main"]);
 
     let out = f.run(&["new", "api", "feat/x"]);
     assert!(!out.status.success(), "should refuse when only a tag matches");
@@ -85,24 +78,19 @@ fn happy_path_two_repos() {
     let out = f.run_ok(&["new", "api,app", "feat/login"]);
     let err = stderr(&out);
 
-    // Worktrees created
     assert!(f.path().join(".worktrees/feat-login/api").is_dir());
     assert!(f.path().join(".worktrees/feat-login/app").is_dir());
 
-    // Worktree is a git repo (has .git file)
     assert!(f.path().join(".worktrees/feat-login/api/.git").exists());
     assert!(f.path().join(".worktrees/feat-login/app/.git").exists());
 
-    // Output mentions worktree creation and the hook
     assert!(err.contains("Worktree created"), "expected 'Worktree created' in:\n{err}");
     assert!(err.contains("Post-create hook"), "expected 'Post-create hook' in:\n{err}");
     assert!(err.contains("api-hook: wt="), "expected hook output in:\n{err}");
 
-    // Summary lists worktree paths
     assert!(err.contains("api:"), "expected 'api:' in summary:\n{err}");
     assert!(err.contains("app:"), "expected 'app:' in summary:\n{err}");
 
-    // Nudge
     assert!(err.contains("ws up feat/login"), "expected nudge in:\n{err}");
 }
 
@@ -122,10 +110,8 @@ fn error_unknown_repo() {
 fn error_existing_worktree() {
     let f = WorkspaceFixture::with_repos(&["api"]);
 
-    // First run succeeds
     f.run_ok(&["new", "api", "feat/dup"]);
 
-    // Second run fails
     let out = f.run(&["new", "api", "feat/dup"]);
     assert_eq!(out.status.code(), Some(1), "expected exit 1 for existing worktree");
 
@@ -144,7 +130,6 @@ fn hook_exits_nonzero_leaves_worktree() {
     let err = stderr(&out);
     assert!(err.contains("exited 1"), "expected exit code in error:\n{err}");
 
-    // Worktree is left in place per spec
     assert!(
         f.path().join(".worktrees/feat-broke/api").is_dir(),
         "worktree should be left in place after hook failure"
@@ -154,7 +139,6 @@ fn hook_exits_nonzero_leaves_worktree() {
 #[test]
 fn no_hook_still_succeeds() {
     let f = WorkspaceFixture::with_repos(&["api"]);
-    // No hook added — post-create template exists but is NOT executable
 
     let out = f.run_ok(&["new", "api", "feat/nohook"]);
     let err = stderr(&out);
@@ -183,7 +167,6 @@ echo "err-line-2" >&2"#,
     for needle in &["out-line-1", "out-line-2", "out-line-3", "err-line-1", "err-line-2"] {
         assert!(err.contains(needle), "expected '{needle}' in output:\n{err}");
     }
-    // Tag format: [api-post-create]
     assert!(
         err.contains("[api-post-create]"),
         "expected hook tag in output:\n{err}"
@@ -208,7 +191,6 @@ fn branch_sanitization() {
 
     f.run_ok(&["new", "api", "bug/nested/thing"]);
 
-    // Sanitized path uses dashes
     assert!(f.path().join(".worktrees/bug-nested-thing/api").is_dir());
 }
 
@@ -219,9 +201,7 @@ fn deduplicates_repo_list() {
     let out = f.run_ok(&["new", "api,api", "feat/dedup"]);
     let err = stderr(&out);
 
-    // Should only create one worktree, not fail with "already exists"
     assert!(f.path().join(".worktrees/feat-dedup/api").is_dir());
-    // "Worktree created" should appear exactly once
     let count = err.matches("Worktree created").count();
     assert_eq!(count, 1, "expected exactly 1 'Worktree created', got {count}");
 }
@@ -230,7 +210,6 @@ fn deduplicates_repo_list() {
 fn node_modules_symlinked_when_present() {
     let f = WorkspaceFixture::with_repos(&["app"]);
 
-    // Create node_modules in the main checkout
     std::fs::create_dir(f.path().join("app/node_modules")).expect("mkdir node_modules");
     std::fs::write(f.path().join("app/node_modules/.package-lock.json"), "{}").unwrap();
 
@@ -246,7 +225,6 @@ fn node_modules_symlinked_when_present() {
 fn vendor_copied_when_composer_present() {
     let f = WorkspaceFixture::with_repos(&["api"]);
 
-    // Create composer.json + vendor/ in the main checkout
     std::fs::write(f.path().join("api/composer.json"), "{}").unwrap();
     let vendor = f.path().join("api/vendor");
     std::fs::create_dir(&vendor).unwrap();
@@ -262,9 +240,7 @@ fn vendor_copied_when_composer_present() {
 
 #[test]
 fn worktree_is_clean_despite_symlinked_node_modules() {
-    // A repo that gitignores node_modules with the conventional trailing-slash
-    // (dir-only) rule. The symlink ws creates is a file to git, so without a
-    // worktree exclude it would read as untracked → dirty forever.
+    // The gitignore's trailing-slash rule is dir-only, so a node_modules symlink would read as untracked without the worktree exclude ws installs.
     let f = WorkspaceFixture::with_repos(&["app"]);
     std::fs::write(f.path().join("app/.gitignore"), "node_modules/\nvendor/\n").unwrap();
     f.git("app", &["add", ".gitignore"]);
@@ -274,7 +250,6 @@ fn worktree_is_clean_despite_symlinked_node_modules() {
 
     f.run_ok(&["new", "app", "feat/clean"]);
 
-    // git status in the worktree must be empty.
     let out = std::process::Command::new("git")
         .args(["-C"])
         .arg(f.path().join(".worktrees/feat-clean/app"))
@@ -298,7 +273,6 @@ fn config_worktree_excludes_are_applied() {
 
     f.run_ok(&["new", "api", "feat/excl"]);
 
-    // Drop files matching the configured excludes; worktree stays clean.
     std::fs::write(f.path().join(".worktrees/feat-excl/api/local.env"), "X=1").unwrap();
     std::fs::create_dir(f.path().join(".worktrees/feat-excl/api/.cache")).unwrap();
     std::fs::write(f.path().join(".worktrees/feat-excl/api/.cache/blob"), "z").unwrap();
@@ -358,10 +332,7 @@ fn wait_for(p: &std::path::Path) -> bool {
 fn up_marker_fixture() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // A host repo — its `up` is launched by ws itself, so this needs no runtime.
-    // It drops a marker and then *stays up*: a host `up` is a long-running dev
-    // server, and ws now fails one that exits on the spot (which is what a bare
-    // `touch` did — passing only because nothing checked the process survived).
+    // A host `up` must be long-running; a bare `touch` would exit and now fail the survivorship check.
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":9000}},
             "scripts":{"up":"touch up-ran && exec sleep 5"}}]}"#,
@@ -371,8 +342,6 @@ fn up_marker_fixture() -> WorkspaceFixture {
 
 #[test]
 fn new_with_up_brings_the_stack_up_in_one_command() {
-    // `--up` chains into the same op `ws up` runs, so the worktrees are created
-    // AND the stack comes up — no second command, and no `ws up` nudge.
     let f = up_marker_fixture();
 
     let out = f.run_ok(&["new", "api", "feat/foo", "--up"]);
