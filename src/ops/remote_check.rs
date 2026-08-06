@@ -1,11 +1,5 @@
-//! `ws remote check [--host <h>] [-v]` — read-only verification of where a
-//! workspace's stack lives. Never installs, mutates, or `sudo`s; it only
-//! observes (locally + over your own SSH), so it's safe to run against a server
-//! you're still setting up. It's the contract for "is this host ready to route".
-//!
-//! Two modes: with a `remote` block (or `--host`) it probes the offload server;
-//! without one it reports the local routing readiness (the same probe `ws setup`
-//! uses, read-only).
+//! `ws remote check` — read-only verification of where a workspace's stack
+//! lives, safe to run against a server you're still setting up.
 
 use anyhow::Result;
 
@@ -15,11 +9,7 @@ pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // Resolve the target + where its worktrees live. An explicit `--host` may name
-    // a *different* server than the configured remote, so it uses the default
-    // worktree base rather than inheriting the configured `workspace_path` (which
-    // describes the configured server). `config::load` already rejected an unsafe
-    // configured connection; a `--host` value is fresh input, so validate it here.
+    // `--host` may name a different server than the configured remote, so use the default base and revalidate below.
     let (connection, workspace_path) = match host {
         Some(h) => (Some(h.to_string()), config::default_worktree_base(&ws.root)),
         None => match &cfg.remote {
@@ -38,9 +28,7 @@ pub fn run(host: Option<&str>, verbose: bool) -> Result<()> {
     }
 }
 
-/// Probe the offload server: SSH reachable + mutagen local (client side), then a
-/// single read-only SSH script (mutagen / the runtime / Caddy / workspace dir,
-/// plus wildcard DNS when the workspace routes).
+/// Probe the offload server over one SSH connection: local mutagen plus a single read-only server script.
 fn check_remote(
     connection: &str,
     workspace_path: &str,
@@ -50,14 +38,10 @@ fn check_remote(
 ) -> Result<()> {
     crate::ui::header("ws-remote-check", connection);
 
-    // One SSH connection: `server_probes` returns `None` precisely when SSH
-    // couldn't connect, so we derive the reachability line from that instead of
-    // paying a second handshake just to test it.
+    // `server_probes` returns `None` iff SSH failed, so derive the ssh line from that instead of paying a second handshake.
     let server = probe::server_probes(connection, workspace_path, runtime, domain);
 
-    // Render the ssh verdict as a plain status line — we derived it from the
-    // server-probe connection, so we don't show a separate `ssh … true` command
-    // that wasn't the one that actually ran (the server script is shown instead).
+    // Status line rather than a command block: the server script below is what actually ran, not a separate `ssh … true`.
     let ssh = probe::ssh_status(connection, server.is_some());
     crate::ui::status_line(ssh.ok, ssh.name, &ssh.detail);
     let mut all_ok = ssh.ok;
@@ -90,9 +74,7 @@ fn check_remote(
     ));
 
     if all_ok {
-        // The server side is now probed above (including its own DNS), so the
-        // leftover advice is about *this* machine: the two resolvers are separate
-        // requirements and saying so here is what keeps them from being confused.
+        // Server-side DNS is covered above; the client's resolver and CA trust are separate requirements worth calling out.
         let client_side = match domain {
             Some(d) => format!(
                 "Still client-side: trust the server's Caddy root CA, and resolve *.{d} \
@@ -109,8 +91,7 @@ fn check_remote(
     }
 }
 
-/// Report local routing readiness (read-only). Reuses `ws setup`'s probe so the
-/// two agree on "what ready means"; unlike `ws setup` it changes nothing.
+/// Report local routing readiness by reusing `ws setup`'s probe so the two agree on "ready".
 fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     crate::ui::header("ws-remote-check", "local");
 
@@ -122,8 +103,7 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
         return Ok(());
     };
 
-    // This is the *local* half of `ws remote check` — the site and the address are
-    // loopback by definition (the remote half has its own server-side probes).
+    // Local half: site and address are loopback by definition.
     let report = setup::probe(&crate::remote::Site::Local, cfg.runtime(), domain, "127.0.0.1", None);
     setup::render_report(&report, domain);
     if verbose {
@@ -144,7 +124,6 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// Render one probe as a status line, plus its command under `-v`.
 fn render(p: &probe::Probe, verbose: bool) {
     crate::ui::status_line(p.ok, p.name, &p.detail);
     if verbose {

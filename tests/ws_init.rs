@@ -41,8 +41,7 @@ fn init_remote_writes_the_remote_block() {
     // Make the client-readiness check pass: mutagen "installed" and host reachable.
     let ok = ws.stub("ok", "exit 0");
 
-    // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to
-    // the workspace's own dir name (written explicitly so it's discoverable).
+    // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to the workspace dir name.
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[
@@ -57,7 +56,6 @@ fn init_remote_writes_the_remote_block() {
     assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
     assert!(cfg.contains("srv"), "expected the connection:\n{cfg}");
     assert!(cfg.contains("\"connection\""));
-    // workspace_path defaults to the workspace dir name (the tempdir basename).
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     assert!(cfg.contains(base), "expected workspace_path default of `{base}`:\n{cfg}");
 }
@@ -118,10 +116,7 @@ fn init_without_remote_writes_no_remote_block() {
     assert!(!cfg.contains("\"remote\""), "no remote block expected without --remote:\n{cfg}");
 }
 
-/// A detected runtime is this machine's answer, not the workspace's, so it stays
-/// out of `.ws.json` — pinning it would freeze one box's install into a file
-/// meant to work on every box. The summary still says which one was picked, so
-/// the choice isn't invisible.
+/// A detected runtime is this machine's answer, not the workspace's, so it stays out of `.ws.json`.
 #[test]
 fn init_leaves_a_detected_runtime_out_of_the_config() {
     let ws = WorkspaceFixture::empty();
@@ -144,8 +139,7 @@ fn init_pins_an_explicit_runtime() {
     assert!(err.contains("pinned"), "the summary should say it was pinned:\n{err}");
 }
 
-/// Only the runtimes `ws` can actually drive are accepted — a typo'd one used to
-/// reach `.ws.json` and only surface as a failed spawn much later.
+/// Only the runtimes `ws` can drive are accepted — a typo used to reach `.ws.json` and only surface as a failed spawn much later.
 #[test]
 fn init_rejects_an_unknown_runtime() {
     let ws = WorkspaceFixture::empty();
@@ -215,9 +209,7 @@ fn refresh_schema_refuses_outside_workspace() {
 
 #[test]
 fn refresh_schema_works_from_a_subdirectory() {
-    // Every other op locates the workspace by walking up. This one demanded the
-    // cwd *be* the root, so it failed with "no .ws.json here" one directory in —
-    // somewhere `ws up`/`list`/`exec` all work fine.
+    // This op used to demand cwd == workspace root while every other op walks up to find it.
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     ws.run_ok(&["init"]);
@@ -238,7 +230,6 @@ fn refresh_schema_works_from_a_subdirectory() {
 #[test]
 fn init_refuses_inside_an_enclosing_workspace() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    // A plain subdir of an existing workspace.
     let sub = ws.path().join("nested");
     std::fs::create_dir_all(&sub).unwrap();
 
@@ -268,8 +259,7 @@ fn init_skips_symlinked_directories() {
     let ws = WorkspaceFixture::empty();
     let real = ws.add_repo("real");
 
-    // Symlink `linked` -> `real`. The symlink should be skipped so the same
-    // repo isn't registered under two names.
+    // Skip symlinked entries so the same repo isn't registered under two names.
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, ws.path().join("linked")).unwrap();
 

@@ -1,23 +1,6 @@
-//! macOS compatibility policy.
-//!
-//! `ws` depends on macOS-specific semantics that have drifted across recent majors:
-//!   - APFS clonefile (used by `ws new`'s vendor/ copy via `cp -c`).
-//!   - Subprocess signal defaults (hook orchestration).
-//!   - Gatekeeper quarantine handling — matters for `ws update` payloads (v2),
-//!     pre-qualifying now.
-//!
-//! Each release ships with a MIN..=MAX matrix of qualified macOS majors, baked in
-//! at build time via `build.rs`. Only the **floor** gates behavior, and only as a
-//! warning: an *older*-than-qualified macOS may lack the APFS/signal semantics
-//! above, so we say so — but never block. A *newer* major is ignored entirely:
-//! macOS is forward-compatible, the build host's major always trails the latest
-//! shipping macOS, and a hard ceiling would refuse to run for every up-to-date
-//! user. If a future major genuinely breaks one of these semantics, it surfaces
-//! at the operation that uses it, not as a blanket refusal to start.
-//!
-//! If `sw_vers` fails or the matrix is unparseable, we skip the check — Apple has
-//! changed `sw_vers` output before, and admitting an unqualified host beats
-//! breaking every install on a format bump.
+//! Warn if the running macOS major is below the qualified floor; never block, since
+//! macOS is forward-compatible and the build host always trails the latest shipping
+//! major. Parse failures skip the check rather than break every install.
 
 use std::process::Command;
 
@@ -39,9 +22,7 @@ pub fn check() {
     }
 }
 
-/// Warn only below the qualified floor. A newer-than-qualified major is
-/// forward-compatible and must never warn or block — the build host trails the
-/// latest shipping macOS, so a ceiling check would fire for every current user.
+/// A newer-than-qualified major never warns; only the floor gates.
 fn below_floor(min: u32, running: u32) -> bool {
     running < min
 }

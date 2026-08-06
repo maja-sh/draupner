@@ -1,12 +1,9 @@
 //! Declarative `scripts` in `.ws.json` — the successor to `.ws-hooks/` files.
-//! Covers: single + multi-command `up`, run order, precedence over a legacy hook
-//! file, failure propagation, and the `post-create` path.
 
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-/// Build a one-repo workspace whose `.ws.json` declares `scripts` for `api`.
 fn fixture_with_scripts(scripts_json: &str) -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
@@ -41,7 +38,6 @@ fn declarative_up_script_multi_command_runs_in_order() {
 
 #[test]
 fn script_takes_precedence_over_hook_file() {
-    // Both a declarative script AND a legacy `.ws-hooks/api/up` file exist.
     let f = fixture_with_scripts(r#"{"up":"echo FROM-SCRIPT"}"#);
     f.add_hook("api", "up", "echo FROM-HOOK-FILE");
     f.run_ok(&["new", "api", "feat/prec"]);
@@ -80,8 +76,7 @@ fn multi_command_script_stops_at_first_failure() {
 
 #[test]
 fn multi_command_script_shares_one_shell() {
-    // A `Many` runs in a single shell, so state one command sets is visible to
-    // the next (a fresh process per command would print `val=`).
+    // A `Many` runs in a single shell so state carries; a process-per-command would print `val=`.
     let f = fixture_with_scripts(r#"{"up":["export FOO=bar","echo val=$FOO"]}"#);
     f.run_ok(&["new", "api", "feat/shell"]);
 
@@ -101,8 +96,6 @@ fn declarative_post_create_script_runs_on_new() {
 
 #[test]
 fn script_runs_in_the_worktree_dir() {
-    // cwd for a script is the worktree, not the workspace root — `pwd` should
-    // land under `.worktrees/<task>/api`.
     let f = fixture_with_scripts(r#"{"up":"pwd"}"#);
     f.run_ok(&["new", "api", "feat/cwd"]);
 

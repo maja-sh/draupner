@@ -1,13 +1,8 @@
-//! Slice 4 — ports + env + injection. End-to-end through `ws up` / `ws exec`:
-//! host-port allocation (stable + collision-free), `WS_HOST_*` from the domain,
-//! declared `env` substitution, and template rendering into a gitignored dest.
-
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 use std::process::Command;
 
-/// The digits inside `PORT=[…]` emitted by a test's `up` script.
 fn port_in(haystack: &str) -> u16 {
     let start = haystack.find("PORT=[").expect("PORT=[ marker") + "PORT=[".len();
     let end = start + haystack[start..].find(']').expect("closing ]");
@@ -107,9 +102,6 @@ fn declared_env_mapping_is_substituted() {
 
 #[test]
 fn workspace_context_is_substitutable_in_declared_env() {
-    // A project shouldn't have to learn ws's vocabulary to be driven by it. A
-    // tool that shells out to a container runtime reads its own var; mapping that
-    // var onto ws's answer belongs in `.ws.json`, not in the project's code.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(
@@ -134,8 +126,7 @@ fn workspace_context_is_substitutable_in_declared_env() {
 fn template_is_rendered_into_gitignored_dest() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // Commit a template on `main` so the worktree carries it. It embeds a WS_
-    // token plus an nginx-style `$host` that must survive untouched.
+    // `$host` is nginx-style and must survive the WS_ substituter untouched.
     std::fs::write(
         f.path().join("api/svc.conf.tmpl"),
         "port ${WS_PORT_mysql};\nserver_name $host;\n",
@@ -210,8 +201,6 @@ fn exec_local_gets_ws_port_env() {
     assert!((20000..40000).contains(&port), "exec should inject WS_PORT: {port}");
 }
 
-/// `git status --porcelain` in a worktree, with the isolated git env the
-/// fixture uses elsewhere.
 fn git_status(wt: &std::path::Path) -> String {
     let out = Command::new("git")
         .arg("-C")

@@ -1,14 +1,10 @@
 //! Compose-driven `services` auto-derivation, end-to-end through `ws up`.
-//! Gated on a working `docker compose` (present on the dev box; a CI host
-//! without it skips rather than fails).
 
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 use std::process::Command;
 
-/// Is `docker compose config` usable here? The derivation only parses the file
-/// (no daemon needed), but the CLI must exist.
 fn compose_available() -> bool {
     Command::new("docker")
         .args(["compose", "version"])
@@ -26,8 +22,6 @@ fn services_are_derived_from_compose_config() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // A real compose file committed on `main`: an HTTP service (web on 80), a
-    // single-port raw-TCP service (db), and a multi-port one (mailpit).
     std::fs::write(
         f.path().join("api/docker-compose.yml"),
         "services:\n\
@@ -47,12 +41,10 @@ fn services_are_derived_from_compose_config() {
     f.run_ok(&["new", "api", "feat/foo"]);
 
     let err = stderr(&f.run_ok(&["up", "feat/foo"]));
-    // web (80) → HTTP-routed hostname.
     assert!(err.contains("HOST=feat-foo.web.myapp.test"), "derived HTTP host missing:\n{err}");
-    // db (3306) → bare-name raw-TCP allocation.
     let db = port_after(&err, "DB=[");
     assert!((20000..40000).contains(&db), "db port out of range ({db}):\n{err}");
-    // mailpit is multi-port → its UI port derives as `mailpit_8025`.
+    // Multi-port services derive per-port names like `mailpit_8025`.
     let mp = port_after(&err, "MP=[");
     assert!((20000..40000).contains(&mp), "mailpit_8025 port missing ({mp}):\n{err}");
     assert_ne!(db, mp);
@@ -75,8 +67,7 @@ fn declared_services_override_the_derivation() {
     f.git("api", &["add", "docker-compose.yml"]);
     f.git("api", &["commit", "-q", "-m", "add compose"]);
 
-    // Derivation would make mailpit (8025) a raw-TCP service; the override routes
-    // it as HTTP under the `mail` subdomain instead.
+    // Derivation would make mailpit raw-TCP; the override forces HTTP routing instead.
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
             "services":{"mailpit":{"http":"mail","port":8025}},
@@ -107,9 +98,7 @@ fn read_phases_resolve_derived_services_after_up() {
     f.git("api", &["add", "docker-compose.yml"]);
     f.git("api", &["commit", "-q", "-m", "add compose"]);
 
-    // No declared services — `web`/`db` exist only via derivation. `up` records
-    // the effective set so a later `ws exec` (a read-only, non-deriving phase)
-    // can still resolve their host/port.
+    // `up` must record the derived set so read-only phases like `exec` can resolve it later.
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
             "scripts":{"up":"echo up"}}]}"#,
@@ -133,9 +122,7 @@ fn read_phases_resolve_derived_services_after_up() {
 
 #[test]
 fn explicit_container_hard_fails_when_derivation_fails() {
-    // No runtime needed: an explicit `kind: container` pointed at a bogus runtime
-    // can't derive, and that must surface loudly rather than bring up an
-    // unrouted stack behind a dim note.
+    // An explicit `kind: container` must fail loudly, not fall through to an unrouted stack.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(
@@ -143,7 +130,7 @@ fn explicit_container_hard_fails_when_derivation_fails() {
             "scripts":{"up":"echo UP"}}]}"#,
     );
 
-    // Derivation runs at `ws new` (post-create is an activating event).
+    // Derivation runs at `ws new`, so the failure surfaces here, not at `up`.
     let out = f.run(&["new", "api", "feat/foo"]);
     assert_eq!(out.status.code(), Some(1), "a broken container derivation must fail");
     let err = stderr(&out);
@@ -166,7 +153,6 @@ fn init_scaffolds_derived_services() {
     )
     .unwrap();
 
-    // No .ws.json yet — init creates it, scaffolding the derived services.
     let out = f.run(&["init", "--runtime", "docker"]);
     assert!(out.status.success(), "init failed:\n{}", stderr(&out));
 
@@ -186,8 +172,6 @@ fn container_override_deconflicts_raw_tcp_ports() {
 
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // web (HTTP, host-published) + db (raw-TCP). 6.1 reissues db's host port to
-    // the allocated one and leaves web's publish alone.
     std::fs::write(
         f.path().join("api/docker-compose.yml"),
         "services:\n\
@@ -198,14 +182,12 @@ fn container_override_deconflicts_raw_tcp_ports() {
     f.git("api", &["add", "docker-compose.yml"]);
     f.git("api", &["commit", "-q", "-m", "add compose"]);
 
-    // The up script validates the merged config (proves `!override` parses on
-    // this compose) and echoes the project name ws injected.
+    // `docker compose config -q` fails if the generated `!override` doesn't merge cleanly.
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
             "scripts":{"up":"docker compose config -q && echo PROJ=$COMPOSE_PROJECT_NAME"}}]}"#,
     );
 
-    // Two parallel worktrees.
     f.run_ok(&["new", "api", "feat/a"]);
     f.run_ok(&["new", "api", "feat/b"]);
     let err_a = stderr(&f.run_ok(&["up", "feat/a"]));
@@ -214,9 +196,7 @@ fn container_override_deconflicts_raw_tcp_ports() {
     assert!(err_a.contains("PROJ=feat-a-api"), "project name not namespaced:\n{err_a}");
     assert!(err_b.contains("PROJ=feat-b-api"), "project name not namespaced:\n{err_b}");
 
-    // The generated overrides reissue db on distinct allocated host ports; web
-    // (HTTP) joins `ws-net` for Caddy and drops its host publish (`!reset []`, the
-    // 6.2b flip — HTTP is reachable only through Caddy now).
+    // HTTP services drop their host publish (`!reset []`) so they're only reachable via Caddy on `ws-net`.
     let ov_a = read_override(&f, "feat-a-api");
     let ov_b = read_override(&f, "feat-b-api");
     assert!(ov_a.contains("db:") && ov_a.contains("ports: !override"), "no db override:\n{ov_a}");
@@ -260,20 +240,17 @@ fn container_override_injects_declared_env() {
     );
 }
 
-/// Read a worktree's generated compose override from `.ws-meta`.
 fn read_override(f: &WorkspaceFixture, stem: &str) -> String {
     std::fs::read_to_string(f.path().join(".ws-meta").join(format!("{stem}.override.yml")))
         .unwrap_or_else(|e| panic!("read override for {stem}: {e}"))
 }
 
-/// The host port from the first `"<host>:<internal>"` mapping in an override.
 fn override_port(ov: &str) -> u16 {
     let line = ov.lines().find(|l| l.trim_start().starts_with("- \"")).expect("a ports mapping");
     let inside = line.trim().trim_start_matches("- \"").trim_end_matches('"');
     inside.split(':').next().unwrap().parse().unwrap_or(0)
 }
 
-/// Parse the digits in `<marker>NNNNN]`.
 fn port_after(haystack: &str, marker: &str) -> u16 {
     let start = haystack.find(marker).unwrap_or_else(|| panic!("{marker} in output")) + marker.len();
     let end = start + haystack[start..].find(']').expect("closing ]");
