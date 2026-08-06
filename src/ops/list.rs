@@ -112,7 +112,17 @@ pub fn run() -> Result<()> {
             })
         };
 
-        let row = ListRow { repo: repo.to_string(), dirty, status, note };
+        // Every host port ws has recorded for this repo, sorted by service
+        // (BTreeMap iteration). Read straight from `.ws-meta` — no probing,
+        // no derivation; this reflects the last `up`. A repo with nothing
+        // allocated yet gets an empty list and renders no sub-rows.
+        let services: Vec<(String, u16)> = if managed {
+            crate::ports::load(&ws.root, &sanitized, repo).into_iter().collect()
+        } else {
+            Vec::new()
+        };
+
+        let row = ListRow { repo: repo.to_string(), dirty, status, note, services };
         tasks.entry(task_key).or_default().push((row, branch));
     }
 
