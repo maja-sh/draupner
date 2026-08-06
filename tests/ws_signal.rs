@@ -2,22 +2,17 @@ mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-// These tests drive the cooperative-interrupt path deterministically: a hook
-// sends SIGINT to `ws` itself (`$PPID`), then sleeps briefly so the handler
-// thread flips the flag before the hook returns. The op should stop at the
-// *next* repo boundary and exit 130, leaving later repos untouched.
+// Hooks send SIGINT to ws via $PPID and sleep so the handler flips its flag before the hook returns, so ws stops at the next repo boundary and exits 130.
 
 #[test]
 fn new_stops_at_repo_boundary_on_sigint() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    // api's post-create hook interrupts ws. The sleep gives the ctrlc handler
-    // time to set the flag before this repo's iteration finishes.
+    // The sleep gives the ctrlc handler time to set the flag before this repo's iteration finishes.
     f.add_hook("api", "post-create", "kill -INT $PPID; sleep 0.4");
 
     let out = f.run(&["new", "api,app", "feat/sig"]);
     assert_eq!(out.status.code(), Some(130), "expected exit 130 on SIGINT:\n{}", stderr(&out));
 
-    // api was created before its hook ran; app must never have been reached.
     assert!(f.path().join(".worktrees/feat-sig/api").is_dir(), "api worktree should exist");
     assert!(
         !f.path().join(".worktrees/feat-sig/app").exists(),

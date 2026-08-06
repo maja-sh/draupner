@@ -1,24 +1,13 @@
-//! `kind: host` repos are supervised as a detached, `ws`-owned process tracked by
-//! a PID file (no systemd/launchd — works on macOS too). These run the *real*
-//! mechanism: `ws up` launches a `sleep`, and we assert liveness via the pid file,
-//! then `ws down` stops it. `$HOME` is redirected into the fixture, so `~/.ws-run`
-//! is isolated.
-
 mod common;
 
 use common::{stderr, WorkspaceFixture};
 use std::path::Path;
 
-/// A host repo whose `up` records the injected env, then runs a long sleep as the
-/// supervised (tracked) process.
 fn host_fixture() -> WorkspaceFixture {
     host_fixture_in(WorkspaceFixture::empty())
 }
 
-/// [`host_fixture`] in a private port window, for the tests that assert on which
-/// port `ws` handed out. See [`WorkspaceFixture::with_port_base`] — the bases are
-/// deliberately above the default 20000..40000 window so these can't collide with
-/// each other *or* with any other test's allocation.
+/// A [`host_fixture`] in a private port window above the default 20000..40000 so allocations can't collide with other tests.
 fn host_fixture_at(port_base: u16) -> WorkspaceFixture {
     host_fixture_in(WorkspaceFixture::empty().with_port_base(port_base))
 }
@@ -33,13 +22,10 @@ fn host_fixture_in(f: WorkspaceFixture) -> WorkspaceFixture {
     f
 }
 
-/// Whether the host process for `feat/foo`'s api is alive, read the same way `ws`
-/// does: the pid file under the fixture HOME, then `kill -0`.
 fn proc_alive(f: &WorkspaceFixture) -> bool {
     let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
     let Ok(contents) = std::fs::read_to_string(&pid_file) else { return false };
-    // The pid file is two lines — pid, then the start-time identity. We only need
-    // the pid to probe liveness the way the shell does.
+    // The pid file is two lines — pid then start-time identity; liveness only needs the pid.
     let pid = contents.lines().next().unwrap_or("").trim();
     !pid.is_empty()
         && std::process::Command::new("kill")
@@ -54,15 +40,13 @@ fn stop(f: &WorkspaceFixture) {
     let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
 
-/// The pid `ws` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
     let contents = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid"))
         .expect("pid file after up");
     contents.lines().next().unwrap().trim().to_string()
 }
 
-/// The host port ws allocated for `web`, read off its own output (`start web:20000`)
-/// — the same handle a user has.
+/// The host port ws allocated for `web`, parsed from its own output (`start web:20000`) — the same handle a user has.
 fn allocated_port(out: &str) -> u16 {
     let at = out.find("web:").expect("up should report the allocated port");
     out[at + 4..]
@@ -73,27 +57,12 @@ fn allocated_port(out: &str) -> u16 {
         .expect("a numeric port after `web:`")
 }
 
-/// Private port windows for the tests that care about *which* process holds an
-/// allocated port.
-///
-/// Allocation scans `.ws-meta` per workspace root and confirms the choice with a
-/// live bind, so two fixtures running in parallel can be handed the same port
-/// while neither is holding it yet — and then one test's listener gets attributed
-/// to the other test's process. That collision is real (a known cross-workspace
-/// limitation) but it isn't what these tests are about.
-///
-/// This used to be a `Mutex`, which only worked because `cargo test` runs each
-/// test binary sequentially and these three shared one process. Under a
-/// per-test-process runner every test locks its own private copy and the lock
-/// quietly stops serialising anything, so the constraint is expressed as
-/// non-overlapping windows instead — which also lets the three run in parallel.
+/// Non-overlapping port windows so parallel test processes can't be handed the same port and attribute each other's listeners.
 const PORT_BASE_NEVER_BOUND: u16 = 41000;
 const PORT_BASE_SQUATTED: u16 = 42000;
 const PORT_BASE_SERVING: u16 = 43000;
 
-/// Can the site attribute a listening socket to a pid? `ss` (Linux) or `lsof`
-/// (macOS); without either, ws reports plain liveness and these assertions
-/// wouldn't apply.
+/// Whether `ss` or `lsof` is present — without one, ws can't attribute a socket to a pid and these assertions don't apply.
 fn port_tools_available() -> bool {
     ["ss", "lsof"].iter().any(|bin| {
         std::process::Command::new("sh")
@@ -112,11 +81,8 @@ fn host_up_launches_a_detached_process_with_injected_env() {
     let out = f.run_ok(&["up", "feat/foo"]);
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
 
-    // The process is alive (pid file + kill -0)…
     assert!(proc_alive(&f), "host process should be running after up");
-    // …both the injected routing env (WS_HOST_web) AND the base contract
-    // (WS_BRANCH_SANITIZED) reached the command — the latter regressed once,
-    // producing `https://.api.<domain>` from an empty branch segment.
+    // WS_BRANCH_SANITIZED regressed once, producing `https://.api.<domain>` from an empty branch segment.
     let marker = f.path().join(".worktrees/feat-foo/api/env-marker");
     let got = std::fs::read_to_string(&marker).unwrap_or_default();
     assert_eq!(got, "feat-foo.web.myapp.test feat-foo", "host env missing WS_HOST_web or WS_BRANCH_SANITIZED");
@@ -127,10 +93,7 @@ fn host_up_launches_a_detached_process_with_injected_env() {
 
 #[test]
 fn list_reports_a_host_process_that_crashed() {
-    // The state a user had no way to see: ws launched it, ws said green, and it
-    // died some time later. `ws list` asked the repo's `status` script, which for a
-    // host repo is usually absent — so a dead dev server looked exactly like a
-    // healthy one (a bare dash) until something downstream failed.
+    // A dead host process used to look identical to a healthy one in `ws list`, since the `status` script is usually absent.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
@@ -156,9 +119,7 @@ fn list_reports_a_host_process_that_crashed() {
 
 #[test]
 fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
-    // Alive is not the same as serving. The fixture's `up` is a bare `sleep`: it
-    // runs happily forever and never listens on the port ws handed it, which is
-    // indistinguishable from a working dev server to a pid check.
+    // Alive is not the same as serving: the fixture's bare `sleep` never binds its port yet passes a pid check.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
@@ -185,9 +146,7 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
 
 #[test]
 fn up_warns_when_another_process_holds_the_allocated_port() {
-    // The expensive one. An orphan from an earlier run still held the port, so the
-    // dev server found it busy and silently moved to another — while ws reported
-    // the port it had allocated, and everything downstream dialled that.
+    // An orphan holding the allocated port used to make the dev server silently switch ports while ws still reported the original.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
@@ -195,18 +154,13 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
     let f = host_fixture_at(PORT_BASE_SQUATTED);
     f.run_ok(&["new", "api", "feat/foo"]);
 
-    // First up allocates the port. The supervised process is a bare `sleep`, so it
-    // never takes the port itself — exactly the situation the bug needs.
+    // The supervised bare `sleep` never binds the port, which is the situation the bug needs.
     let out = f.run_ok(&["up", "feat/foo"]);
     let port = allocated_port(&stderr(&out));
 
-    // Stand in for the orphan: something outside ws's process tree holding it.
-    // Tolerant of losing the bind — port allocation is scanned per workspace root
-    // and probed live, so a fixture running in parallel can hold this port instead.
-    // Either way something outside ws's tree has it, which is what's under test.
+    // Stand in for the orphan; tolerant of losing the bind since a parallel fixture may already hold this port — either way something outside ws's tree does.
     let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).ok();
 
-    // A second up: the process is still running, and ws re-checks the port.
     let out = f.run_ok(&["up", "feat/foo"]);
     let err = stderr(&out);
     drop(squatter);
@@ -224,8 +178,6 @@ fn up_warns_when_another_process_holds_the_allocated_port() {
 
 #[test]
 fn up_and_list_confirm_a_process_serving_its_allocated_port() {
-    // The green path: when the process really is listening on the port ws
-    // allocated, ws says so plainly and adds no caveat.
     if !port_tools_available() {
         eprintln!("skipping: neither `ss` nor `lsof` available to attribute a port");
         return;
@@ -317,15 +269,10 @@ fn host_up_with_no_up_script_is_skipped() {
 
 #[test]
 fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
-    // The recorded pid is only the dev server itself when every layer `exec`s
-    // through. An `up` that points at a *script* leaves the wrapper shell alive as
-    // a parent, so signalling the recorded pid alone killed the wrapper and left
-    // the real server running, reparented to init and still holding its port —
-    // one leaked process per `ws down`/`ws rm`.
+    // Signalling only the recorded pid used to kill the wrapper shell and leak the real server, reparented to init and still holding its port.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // Marker file, then a long-lived child: the same shape as a dev server started
-    // from a `.ws-hooks/` script.
+    // Wrapper shell backgrounding a child — the shape a dev server takes when started from a `.ws-hooks/` script.
     std::fs::write(
         f.path().join("runner.sh"),
         "#!/bin/sh\necho $$ > \"$WS_WORKSPACE_ROOT\"/wrapper.pid\nsleep 40 &\necho $! > \"$WS_WORKSPACE_ROOT\"/child.pid\nwait\n",
@@ -383,10 +330,7 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
 
 #[test]
 fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
-    // The identity guard is right to refuse to signal a stranger, but `down` used
-    // to remove the pid file anyway — discarding the only record of a process it
-    // had just left running. The next `ws up` then saw no pid file, concluded
-    // nothing was running, and started a second dev server beside the first.
+    // `down` used to remove the pid file even when the identity guard declined to signal, so the next `up` saw nothing and started a second server beside the first.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);

@@ -1,9 +1,4 @@
-//! Shared driver for `ws up` and `ws down` — the symmetric hook-runner pair.
-//!
-//! Both ops do the same thing: for every worktree of a branch, run one hook
-//! event (`up` or `down`), isolating per-repo failures so one repo's broken
-//! hook doesn't strand the others. They differ only in the event name, header,
-//! and closing summary — those stay in the op modules.
+//! Shared driver for `ws up` and `ws down` — run one hook event across every worktree of a branch, isolating per-repo failures.
 
 use anyhow::Result;
 
@@ -13,26 +8,18 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
-/// How long a freshly launched host process gets to bind the port ws allocated
-/// before `ws up` reports that it hasn't. Long enough for an interpreted dev
-/// server (vite, `artisan serve`) to be listening, short enough that a compiled
-/// one — which will take far longer than any bearable wait — doesn't hold up the
-/// op. Missing the window costs a qualified line, not a failure.
+/// Window for a launched host process to bind its allocated port before `ws up` qualifies the line — long enough for an interpreted dev server, short enough not to stall on a compiled one. Missing it costs a note, not a failure.
 const BIND_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Outcome of a sweep, for the caller to render its own summary from.
 pub struct SweepResult {
-    /// Repos whose hook ran and exited 0.
     pub ran: Vec<String>,
-    /// Repos that had a worktree but no hook for this event (skipped, dim line).
     pub skipped: Vec<String>,
-    /// Repos whose hook exited non-zero. Non-empty ⇒ the op should exit 1.
+    /// Non-empty ⇒ the op should exit 1.
     pub failed: Vec<String>,
 }
 
 impl SweepResult {
-    /// Finish a step and file the repo under `ran` or `failed`. The shared
-    /// tail every per-repo action (container hook, host up/down) ends with.
     fn record(&mut self, repo: &str, step: crate::ui::Step, res: Result<()>) {
         match res {
             Ok(()) => {
@@ -46,10 +33,7 @@ impl SweepResult {
         }
     }
 
-    /// Move a repo already filed under `ran` into `failed`. Used when a repo's
-    /// hook succeeded but installing its Caddy route failed — the containers are
-    /// up, but with the host publish `!reset` away the HTTP service is
-    /// unreachable, so the repo hasn't really come up.
+    /// Move `repo` from `ran` to `failed` — the hook succeeded but a follow-up (Caddy route) left the stack unreachable, since the host publish is `!reset` away.
     fn demote(&mut self, repo: &str) {
         self.ran.retain(|r| r != repo);
         if !self.failed.iter().any(|r| r == repo) {
@@ -58,24 +42,14 @@ impl SweepResult {
     }
 }
 
-/// Run `event`'s hook across every worktree of `branch`. Prints the op header
-/// (`◐ ws-<op> <branch>`), a step line per repo, and streams hook output. A
-/// missing hook is a dim skip; a failing hook is reported but does not stop the
-/// remaining repos.
-///
-/// Hard-fails with a preflight error (exit 2) when the branch has no worktrees.
+/// Run `event`'s hook across every worktree of `branch`; missing hooks skip, failing hooks are reported but don't stop the remaining repos. Preflight-fails (exit 2) when the branch has no worktrees.
 pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
     let sanitized = workspace::sanitize_branch(branch);
-    // Where the stack lives — locally, or the server for a remote workspace.
-    // Resolving a remote site fetches the server `$HOME` up front, so an
-    // unreachable server fails here with a clear message before any bring-up.
+    // Resolving a remote site fetches the server `$HOME` up front, so an unreachable server fails here before any bring-up.
     let site = Site::resolve(&cfg)?;
 
-    // Iterate repos in config order (deterministic output), keeping only those
-    // that actually have a worktree for this branch. Repos not part of the task
-    // are silently absent — they were never brought up.
     let targets: Vec<(String, std::path::PathBuf)> = cfg
         .repos
         .iter()
@@ -95,35 +69,17 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
     let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
 
-    // `up` activates the stack (allocate ports, render templates); `down` is a
-    // teardown-side event that only reads what's already allocated.
+    // `up` allocates; `down` only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
-    // Bring up the shared routing infra once before the loop, best-effort. It's
-    // NOT fatal here: a sweep whose repos are all raw-TCP (no HTTP service) joins
-    // no `ws-net` and drops no host port, so it needs neither Caddy nor the
-    // network — a broken Caddy shouldn't block it. Fatality lands precisely where
-    // routing is load-bearing instead: an HTTP container whose `ws-net` is missing
-    // fails its own `compose up`, and one whose route won't install is failed
-    // below (its host publish is `!reset` away, so an uninstalled route ⇒
-    // unreachable). `ensure_routing` owns the Caddy-side sequencing + the
-    // DNS-not-ready hint; we only surface what it returns.
+    // Best-effort: a sweep of only raw-TCP repos needs neither Caddy nor `ws-net`, so a broken infra shouldn't block it; failure surfaces later where routing is load-bearing (HTTP container's own `compose up`, or the demote below).
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
-            // `ensure_routing` already probes DNS; its result *is* the answer
-            // (`Some(hint)` ⇒ wildcard doesn't resolve). Reuse it so the auto-offer
-            // below doesn't resolve DNS a second time.
+            // `ensure_routing` probes DNS; reuse its verdict for the auto-offer below rather than resolving twice.
             let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
             let publish = crate::caddy::publish_address(&site, configured);
-            // Say it out loud. The default is right (offload is pointless if the
-            // client can't reach it), but on a box with a public interface it also
-            // serves every worktree to the internet, and nothing else here would
-            // tell you that.
+            // On a public interface the wildcard bind exposes every worktree to the internet — nothing else here would say so.
             if site.is_remote() && configured.is_none() {
-                // Name the subject and the consequence. The old wording led with a
-                // bare verb ("publishing on all interfaces") that never said what
-                // was publishing or what it cost, so it read as a config nag rather
-                // than the exposure notice it is.
                 crate::ui::note(
                     "server Caddy binds every interface — worktree HTTP is exposed on all of \
                      the server's networks; pin one with `remote.publish_address` in .ws.json",
@@ -137,22 +93,12 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                     state
                 }
                 Err(e) => {
-                    // Caddy never came up, so nothing was resolved. Treat DNS as
-                    // unwired rather than inventing a verdict — the nudge below is
-                    // the right outcome either way.
+                    // Caddy never came up, so nothing was resolved — treat DNS as unwired.
                     crate::ui::note(&format!("routing infra not ready: {e:#}"));
                     crate::caddy::Dns::Unresolved
                 }
             };
-            // Auto-offer setup when a privileged bit (DNS / CA trust / :443) is
-            // missing — a non-mutating nudge to run `ws setup`. Skipped under an
-            // externally-managed Caddy (BYO / the test seam).
-            //
-            // `ws setup` handles a remote workspace too (the client's DNS + the
-            // server's CA), but the full probe isn't worth its cost on the remote
-            // up path: it would need the server address resolved and its CA check
-            // dials the server. The `dns` verdict is already in hand for free and is
-            // the bit that usually isn't wired, so remote nudges on that alone.
+            // Nudge to run `ws setup` when a privileged bit (DNS/CA/:443) is missing. Remote nudges on DNS alone — the full probe would dial the server.
             if !crate::caddy::externally_managed() {
                 let incomplete = if site.is_remote() {
                     !dns.is_ok()
@@ -172,27 +118,17 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     for (repo, wt) in &targets {
         super::bail_if_interrupted()?;
 
-        // Client-side prep before the stack comes up. `prepare` runs on THIS
-        // machine even for a remote workspace — the one hook that doesn't follow
-        // the stack to the server — so it can stage data from client-side
-        // resources (e.g. dump the main checkout's db) into the local worktree.
-        // The flush inside the up dispatch then carries that output to the server,
-        // where `up` consumes it. A failed prepare fails the repo and skips its up:
-        // no point bringing a stack up whose seed never staged.
+        // `prepare` runs on THIS machine even for a remote workspace — the one hook that doesn't follow the stack — so it can stage client-side data into the worktree for the up-flush to ship. Failed prepare skips this repo's up.
         if event == "up" && !run_prepare(&cfg, &ws.root, wt, &sanitized, repo, &mut result) {
             continue;
         }
 
-        // Host processes are supervised as a detached `ws`-owned process, not run as a
-        // blocking hook — `up` launches it (detached, survives `ws` exiting), `down`
-        // stops. Their `up` script binds the injected `WS_PORT_*`.
+        // Host processes are supervised as a detached `ws`-owned process, not run as a blocking hook.
         if cfg.is_host_repo(repo) {
             sweep_host(&cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
             continue;
         }
 
-        // A remote workspace runs the container lifecycle on the server over SSH
-        // (in the synced worktree); the local path streams the hook/script here.
         if site.is_remote() {
             sweep_container_remote(
                 &cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result,
@@ -206,9 +142,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         };
 
-        // Compute the injection context (ports/hosts/env) and render templates.
-        // A failure here is isolated per-repo, like a failing hook — it doesn't
-        // strand the other repos in the sweep.
+        // A failure here is isolated per-repo, like a failing hook.
         let extra_env = match inject::prepare(&cfg, &site, &ws.root, wt, &sanitized, repo, phase) {
             Ok(env) => env,
             Err(e) => {
@@ -223,10 +157,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
-        // Sync Caddy routes: add after a successful `up`, remove on `down`. A
-        // container's HTTP services are reachable ONLY through Caddy now (the
-        // override `!reset`s their host publish), so an `up` route that won't
-        // install means the running container is unreachable — fail the repo.
+        // Container HTTP is reachable ONLY through Caddy (the override `!reset`s the host publish), so an `up` route that won't install means the container is unreachable — fail the repo.
         if cfg.routing_active() && (event == "down" || up_ok) {
             let routed_ok = sync_routes(&cfg, &site, &ws.root, &sanitized, repo, event);
             if event == "up" && !routed_ok {
@@ -238,20 +169,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     Ok(result)
 }
 
-/// Run a repo's client-side `prepare` hook (opt-in) locally, ahead of `up`.
-///
-/// Unlike every other lifecycle hook, `prepare` runs on the **client** regardless
-/// of where the stack lives — so a remote workspace can stage data that only
-/// exists on the client (the main checkout's live db, local certs) into the
-/// worktree, which the up dispatch's mutagen flush then ships to the server. The
-/// site is therefore always `Local` and the worktree the local one; `WS_REMOTE`
-/// still reports the workspace's remoteness (it's keyed off `cfg.remote`), so one
-/// script can branch dump-for-sync vs a same-host copy. Phase is `Inspect` —
-/// prepare stages data, it doesn't allocate ports or render templates.
-///
-/// Returns `false` (and files the repo under `failed`) when the hook fails, so the
-/// caller skips the up; `true` on success or when there's no `prepare` hook (the
-/// common case — it never prints a skip line).
+/// Run a repo's opt-in `prepare` hook locally, ahead of `up` — runs on the client even for a remote workspace so it can stage client-side data (main-checkout db dump, local certs) into the worktree for the up-flush to ship. Returns `false` (and files the repo under `failed`) when the hook fails.
 fn run_prepare(
     cfg: &config::WsConfig,
     root: &std::path::Path,
@@ -281,14 +199,7 @@ fn run_prepare(
     }
 }
 
-/// Handle one container repo on the server for a remote workspace: run its
-/// declarative `up`/`down` script over SSH (in the synced worktree, with the
-/// injected env), then sync Caddy routes on the server. Mirrors the local
-/// container path but the script and routing run where the stack lives.
-///
-/// A legacy `.ws-hooks/<repo>/<event>` file lives on the *host* and can't run on
-/// the server, so a repo with only that (no declared `scripts` entry) is a skip:
-/// declarative `scripts` is the remote contract.
+/// Handle one container repo on the server for a remote workspace: run its declarative script over SSH, then sync Caddy routes on the server. A legacy `.ws-hooks/<repo>/<event>` file lives on the host and can't run here, so a repo without a declared `scripts` entry is a skip — declarative `scripts` is the remote contract.
 #[allow(clippy::too_many_arguments)]
 fn sweep_container_remote(
     cfg: &config::WsConfig,
@@ -308,11 +219,7 @@ fn sweep_container_remote(
         return;
     };
 
-    // On `up`, `prepare` derives services + writes the override by reading the
-    // worktree *on the server* — so push our latest edits first, else a just-
-    // edited compose file would derive stale. (`run_remote_event` flushes again
-    // before the script, cheaply; `down`/Inspect doesn't derive but the flush is
-    // harmless.) Best-effort: the session may not exist yet, or mutagen be absent.
+    // On `up`, `prepare` derives + writes the override by reading the worktree on the server — push edits first so a just-edited compose doesn't derive stale. Best-effort: the session may not exist yet.
     let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
 
     let extra_env = match inject::prepare(cfg, site, root, wt, sanitized, repo, phase) {
@@ -336,18 +243,13 @@ fn sweep_container_remote(
             result.demote(repo);
         }
     }
-    // Forward this repo's raw-TCP ports (db, redis, …) to localhost, so a DB GUI
-    // or CLI on this machine reaches the server's containers unchanged.
+    // Forward raw-TCP ports (db, redis, …) to localhost so a client-side DB GUI reaches the server's containers unchanged.
     if event == "down" || up_ok {
         sync_forwards(cfg, root, branch, sanitized, repo, event);
     }
 }
 
-/// Add (`up`) or remove (`down`) the Caddy routes for a repo's HTTP services.
-/// Returns whether the sync succeeded: always `true` for `down` (removal is
-/// best-effort — teardown is infallible by design) and for a repo with no HTTP
-/// routes; on `up`, `false` if any route failed to install (the container caller
-/// fails the repo, since an HTTP container has no host-port fallback).
+/// Add (`up`) or remove (`down`) Caddy routes for a repo's HTTP services. Returns whether the sync succeeded — always `true` for `down` and for a repo with no HTTP routes; on `up`, `false` if any route failed to install (an HTTP container has no host-port fallback).
 fn sync_routes(
     cfg: &config::WsConfig,
     site: &Site,
@@ -370,7 +272,6 @@ fn sync_routes(
     let mut err = None;
     for r in &routes {
         match crate::caddy::route_up(site, r) {
-            // Surface the wildcard in the printed host list (`*.<host>`).
             Ok(()) => hosts.push(if r.wildcard { format!("*.{}", r.hostname) } else { r.hostname.clone() }),
             Err(e) => err = Some(format!("{e}")),
         }
@@ -391,20 +292,7 @@ fn sync_routes(
     }
 }
 
-/// Forward a remote repo's allocated service ports back to this machine (`up`) or
-/// tear the forwards down (`down`), so each server-bound port is reachable at the
-/// same `localhost:<port>` it uses on the server. No-op for a local workspace (the
-/// ports are already local). A pure-HTTP container service has no allocated port so
-/// it's skipped — it's reached by hostname through Caddy instead.
-///
-/// Best-effort: a forward failure is noted, never fatal — the service is up on the
-/// server regardless, and re-running `up` retries. Generic on purpose: it forwards
-/// whatever ports a repo allocated, with no knowledge of what binds them.
-///
-/// Reaping depends on the `.ws-meta` port record still existing (it's re-derived
-/// via `ports::load`); teardown terminates before `ports::forget` wipes it. A
-/// record deleted out of band would strand its forwards — acceptable, and the same
-/// window `ports::forget` itself has.
+/// Forward a remote repo's allocated ports back to this machine (`up`) or tear them down (`down`), so each server-bound port is reachable at the same `localhost:<port>` used on the server. No-op for local; pure-HTTP services are reached via Caddy instead. Best-effort — a forward failure is noted, never fatal.
 fn sync_forwards(
     cfg: &config::WsConfig,
     root: &std::path::Path,
@@ -414,10 +302,7 @@ fn sync_forwards(
     event: &str,
 ) {
     let Some(r) = cfg.remote.as_ref() else { return };
-    // Successes become one aligned block. A stack with a dozen services produced a
-    // dozen near-identical notes that buried everything else in the sweep, and the
-    // interesting part of each was two words wide. Failures keep their own line:
-    // they're rare, individually actionable, and carry an error to read.
+    // Successes batch into one aligned block — a stack with a dozen services buried the sweep otherwise; failures keep their own line so their error is readable.
     let mut forwarded: Vec<(String, String)> = Vec::new();
     for (svc, port) in crate::ports::load(root, sanitized, repo) {
         let session = crate::mutagen::forward_session_name(branch, repo, port);
@@ -425,8 +310,6 @@ fn sync_forwards(
             let _ = crate::mutagen::forward_terminate(&session);
         } else {
             match crate::mutagen::forward_create(&session, &r.connection, port) {
-                // The value is the full dial string, not a bare port, so it can be
-                // pasted straight into a client.
                 Ok(()) => forwarded.push((svc, format!("localhost:{port}"))),
                 Err(e) => crate::ui::note(&format!("{svc}: forward localhost:{port} failed: {e}")),
             }
@@ -435,8 +318,7 @@ fn sync_forwards(
     crate::ui::table(repo, "port forwards", &forwarded);
 }
 
-/// Handle one host repo in a sweep. `up` starts its declared `up` script as a
-/// detached process with the injected env; `down` stops it.
+/// Handle one host repo in a sweep: `up` starts its `up` script as a detached process; `down` stops it.
 #[allow(clippy::too_many_arguments)]
 fn sweep_host(
     cfg: &config::WsConfig,
@@ -450,25 +332,19 @@ fn sweep_host(
     phase: inject::Phase,
     result: &mut SweepResult,
 ) {
-    // Host-process supervision is a detached `ws`-owned process (PID-file tracked)
-    // — on the local box, or on the server over SSH for a remote workspace (the
-    // `Site` carries the location, so it's the same code path either way).
     let name = crate::supervise::proc_name(branch, repo);
 
     if event == "down" {
         let step = crate::ui::step(repo, "stop");
         result.record(repo, step, crate::supervise::down(site, &name));
         if cfg.routing_active() {
-            // Best-effort for a host repo (unlike a container): a host service
-            // binds a real `WS_PORT` on the host, so it stays reachable there even
-            // if its Caddy route (the hostname) fails to sync.
+            // Best-effort (unlike a container): a host service keeps its real `WS_PORT`, so a route sync failure doesn't strand it.
             let _ = sync_routes(cfg, site, root, sanitized, repo, "down");
         }
         sync_forwards(cfg, root, branch, sanitized, repo, "down");
         return;
     }
 
-    // `up`: the launch command is the repo's declared `up` script.
     let Some(cmd) = cfg.script_command(repo, "up") else {
         crate::ui::skip(repo, "no up script");
         result.skipped.push(repo.to_string());
@@ -484,19 +360,12 @@ fn sweep_host(
         }
     };
 
-    // The process's working dir at its execution site: the server-side synced dir
-    // (absolute) for a remote workspace — flush first so the launched process sees
-    // the rendered templates / latest code — else the local worktree.
-    // Both are the *execution site's* paths, and they must agree: `WS_WORKSPACE_ROOT`
-    // is what a `.ws-hooks/…` script path anchors against, so handing back the local
-    // root while the process runs on the server points it at a filesystem that isn't
-    // there (`/Users/…: not found` on a Linux box).
+    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `WS_WORKSPACE_ROOT` is what a `.ws-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
     let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
             let base = site.abs_base(&r.worktree_base(root));
-            // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/
-            // .ws-hooks/…` resolves on the server (same lane the container path uses).
+            // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/.ws-hooks/…` resolves on the server.
             if event == "up" {
                 if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
                     crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
@@ -509,25 +378,14 @@ fn sweep_host(
         None => (wt.to_string_lossy().into_owned(), root.to_string_lossy().into_owned()),
     };
 
-    // The host process runs detached (not via the `Command`-based hook runner), so
-    // apply the base `WS_*` contract here — otherwise the `up` script sees only the
-    // injection env (`WS_PORT_*`/`WS_HOST_*`) and `$WS_BRANCH_SANITIZED` & friends
-    // come out empty (e.g. `https://.api.<domain>`).
-    //
-    // Third time this detached path has been caught missing something the hook
-    // dispatch in `remote::run_event` already does — after the base `WS_*` contract
-    // itself, and the harvested login PATH. Anything added to one belongs in the
-    // other; they are overdue for a shared owner.
+    // The detached path bypasses the `Command`-based hook runner, so apply the base `WS_*` contract here — otherwise `$WS_BRANCH_SANITIZED` & friends come out empty. Third time this path has been caught missing what `remote::run_event` already does; they are overdue for a shared owner.
     let mut proc_env =
         crate::hooks::base_env(std::path::Path::new(&site_root), &worktree, repo, sanitized, event);
     proc_env.extend(extra_env.iter().cloned());
     match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
             let label = if started { "start" } else { "already running (ws down to apply changes)" };
-            // Surface the ports ws allocated for this host process. Unlike a routed
-            // container (which prints its hostname), a host service has no hostname
-            // to show — the bound port is the only handle, and it's otherwise
-            // invisible to the user. Sorted so the line is stable across runs.
+            // A host service has no hostname to show — the bound port is the only user-visible handle. Sorted for stable output.
             let mut ports: Vec<String> = extra_env
                 .iter()
                 .filter_map(|(k, v)| k.strip_prefix("WS_PORT_").map(|svc| format!("{svc}:{v}")))
@@ -535,13 +393,7 @@ fn sweep_host(
             ports.sort();
             let step = crate::ui::step(repo, label);
 
-            // The post-condition. `supervise::up` proves a process was launched and
-            // survived half a second; it does not prove the thing that launch was
-            // *for* — that the port ws allocated is now being served by it. Those
-            // came apart repeatedly: a server that bound a different port after
-            // finding this one busy, an orphan from an earlier run still holding it.
-            // Both left `start web:20001` on screen and the failure surfacing much
-            // later somewhere else.
+            // Post-condition: `supervise::up` proves a process launched and survived half a second, not that it's serving the allocated port. Missed cases (server that bound a different port after finding this one busy, orphan still holding it) surfaced later as opaque failures.
             let allocated: Vec<u16> = extra_env
                 .iter()
                 .filter(|(k, _)| k.starts_with("WS_PORT_"))
@@ -551,14 +403,11 @@ fn sweep_host(
             let crashed = health == Some(crate::supervise::Health::Crashed);
 
             match &health {
-                // Dying *after* the launch check is a failed `up`, not a green one
-                // with a caveat — there is nothing running left to talk to.
+                // Died after launch = failed `up`, not a green line with caveats.
                 Some(crate::supervise::Health::Crashed) => {
                     step.fail(&format!("exited after launch — see ~/.ws-run/{name}.log"));
                 }
-                // Alive but nothing on the port yet is genuinely ambiguous — a
-                // `cargo watch` compiles for a minute before it listens — so it
-                // qualifies the claim rather than failing the repo.
+                // Alive but nothing on the port yet is genuinely ambiguous — `cargo watch` compiles before it listens — so qualify rather than fail.
                 Some(crate::supervise::Health::Silent(_)) => {
                     step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
                     crate::ui::note(&format!(
@@ -567,8 +416,7 @@ fn sweep_host(
                          `~/.ws-run/{name}.log`."
                     ));
                 }
-                // A stranger on the port is not ambiguous: whatever just started
-                // cannot have it, so the server is either dead or somewhere else.
+                // A stranger on the port is unambiguous: whatever just started can't have it.
                 Some(crate::supervise::Health::Squatted(p)) => {
                     step.ok_with(&format!("{} — port held by another process", ports.join(", ")));
                     crate::ui::warn(
@@ -593,11 +441,9 @@ fn sweep_host(
             }
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
-                // Best-effort (see the `down` arm): a host service keeps its
-                // bound `WS_PORT`, so a route failure doesn't strand it.
+                // Best-effort (see the `down` arm): a host service keeps its bound `WS_PORT`.
                 let _ = sync_routes(cfg, site, root, sanitized, repo, "up");
             }
-            // Make the server-bound ports reachable at localhost on this machine.
             sync_forwards(cfg, root, branch, sanitized, repo, "up");
         }
         Err(e) => {
