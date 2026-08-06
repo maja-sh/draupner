@@ -258,6 +258,11 @@ pub struct ListRow {
     pub status: Option<String>,
     /// Extra tag (`detached`, `unmanaged`, …). Rendered dim after the status.
     pub note: Option<String>,
+    /// Recorded host ports for this repo (service → port), from `.ws-meta`. A
+    /// container repo's status column only summarizes ("6 up"), so a service
+    /// you actually want to dial — a DB, a redis — was invisible without this.
+    /// Sorted; empty for a repo with no allocations.
+    pub services: Vec<(String, u16)>,
 }
 
 /// A task grouping for `ws list` — one branch, one or more repo worktrees.
@@ -339,6 +344,18 @@ pub fn list_table(groups: &[ListGroup]) {
                     line.push_str(&format!(" ({note})"));
                 }
                 eprintln!("{line}");
+            }
+            // Per-service host ports: what you actually dial to import a DB,
+            // hit a redis, or point a client at a queue. Widths are per-row so
+            // one repo's long service name doesn't push another's ports out.
+            let name_w = row.services.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            for (name, port) in &row.services {
+                let name_padded = format!("{name:<name_w$}");
+                if tty() {
+                    eprintln!("      {} {}", style(name_padded).dim(), style(format!(":{port}")).dim());
+                } else {
+                    eprintln!("      {name_padded} :{port}");
+                }
             }
         }
         eprintln!();
