@@ -1,11 +1,4 @@
-//! `ws exec [--branch <b>] [repo] [--local] [--no-flush] -- <command…>` — run a
-//! command where the repo's stack lives. Remote workspace → `ssh -t` into the
-//! synced worktree on the server; local (or `--local`) → run in the local
-//! worktree. Same command either way; the child's stdio and exit code pass
-//! straight through.
-//!
-//! The worktree is taken from `--branch` when given (so you can target any
-//! worktree from anywhere, e.g. the workspace root), else inferred from the cwd.
+//! `ws exec` — run a command in a repo's worktree, remote via `ssh -t` or local, with stdio and exit code passing straight through.
 
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
@@ -31,9 +24,6 @@ pub fn run(
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // Which worktree: an explicit `--branch` targets any worktree from anywhere
-    // (e.g. the workspace root); otherwise it — and the default repo — come from
-    // the cwd, i.e. you're standing inside the worktree.
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let root_canon = ws.root.canonicalize().unwrap_or_else(|_| ws.root.clone());
@@ -55,24 +45,14 @@ pub fn run(
     if !cfg.repos.iter().any(|e| e.name() == repo) {
         return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
     }
-    // Fail here if the worktree doesn't exist — before any SSH. `ws new` always
-    // creates the local `.worktrees/<task>/<repo>` (even for a remote workspace),
-    // so a valid `--branch` always has a local dir; a bogus one gets a clean error
-    // instead of an SSH round-trip to a `cd` into a nonexistent path.
+    // Check locally before any SSH: `ws new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
     if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
         return Err(super::preflight(format!("no worktree for `{repo}` in task `{task}`")));
     }
 
     let remote = if local { None } else { cfg.remote.as_ref() };
 
-    // Give the command the same routing context as the scripts. A local run is
-    // where the stack lives, so it allocates host ports (but doesn't render
-    // templates — exec is a command runner); a remote run only *loads* the ports
-    // recorded at `ws up` (Inspect). The injection site is `Local` either way:
-    // the local branch must allocate locally, and the remote branch's Inspect
-    // phase neither allocates nor derives nor writes the override, so it's
-    // location-agnostic — this keeps `ws exec` from pre-dialing the server (its
-    // deliberate no-pre-check behavior) yet still surfaces the recorded ports.
+    // Local run allocates host ports (Exec); remote only loads ports recorded at `ws up` (Inspect). Passing `Site::Local` unconditionally keeps `ws exec` from pre-dialing the server.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let wt = workspace::task_dir(&ws.root, &task).join(&repo);
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
@@ -107,8 +87,7 @@ fn exec_local(
     c.status().with_context(|| format!("run `{program}`"))
 }
 
-/// Run on the server via SSH, after flushing the worktree's sync so the far
-/// side has our latest edits.
+/// Run on the server via SSH, flushing the worktree's sync first so the far side has our latest edits.
 fn exec_remote(
     r: &config::RemoteConfig,
     ws_root: &Path,
@@ -120,8 +99,7 @@ fn exec_remote(
 ) -> Result<ExitStatus> {
     if !no_flush {
         let session = mutagen::session_name(task, repo);
-        // Best-effort: the session may not exist yet (sync lifecycle isn't wired
-        // into `up` yet) or mutagen may be absent. Note it and carry on.
+        // Best-effort: the session may not exist yet, or mutagen may be absent.
         if let Err(e) = mutagen::flush(&session) {
             crate::ui::skip("sync", &format!("flush skipped ({e})"));
         }
@@ -129,9 +107,7 @@ fn exec_remote(
 
     let dir = remote::worktree_path(&r.worktree_base(ws_root), task, repo);
     let script = remote::remote_script(&dir, env, command);
-    // Allocate a remote pty only when both stdin and stdout are terminals.
-    // Keying on stdin alone would put a pty on `ws exec … > file`, corrupting
-    // the redirected output with CRLF / control sequences.
+    // Both TTYs required: keying on stdin alone puts a pty on `ws exec … > file` and corrupts the redirect with CRLF/control sequences.
     let want_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     crate::ui::note(&format!("→ {}:{dir}", r.connection));
@@ -140,9 +116,7 @@ fn exec_remote(
         .with_context(|| format!("ssh {}", r.connection))
 }
 
-/// Mirror the child's exit status. Success → `Ok`. Non-zero or signal death →
-/// a silent passthrough error carrying the code, so `ws` exits with it but
-/// prints no banner over the command's own output.
+/// Mirror the child's exit status; non-zero or signal death becomes a silent passthrough error so `ws` exits with the code but prints no banner over the command's own output.
 fn propagate(status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
@@ -150,8 +124,7 @@ fn propagate(status: ExitStatus) -> Result<()> {
     Err(super::passthrough_exit(exit_code(&status)))
 }
 
-/// The child's exit code, mapping a signal death to `128 + signum` (so a
-/// Ctrl-C'd child yields 130) to match `ws`'s exit conventions elsewhere.
+/// Child's exit code, mapping signal death to `128 + signum` (Ctrl-C → 130) to match `ws`'s exit conventions elsewhere.
 #[cfg(unix)]
 fn exit_code(status: &ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;

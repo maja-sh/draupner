@@ -1,16 +1,11 @@
-//! Visual language for user-facing output. See `spec-output-formatting.md`.
-//!
-//! Op code never calls `println!`/`eprintln!` directly. Every op uses these
-//! helpers so tty detection, color palette, spinners, and non-tty fallback
-//! all live in one place.
+//! Op code never calls `println!`/`eprintln!` directly — tty detection, palette, spinners, and non-tty fallback all live here.
 
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Left-pad width for the step-line tag column. Widest tag currently in use is
-/// `"skills"` (6). Longer tags overflow naturally.
+/// Sized for the widest tag currently in use (`"skills"`); longer tags overflow naturally.
 const TAG_WIDTH: usize = 6;
 
 fn tty() -> bool {
@@ -18,22 +13,15 @@ fn tty() -> bool {
     *TTY.get_or_init(|| Term::stderr().features().colors_supported())
 }
 
-/// The spinner currently animating, if any. A streamed line (`hook_line`) printed
-/// with a plain `eprintln!` collides with the spinner's steady-tick redraw on the
-/// same terminal row; emitting it *through* the spinner (`suspend`) makes indicatif
-/// clear its line first, so the log lands cleanly above the still-spinning step.
+/// A plain `eprintln!` collides with the spinner's steady-tick redraw; `hook_line` routes through `suspend` so the log lands cleanly above the still-spinning step.
 static ACTIVE_SPINNER: Mutex<Option<ProgressBar>> = Mutex::new(None);
 
 fn set_active_spinner(pb: Option<ProgressBar>) {
     *ACTIVE_SPINNER.lock().unwrap() = pb;
 }
 
-/// Run `f` (which prints one line) with the active spinner suspended, so the line
-/// lands above the spinner instead of fighting its redraw. A no-op wrapper when no
-/// spinner is live (non-tty, or between steps).
 fn emit_around_spinner(f: impl FnOnce()) {
-    // Clone the handle out and drop the lock before suspending, so a reentrant
-    // print (there is none today) couldn't deadlock on the mutex.
+    // Drop the mutex before suspending so a reentrant print can't deadlock on it.
     let pb = ACTIVE_SPINNER.lock().unwrap().clone();
     match pb {
         Some(pb) => pb.suspend(f),
@@ -41,7 +29,6 @@ fn emit_around_spinner(f: impl FnOnce()) {
     }
 }
 
-/// Op header — `◐ ws-new api,app test/foo` on tty, `ws-new: …` on non-tty.
 pub fn header(op: &str, args: &str) {
     if tty() {
         eprintln!("{} {} {}", style("◐").cyan(), style(op).bold(), args);
@@ -50,11 +37,7 @@ pub fn header(op: &str, args: &str) {
     }
 }
 
-/// Begin a step. Must be finished with `.ok(...)` / `.ok_with(...)` / `.fail(...)`.
-///
-/// If a `Step` is dropped without a terminal call (e.g. an `?` short-circuit
-/// upstream), `Drop` clears the spinner and emits an aborted line so the
-/// caller doesn't leave a half-drawn spinner on the terminal.
+/// Begin a step; a `Drop` without a terminal call (e.g. `?` short-circuit) clears the spinner and emits an aborted line.
 #[must_use = "Step must be completed with .ok() / .ok_with() / .fail(); dropping without a call emits an aborted line."]
 pub fn step(tag: &str, label: &str) -> Step {
     let start = Instant::now();
@@ -68,7 +51,7 @@ pub fn step(tag: &str, label: &str) -> Step {
         );
         pb.set_prefix(format!("{}", style(pad_tag(tag)).green().bold()));
         pb.set_message(label.to_string());
-        // Register it so `hook_line` streamed under this step suspends it.
+        // So `hook_line` streamed under this step suspends it.
         set_active_spinner(Some(pb.clone()));
         Some(pb)
     } else {
@@ -92,8 +75,7 @@ pub struct Step {
 }
 
 impl Step {
-    /// Finish and clear the spinner, and deregister it so streamed output after
-    /// this step no longer suspends a bar that's gone.
+    /// Deregisters so streamed output after this step no longer tries to suspend a bar that's gone.
     fn clear_spinner(&mut self) {
         if let Some(pb) = self.spinner.take() {
             pb.finish_and_clear();
@@ -163,9 +145,7 @@ impl Drop for Step {
             return;
         }
         self.clear_spinner();
-        // Step dropped without a terminal call — usually a `?` upstream. Emit
-        // an aborted line so the user isn't left with a silent gap between
-        // the header and the propagated error.
+        // Aborted line so a `?` upstream doesn't leave a silent gap between the header and the propagated error.
         if tty() {
             eprintln!(
                 "  {} {} {}",
@@ -179,8 +159,7 @@ impl Drop for Step {
     }
 }
 
-/// Stream one line of hook output. The `stderr` flag is currently unused —
-/// see spec-output-formatting §"Hook-streamed line" (no distinct styling in v1).
+/// `stderr` flag is unused — v1 gives it no distinct styling per spec-output-formatting §"Hook-streamed line".
 pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
     let cleaned = strip_control(line);
     emit_around_spinner(|| {
@@ -197,9 +176,6 @@ pub fn hook_line(tag: &str, line: &str, _stderr: bool) {
     });
 }
 
-/// A dim, subordinate note that a repo was skipped for a step (e.g. it has a
-/// worktree but no hook for this event). Not a failure — just visible enough
-/// that the user knows nothing ran for that repo.
 pub fn skip(tag: &str, reason: &str) {
     if tty() {
         eprintln!(
@@ -224,8 +200,6 @@ pub fn summary_ok(lines: &[String]) {
     }
 }
 
-/// Up-front warning block — a `⚠` title followed by indented detail lines.
-/// Used by `ws rm` to surface dirty / unpushed state before teardown.
 pub fn warn(title: &str, items: &[String]) {
     if tty() {
         eprintln!("  {} {}", style("⚠").yellow().bold(), style(title).yellow());
@@ -249,33 +223,23 @@ pub fn summary_fail(reason: &str) {
     }
 }
 
-/// One repo's row within a `ws list` task group.
 pub struct ListRow {
     pub repo: String,
     pub dirty: bool,
-    /// Free-form run-state string emitted by the `status` hook (first line),
-    /// or `None` when there's no hook / it timed out / it failed.
+    /// `None` when the `status` hook is missing, timed out, or failed.
     pub status: Option<String>,
-    /// Extra tag (`detached`, `unmanaged`, …). Rendered dim after the status.
     pub note: Option<String>,
-    /// Recorded host ports for this repo (service → port), from `.ws-meta`. A
-    /// container repo's status column only summarizes ("6 up"), so a service
-    /// you actually want to dial — a DB, a redis — was invisible without this.
-    /// Sorted; empty for a repo with no allocations.
+    /// A container repo's status column only summarizes ("6 up"), so individual dialable ports would otherwise be invisible.
     pub services: Vec<(String, u16)>,
 }
 
-/// A task grouping for `ws list` — one branch, one or more repo worktrees.
 pub struct ListGroup {
-    /// Display label — the branch name (`feat/foo`) or the sanitized task dir.
     pub task: String,
-    /// The task dir holding this branch's worktrees (`<root>/.worktrees/<task>`),
-    /// so a reader can find the files; empty for the unmanaged group.
+    /// Empty for the unmanaged group.
     pub path: String,
     pub rows: Vec<ListRow>,
 }
 
-/// `ws list` with no worktrees found. Not an error — informational.
 pub fn list_empty() {
     if tty() {
         eprintln!("\n{}", style("no worktrees").dim());
@@ -284,8 +248,6 @@ pub fn list_empty() {
     }
 }
 
-/// Render the `ws list` table: task groups separated by blank lines, each with
-/// aligned repo / dirty / status columns.
 pub fn list_table(groups: &[ListGroup]) {
     let repo_w = groups
         .iter()
@@ -294,8 +256,7 @@ pub fn list_table(groups: &[ListGroup]) {
         .max()
         .unwrap_or(0);
 
-    // Only show the status column when something actually reports one —
-    // otherwise every row is a bare dash, which reads as noise.
+    // Skip the column when nothing reports one, else every row is a bare dash.
     let any_status = groups
         .iter()
         .flat_map(|g| g.rows.iter())
@@ -345,9 +306,7 @@ pub fn list_table(groups: &[ListGroup]) {
                 }
                 eprintln!("{line}");
             }
-            // Per-service host ports: what you actually dial to import a DB,
-            // hit a redis, or point a client at a queue. Widths are per-row so
-            // one repo's long service name doesn't push another's ports out.
+            // Widths are per-row so one repo's long service name doesn't push another's ports out.
             let name_w = row.services.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
             for (name, port) in &row.services {
                 let name_padded = format!("{name:<name_w$}");
@@ -362,8 +321,6 @@ pub fn list_table(groups: &[ListGroup]) {
     }
 }
 
-/// One `ws clean` audit verdict. `removal` drives the color (green remove / dim
-/// keep); `dry` renders a removal as "would remove" for the preview pass.
 pub fn clean_verdict(task: &str, removal: bool, reason: &str, dry: bool) {
     let verb = if removal {
         if dry { "would remove" } else { "remove" }
@@ -388,7 +345,6 @@ pub fn clean_verdict(task: &str, removal: bool, reason: &str, dry: bool) {
     }
 }
 
-/// `ws clean` with no task worktrees to audit. Not an error — informational.
 pub fn clean_empty() {
     if tty() {
         eprintln!("\n{}", style("nothing to clean").dim());
@@ -397,22 +353,12 @@ pub fn clean_empty() {
     }
 }
 
-/// A machine-readable value on stdout — the one channel scripts consume
-/// (`ws config get`); everything human-facing goes to stderr via the helpers
-/// above. No styling ever, tty or not.
+/// stdout is the one channel scripts consume (`ws config get`); everything human-facing goes to stderr, and this line is never styled.
 pub fn value(text: &str) {
     println!("{text}");
 }
 
-/// A single dim, subordinate line to stderr. Used by `ws exec` to note where a
-/// command is being dispatched (e.g. the remote host) without polluting the
-/// command's own stdout.
-///
-/// Indented to the repo column (2), like `step` and `warn`. Column 0 belongs to
-/// op-level lines — the header and the closing summary — and a note printed
-/// there read as a peer of the operation itself rather than a detail of it,
-/// leaving a long one flush against the edge while everything around it was
-/// inset.
+/// Indented to the repo column (2), not 0 — column 0 belongs to the header and closing summary, and a note there read as a peer of the operation rather than a detail.
 pub fn note(text: &str) {
     if tty() {
         eprintln!("  {}", style(text).dim());
@@ -421,19 +367,7 @@ pub fn note(text: &str) {
     }
 }
 
-/// A titled, column-aligned detail block: a `tag`-led title in the repo column
-/// and `key   value` rows inset under it.
-///
-/// For a set of related facts that would otherwise be N repetitive `note` lines
-/// — the per-service port forwards, where every line shared a prefix and the
-/// distinguishing part was two words wide. One line per fact is right; N
-/// unaligned sentences are not. Padding is applied to the raw key before
-/// styling, since ANSI escapes would otherwise be counted in the field width.
-///
-/// The `tag` uses the same padded repo column as `step`, because a sweep emits
-/// one block per repo and an untagged title left them indistinguishable — two
-/// identical `port forwards` headings, telling you nothing about which repo
-/// owned which ports, in output where every other line names its repo.
+/// Column-aligned block for related facts (per-service port forwards); `tag` uses `step`'s repo column so a sweep's per-repo blocks stay distinguishable.
 pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
     if rows.is_empty() {
         return;
@@ -454,16 +388,12 @@ pub fn table(tag: &str, title: &str, rows: &[(String, String)]) {
     });
 }
 
-/// Width of a table's key column: the widest key, counted in `chars` so a
-/// multi-byte service name doesn't over-pad.
+/// Counted in `chars` so a multi-byte service name doesn't over-pad.
 fn key_width(rows: &[(String, String)]) -> usize {
     rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0)
 }
 
-/// Pad a key to the column width. Applied to the raw string, never a styled
-/// one — `style()` emits ANSI escapes that a width specifier would count as
-/// visible characters, so every coloured row would pad short by the escape
-/// length and the value column would ragged out.
+/// Must be called on the raw string — styled input pads short because ANSI escapes count against the width specifier.
 fn pad_key(k: &str, w: usize) -> String {
     format!("{k:<w$}")
 }
@@ -476,9 +406,6 @@ pub fn nudge(text: &str) {
     }
 }
 
-/// A readiness line for `ws setup`: `✓ label — detail` (green) when satisfied,
-/// `✗ label — detail` (yellow) when a gap remains. Not a hard failure — a gap is
-/// something the user is about to be walked through fixing.
 pub fn status_line(ok: bool, label: &str, detail: &str) {
     if tty() {
         let (mark, lab) = if ok {
@@ -492,8 +419,6 @@ pub fn status_line(ok: bool, label: &str, detail: &str) {
     }
 }
 
-/// Show an exact command block (for `ws setup`'s show-me / print-and-bail): each
-/// line indented and, on a tty, rendered like inline code so it's copy-pasteable.
 pub fn command_block(commands: &[String]) {
     for c in commands {
         if tty() {
@@ -504,18 +429,13 @@ pub fn command_block(commands: &[String]) {
     }
 }
 
-/// Whether stdin can carry an answer — the precondition [`ask`] tests before it
-/// prompts. Exposed so a caller can decide not to *offer* something at all,
-/// rather than print a question it already knows can't be answered.
+/// Exposed so a caller can skip offering a choice it already knows can't be answered, rather than printing a dead prompt.
 pub fn interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
 
-/// Ask an interactive question and read a line from stdin. Returns `None` when
-/// stdin isn't a terminal or hits EOF — the caller then falls back to a
-/// non-interactive path (print-and-bail) rather than blocking. The prompt has no
-/// trailing newline so the answer echoes on the same line.
+/// Returns `None` on non-tty or EOF so the caller can fall back to print-and-bail rather than block; the prompt has no trailing newline so the answer echoes on the same line.
 pub fn ask(prompt: &str) -> Option<String> {
     use std::io::Write;
     if !interactive() {
@@ -529,7 +449,7 @@ pub fn ask(prompt: &str) -> Option<String> {
     std::io::stderr().flush().ok();
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(0) => None, // EOF
+        Ok(0) => None,
         Ok(_) => Some(line.trim().to_string()),
         Err(_) => None,
     }
@@ -548,19 +468,16 @@ fn format_timing(d: Duration) -> String {
     }
 }
 
-/// Strip ANSI CSI/OSC escape sequences and other C0/C1 control bytes from a
-/// hook line. Prevents hooks from clearing the terminal, faking op status
-/// lines, or otherwise scribbling on ws's own output.
+/// Stops hooks from clearing the terminal, faking op status lines, or otherwise scribbling on ws's own output.
 fn strip_control(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
             '\x1b' => {
-                // ESC — swallow a CSI/OSC sequence.
                 match chars.next() {
                     Some('[') => {
-                        // CSI: parameter/intermediate bytes then a final byte in 0x40..=0x7e.
+                        // CSI ends on a byte in 0x40..=0x7e.
                         for c in chars.by_ref() {
                             if matches!(c, '\x40'..='\x7e') {
                                 break;
@@ -568,7 +485,7 @@ fn strip_control(s: &str) -> String {
                         }
                     }
                     Some(']') => {
-                        // OSC: terminated by BEL (\x07) or ST (ESC \).
+                        // OSC ends on BEL or ST (ESC \).
                         let mut prev = '\0';
                         for c in chars.by_ref() {
                             if c == '\x07' || (prev == '\x1b' && c == '\\') {
@@ -578,12 +495,12 @@ fn strip_control(s: &str) -> String {
                         }
                     }
                     Some(_) => {
-                        // Single-byte escape (e.g. ESC c reset). Drop the byte.
+                        // Single-byte escape (e.g. ESC c reset) — drop the byte.
                     }
                     None => {}
                 }
             }
-            // Other C0 controls except tab / newline: drop.
+            // C0 controls, but tab and newline are kept.
             '\x00'..='\x08' | '\x0b'..='\x1f' | '\x7f' => {}
             _ => out.push(c),
         }
@@ -603,8 +520,6 @@ mod tests {
 
     #[test]
     fn table_values_all_start_in_the_same_column() {
-        // The point of the block over N notes is that the values line up, so
-        // assert the column rather than eyeballing a sample render.
         let rows: Vec<(String, String)> = [("db", "localhost:20000"), ("elasticsearch", "localhost:20002")]
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -617,7 +532,6 @@ mod tests {
             .map(|(k, v)| format!("    {}  {}", pad_key(k, w), v).find("localhost").unwrap())
             .collect();
         assert_eq!(cols[0], cols[1], "value column must not depend on key length");
-        // The widest key is padded to exactly itself — no trailing filler.
         assert_eq!(pad_key("elasticsearch", w), "elasticsearch");
     }
 

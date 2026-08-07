@@ -9,26 +9,20 @@ use crate::inject;
 use crate::ui::{ListGroup, ListRow};
 use crate::workspace;
 
-/// Wall-clock cap on the read-only `status` hook, per spec-2. A slower hook is
-/// reported as "status unknown" (rendered as the missing-value dash).
+/// Slower `status` hooks are reported as "status unknown".
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run() -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
-    // Where the stacks live. Resolved once (one SSH for a remote workspace). `None`
-    // ⇒ a remote server we can't reach — status is then simply omitted (we can't
-    // probe the remote stack; the rest of the listing still renders).
+    // `None` = unreachable remote; the listing still renders, just without status.
     let site = crate::remote::Site::resolve(&cfg).ok();
 
     crate::ui::header("ws-list", "");
 
-    // Collected rows keyed by task dir name (managed) or "(unmanaged)".
-    // Value carries each row plus its git branch so the group can label itself.
     let mut tasks: BTreeMap<String, Vec<(ListRow, Option<String>)>> = BTreeMap::new();
 
-    // One shared enumeration — the same one `remote set` and `clean` use, so the
-    // ops can never disagree about which worktrees exist.
+    // Shared with `remote set` and `clean` so the ops can never disagree.
     for wt in workspace::worktrees(&ws.root, &cfg) {
         let workspace::Worktree { repo, path: wt_path, branch, task } = wt;
         let repo = repo.as_str();
@@ -38,11 +32,7 @@ pub fn run() -> Result<()> {
 
         let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
 
-        // A `kind: host` repo's process is supervised by ws itself, so ws can answer
-        // for it without asking the repo — and it is the only one that *can* say
-        // "this crashed": a `status` script describes a server it assumes is
-        // running, and reports nothing at all once the process is gone. That state
-        // was invisible until now.
+        // Only ws can report a crashed host process; a `status` script assumes the server is running.
         let host_health = (managed && cfg.is_host_repo(repo))
             .then(|| {
                 let site = site.as_ref()?;
@@ -53,16 +43,11 @@ pub fn run() -> Result<()> {
             })
             .flatten();
 
-        // The declared `status` script, run wherever the stack lives. Lazy: when
-        // ws already has bad news about a host process, that's the more important
-        // answer and this never runs.
+        // Lazy — skipped when ws already has bad news about a host process.
         let declared = || if !managed {
             None
         } else if let Some(r) = cfg.remote.as_ref() {
-            // Remote workspace: run the declared `status` script ON THE SERVER
-            // (a legacy `.ws-hooks` file lives on the host and can't). Skip when
-            // the server is unreachable (`site` didn't resolve to `Remote`) —
-            // status of the remote stack isn't knowable from here.
+            // Runs on the server; a legacy `.ws-hooks` file on the host can't reach the remote stack.
             match site.as_ref() {
                 Some(s @ crate::remote::Site::Remote { .. }) => {
                     cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
@@ -80,8 +65,7 @@ pub fn run() -> Result<()> {
                 _ => None,
             }
         } else {
-            // Local workspace: run the `status` hook/script locally (Inspect —
-            // no allocation/derive; the recorded ports come from `.ws-meta`).
+            // Inspect phase must stay — no allocation or derivation from a status probe.
             hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
                 let extra_env = inject::prepare(
                     &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
@@ -95,8 +79,7 @@ pub fn run() -> Result<()> {
             })
         };
 
-        // ws's own record wins only when it has something wrong to report; a
-        // healthy process still lets a declared script say more than "running".
+        // ws's crash beats the script; a healthy process defers to the script for detail.
         let status = match host_health {
             Some(h) if !h.is_ok() => Some(h.label()),
             Some(h) => declared().or_else(|| Some(h.label())),
@@ -112,10 +95,7 @@ pub fn run() -> Result<()> {
             })
         };
 
-        // Every host port ws has recorded for this repo, sorted by service
-        // (BTreeMap iteration). Read straight from `.ws-meta` — no probing,
-        // no derivation; this reflects the last `up`. A repo with nothing
-        // allocated yet gets an empty list and renders no sub-rows.
+        // From `.ws-meta` only — no probing; reflects the last `up`.
         let services: Vec<(String, u16)> = if managed {
             crate::ports::load(&ws.root, &sanitized, repo).into_iter().collect()
         } else {
@@ -135,9 +115,6 @@ pub fn run() -> Result<()> {
         .into_iter()
         .map(|(key, rows)| {
             let label = group_label(&key, &rows);
-            // The task dir holding this branch's worktrees, so a reader (or a
-            // Claude session) can find the files. The unmanaged group has no
-            // single dir, so it gets none.
             let path = if key == "(unmanaged)" {
                 String::new()
             } else {
@@ -151,8 +128,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Pick a group's display label. When every row shares the same branch, show
-/// the (unsanitized) branch name; otherwise fall back to the task-dir key.
+/// Prefer the shared branch name; fall back to the task-dir key when rows disagree.
 fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
     let mut branches = rows.iter().filter_map(|(_, b)| b.as_deref());
     if let Some(first) = branches.next() {

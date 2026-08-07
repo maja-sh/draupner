@@ -1,14 +1,5 @@
-//! Thin wrapper over the `mutagen` CLI. Sync sessions are created when a
-//! worktree is made (`ws new`) and terminated when it's removed (`ws rm` /
-//! `ws clean`); `ws exec` flushes before a remote run. Session naming is a
-//! stable contract (the documented escape hatch).
-//!
-//! The binary is resolved through `WS_MUTAGEN` (default `mutagen`) so tests can
-//! substitute a fake.
-//!
-//! NOTE: the exact mutagen flag names/behavior here are built from docs, not
-//! yet verified against a live `mutagen` — verify when wiring a real server
-//! (spec-remote's standing "the runtime wins" caveat).
+//! Thin wrapper over the `mutagen` CLI; the `ws-…` session naming is a documented
+//! stable contract. Binary resolved through `WS_MUTAGEN` so tests can substitute a fake.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -16,14 +7,12 @@ use std::process::{Command, Stdio};
 
 use crate::workspace;
 
-/// Mutagen binary to invoke. Overridable via `WS_MUTAGEN` for tests.
+/// Mutagen binary to invoke; overridable via `WS_MUTAGEN` for tests.
 fn mutagen_bin() -> String {
     std::env::var("WS_MUTAGEN").unwrap_or_else(|_| "mutagen".to_string())
 }
 
-/// Is `mutagen` available on PATH? Cheap client-side readiness check — a
-/// remote workspace needs it locally to sync, so `ws init --remote` verifies it
-/// up front rather than letting `ws new` fail later.
+/// Cheap PATH check so `ws init --remote` fails early instead of at `ws new`.
 pub fn installed() -> bool {
     Command::new(mutagen_bin())
         .arg("version")
@@ -35,24 +24,19 @@ pub fn installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Canonical sync-session name for a worktree: `ws-<sanitized-branch>-<repo>`.
-/// This is the documented escape hatch — a user can `mutagen sync pause ws-…`
-/// directly — so the naming is a stable contract.
+/// Canonical sync-session name; a stable contract users may target with `mutagen sync pause ws-…`.
 pub fn session_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
-/// The forwarding-session name for one remote service port. Keyed by port (a repo
-/// can expose several) and distinct from the sync name (`ws-<branch>-<repo>`), so
-/// listing or terminating one kind never touches the other.
+/// Forwarding-session name, keyed by port and distinct from the sync name so
+/// operations on one kind never touch the other.
 pub fn forward_session_name(branch: &str, repo: &str, port: u16) -> String {
     format!("ws-fwd-{}-{repo}-{port}", workspace::sanitize_branch(branch))
 }
 
-/// Create a network forward so a port bound on the server is reachable at the same
-/// `localhost:<port>` on this machine — the "remote feels local" contract for
-/// anything that assumes loopback (dev servers with their own TLS, DB GUIs, tools
-/// that hardcode 127.0.0.1). Idempotent: an existing session is left in place.
+/// Forward server-side `localhost:<port>` to the same address on this machine so
+/// tools that hardcode loopback keep working; idempotent on name collisions.
 pub fn forward_create(session: &str, connection: &str, port: u16) -> Result<()> {
     let (local, remote) = forward_endpoints(connection, port);
     let out = Command::new(mutagen_bin())
@@ -62,11 +46,8 @@ pub fn forward_create(session: &str, connection: &str, port: u16) -> Result<()> 
         .with_context(|| format!("spawn {}", mutagen_bin()))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        // Only a **session-name** collision is idempotent success (a re-`up`
-        // re-creating an existing forward). A local-bind "address in use" must
-        // NOT be swallowed the way sync's `create` swallows "in use": for a
-        // forward it means another process already holds `localhost:<port>`, so
-        // reporting success would point the user's client at the wrong process.
+        // Idempotent only on name collision, not local-bind "in use": swallowing the
+        // latter would silently point the client at whichever process holds the port.
         if err.contains("already exists") {
             return Ok(());
         }
@@ -75,8 +56,7 @@ pub fn forward_create(session: &str, connection: &str, port: u16) -> Result<()> 
     Ok(())
 }
 
-/// The (local, remote) endpoint pair for a forward: the same `localhost:<port>`
-/// on both ends, so the address means the identical thing wherever the stack runs.
+/// Same `localhost:<port>` on both ends so the address means the same thing wherever the stack runs.
 fn forward_endpoints(connection: &str, port: u16) -> (String, String) {
     (format!("tcp:localhost:{port}"), format!("{connection}:tcp:localhost:{port}"))
 }
@@ -103,34 +83,14 @@ pub fn forward_terminate(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sync ignores for a worktree: the repo's configured `worktree_excludes` plus
-/// the per-host dep artifacts (`vendor/`, `node_modules/`). Deps are
-/// arch-specific: they belong installed on each side, not on the wire. The one
-/// home for "what stays off the sync"; a drifted copy would ship a
-/// node_modules-scale tree over SSH.
-///
-/// Tracking, not disk presence, decides. A dep dir that is git-TRACKED is
-/// committed source (Go-style vendoring), not a per-host artifact — it must
-/// reach the server, so it is never ignored. Everything else is per-host and is
-/// ignored whether or not it exists here yet.
-///
-/// Gating on local presence instead was a 200MB trap: the sync is two-way, so a
-/// worktree whose deps are installed at the *other* end (`composer install` in a
-/// remote `up`) would have had them dragged back over SSH — precisely the case
-/// on a fresh clone whose main checkout never ran an install, where there is no
-/// local `vendor/` for `ws new` to copy. Ignoring a path that does not exist
-/// costs nothing; ignoring one too late costs the whole tree.
+/// Sync ignores for a worktree: configured `worktree_excludes` plus per-host dep
+/// artifacts. Gating on git tracking (not local presence) avoids a 200MB round-trip
+/// where a two-way sync would drag a server-side `composer install` back over SSH.
 pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     let mut ignores = configured.to_vec();
-    // A linked worktree's `.git` is a FILE holding `gitdir: <client path>`, not a
-    // directory — so mutagen's `--ignore-vcs`, which matches VCS *directories*,
-    // never catches it and the server receives a pointer into a filesystem that
-    // doesn't exist there (`/Users/...` on a Linux box). Git then aborts on any
-    // command run in that directory before doing any work, which breaks tools that
-    // merely shell out to it: `npm ci` resolving a git dependency dies on
-    // `ls-remote`, a call that works fine in a directory with no `.git` at all.
-    // Server worktrees are plain synced directories by design, so nothing there
-    // wants it.
+    // A linked worktree's `.git` is a FILE holding `gitdir: <client path>` — `--ignore-vcs`
+    // matches only VCS *directories*, so without this the server receives a pointer into
+    // a filesystem that isn't there and any git-shelling tool (e.g. `npm ci`) aborts.
     ignores.push("/.git".to_string());
     for dep in ["vendor", "node_modules"] {
         if !crate::git::is_tracked(worktree, dep) {
@@ -140,26 +100,14 @@ pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     ignores
 }
 
-/// The `beta` (remote) endpoint mutagen syncs to: `<connection>:<remote_path>`.
-/// `connection` is the SSH host; `remote_path` is resolved the same way `ws
-/// exec` resolves its `cd` target, so sync and exec always agree on the layout.
+/// The `beta` endpoint mutagen syncs to; `remote_path` matches what `ws exec` uses so both agree on layout.
 fn beta_endpoint(connection: &str, remote_path: &str) -> String {
     format!("{connection}:{remote_path}")
 }
 
-/// Create a two-way sync between the local worktree (`local`) and the server
-/// (`<connection>:<remote_path>`). `ignores` keeps per-worktree artifacts
-/// (node_modules, vendor) off the wire, and includes the worktree's `.git`
-/// pointer — `--ignore-vcs` does NOT cover that, since it matches VCS
-/// directories and a linked worktree's `.git` is a file. Idempotent: an existing
-/// session of the same name is treated as success.
-/// Create the beta root's **parent** on the server.
-///
-/// Mutagen creates the synchronization root itself but not the directories above
-/// it, and the beta path is `<workspace_path>/<task>/<repo>` — so the per-task
-/// directory never exists on a first `ws new`. Worse, the session still reports
-/// `Watching for changes`: the failure surfaces only as a transition problem in
-/// `mutagen sync list --long`, so sync looks healthy while nothing ever transfers.
+/// Create the beta root's parent on the server; mutagen creates the sync root itself
+/// but not the directories above it, and a missing parent leaves the session reporting
+/// `Watching for changes` while nothing ever transfers.
 fn ensure_beta_parent(connection: &str, remote_path: &str) -> Result<()> {
     let Some((parent, _)) = remote_path.rsplit_once('/') else { return Ok(()) };
     if parent.is_empty() {
@@ -179,13 +127,8 @@ fn ensure_beta_parent(connection: &str, remote_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Confirm the synchronization root now exists on the server.
-///
-/// Checks the outcome rather than mutagen's own status, which is not a reliable
-/// signal: a session whose transfer never completes still reports `Watching for
-/// changes`, and the failure appears only as a `Transition problems` line in the
-/// human-readable `sync list --long`. Asserting the directory is there turns a
-/// silently-dead sync into a failure at the step that owns it.
+/// Confirm the sync root exists — mutagen's own status keeps reporting `Watching for
+/// changes` on a dead session, so check the outcome directly.
 pub fn verify_beta(connection: &str, remote_path: &str) -> Result<()> {
     let script = format!("test -d {}", crate::remote::shell_quote(remote_path));
     let ok = crate::remote::ssh_command(connection, &script, false)
@@ -213,19 +156,9 @@ pub fn create(
     let beta = beta_endpoint(connection, remote_path);
     let mut cmd = Command::new(mutagen_bin());
     cmd.args(["sync", "create", "--name", session, "--ignore-vcs"]);
-    // Mutagen's portable permission mode propagates only the executable bit and
-    // creates everything else at its defaults, 0600/0700 — owner-only. The owner
-    // is the SSH user, which a rootless container maps to root, so a service
-    // running as a non-root user (php-fpm's pool as www-data, nginx as nginx, any
-    // correctly-configured image) cannot read the code it was pointed at. The
-    // symptom is remote: php-fpm reports `File not found.` for a file that is
-    // plainly there, because the *directories* above it aren't traversable.
-    //
-    // 0644/0755 is what a plain `git checkout` produces, so this makes the synced
-    // tree look like the one the same stack reads happily when it runs locally.
-    // It does mean `copy`-seeded secrets land group/other-readable on the server —
-    // the same exposure as any checkout of the repo on that box, and the
-    // alternative is a stack that cannot serve.
+    // Mutagen's portable mode creates files 0600/0700, unreadable by non-root service
+    // users inside a rootless container; 0644/0755 matches a plain `git checkout` so the
+    // stack behaves the same locally and on the server.
     cmd.args([
         "--default-file-mode=0644",
         "--default-directory-mode=0755",
@@ -249,8 +182,7 @@ pub fn create(
     Ok(())
 }
 
-/// Terminate a sync session. Best-effort: a session that's already gone (never
-/// created, or removed out of band) is not an error.
+/// Terminate a sync session; a missing session is not an error.
 pub fn terminate(session: &str) -> Result<()> {
     let out = Command::new(mutagen_bin())
         .args(["sync", "terminate", session])
@@ -277,11 +209,8 @@ fn first_line(s: &str) -> &str {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("failed").trim()
 }
 
-/// Flush a sync session so the far side has the latest edits. Best-effort by
-/// contract: the caller treats any error as "nothing flushed" rather than a
-/// hard failure, because the session may not exist yet (sync lifecycle isn't
-/// wired into `up` yet) or `mutagen` may not be installed. Errors carry a
-/// terse reason for a dim note; they never abort the op.
+/// Flush a sync session; best-effort by contract — callers treat errors as "nothing
+/// flushed" since the session or `mutagen` itself may not exist yet.
 pub fn flush(session: &str) -> Result<()> {
     let out = Command::new(mutagen_bin())
         .args(["sync", "flush", session])
@@ -312,7 +241,6 @@ mod tests {
     #[test]
     fn forward_session_name_is_per_port_and_distinct_from_sync() {
         assert_eq!(forward_session_name("feat/foo", "app", 20000), "ws-fwd-feat-foo-app-20000");
-        // A repo's two ports get two sessions; neither collides with the sync name.
         assert_ne!(
             forward_session_name("feat", "api", 20000),
             forward_session_name("feat", "api", 20001)
@@ -335,8 +263,7 @@ mod tests {
         );
     }
 
-    /// A git repo with `files` committed, so `is_tracked` has something real to
-    /// answer against — the whole point of these cases is what git says.
+    /// A git repo with `files` committed so `is_tracked` has something real to answer against.
     fn repo_with(files: &[&str]) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
@@ -364,17 +291,14 @@ mod tests {
 
     #[test]
     fn the_worktree_git_pointer_never_reaches_the_server() {
-        // `--ignore-vcs` matches VCS *directories*; a linked worktree's `.git` is a
-        // file holding a client-side path, so it must be ignored explicitly or the
-        // server gets a gitdir pointer into a filesystem that isn't there.
+        // `--ignore-vcs` matches VCS directories only; a linked worktree's `.git` is a file, so it needs explicit ignore.
         let repo = repo_with(&["README.md"]);
         assert!(sync_ignores(&[], repo.path()).contains(&"/.git".to_string()));
     }
 
     #[test]
     fn untracked_deps_are_ignored_even_when_absent_locally() {
-        // The regression this guards: gating on local presence let a two-way sync
-        // drag a server-side `composer install` (~200MB) back to the client.
+        // Guards the regression where gating on local presence dragged a server-side `composer install` back over SSH.
         let repo = repo_with(&["README.md"]);
         let ignores = sync_ignores(&[], repo.path());
         assert!(ignores.contains(&"/vendor".to_string()));
@@ -383,19 +307,16 @@ mod tests {
 
     #[test]
     fn tracked_vendor_is_committed_source_and_stays_on_the_wire() {
-        // Go-style vendoring: `vendor/` is in the index, so it is source, not a
-        // per-host artifact — the server needs it and the sync must carry it.
+        // Go-style vendoring: `vendor/` is tracked source, not a per-host artifact.
         let repo = repo_with(&["vendor/pkg/lib.go"]);
         let ignores = sync_ignores(&[], repo.path());
         assert!(!ignores.contains(&"/vendor".to_string()));
-        // An untracked sibling is unaffected by the tracked one.
         assert!(ignores.contains(&"/node_modules".to_string()));
     }
 
     #[test]
     fn configured_excludes_come_through_alongside_the_deps() {
-        // `worktree_excludes` is the escape hatch for every other ecosystem's dep
-        // dir (`.venv`, `_build/deps`), so it must survive untouched.
+        // `worktree_excludes` is the escape hatch for every other ecosystem's dep dir.
         let repo = repo_with(&["README.md"]);
         let ignores = sync_ignores(&["/.venv".to_string()], repo.path());
         assert_eq!(ignores[0], "/.venv");
