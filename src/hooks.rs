@@ -1,13 +1,5 @@
-//! Per-repo lifecycle execution. Two mechanisms behind one interface:
-//!
-//! - **Declarative `scripts`** in `.ws.json` (preferred) — one or more shell
-//!   commands run via `sh -c` in the worktree, with the `WS_*` env.
-//! - **Legacy `.ws-hooks/<repo>/<event>` files** (fallback) — an executable run
-//!   with the worktree path as `$1`, cwd = the workspace root.
-//!
-//! `resolve` picks scripts-first-then-file; `run_action` / `capture_action`
-//! dispatch. Streamed output goes through `ui::hook_line` so it lands with the
-//! correct gutter/indent. See `spec-output-formatting.md`.
+//! Per-repo lifecycle execution: declarative `scripts` in `.ws.json` and legacy
+//! `.ws-hooks/<repo>/<event>` files, dispatched via `resolve` / `run_action`.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};
@@ -19,26 +11,21 @@ use std::time::{Duration, Instant};
 use crate::config::{Script, WsConfig};
 use crate::ui;
 
-/// Max bytes buffered per streamed line. A hook that emits an unterminated
-/// stream (e.g. `yes | tr -d '\n'`) can't OOM us — the excess is discarded
-/// up to the next newline.
+/// Per-line buffer cap so a hook emitting an unterminated stream can't OOM us;
+/// the excess is discarded up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
-/// A resolved lifecycle action for a (repo, event): a declarative `scripts`
-/// entry (preferred) or a legacy `.ws-hooks/` file path (fallback).
+/// A resolved lifecycle action for a (repo, event).
 pub enum Action<'a> {
     Script(&'a Script),
-    /// Path to the hook file, relative to the workspace root.
+    /// Relative to the workspace root.
     File(String),
-    /// A `ws`-synthesized container default (see `config::default_script`) — no
-    /// declared script, no hook file. Runs exactly like a declared one-liner.
+    /// Synthesized container default (see `config::default_script`).
     Command(String),
 }
 
-/// Resolve the action for `event`: declared `scripts` win; else a `.ws-hooks/`
-/// file (via `lookup`); else, for a container repo, the compose default (see
-/// `config::default_script`). `None` when none apply — the caller treats that as
-/// a dim skip.
+/// Precedence: declared `scripts`, then a `.ws-hooks/` file, then a synthesized
+/// container default; `None` means the caller skips this repo.
 pub fn resolve<'a>(
     cfg: &'a WsConfig,
     workspace_root: &Path,
@@ -60,11 +47,8 @@ pub fn resolve<'a>(
         .map(Action::Command)
 }
 
-/// Find a legacy hook file for the given repo and event. Returns the relative
-/// path if it exists and is executable, or `None` if absent/non-executable.
-///
-/// Checks the override path first (from `RepoConfig.hooks`), then falls back
-/// to the convention path `.ws-hooks/<repo>/<event>`.
+/// Return the relative path if the override (from `RepoConfig.hooks`) or the
+/// convention `.ws-hooks/<repo>/<event>` exists and is executable.
 fn lookup(
     workspace_root: &Path,
     repo: &str,
@@ -99,12 +83,9 @@ fn is_executable(_p: &Path) -> bool {
     true
 }
 
-/// The `WS_*` context every hook/script receives. Single source of truth for the
-/// env contract, applied by streamed and captured runs alike.
-/// The base `WS_*` env contract every hook/script receives, as owned pairs so the
-/// `Command`-based hook runner AND the detached host-process supervisor
-/// (`supervise::up`, which never touches a `Command`) apply the identical set.
-/// `WS_HOST_*`/`WS_PORT_*` + declared `env` layer on top.
+/// Base `WS_*` env every hook/script receives, returned as owned pairs so both
+/// the `Command` runner and the detached supervisor (`supervise::up`, which
+/// never touches a `Command`) apply the identical set.
 pub fn base_env(
     workspace_root: &Path,
     worktree: &str,
@@ -121,18 +102,13 @@ pub fn base_env(
     ]
 }
 
-/// Apply the caller-computed injection env (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env` mappings) on top of the base `WS_*` contract. Shared by script and
-/// file commands so both mechanisms see the same routing context.
 fn apply_extra(cmd: &mut Command, extra_env: &[(String, String)]) {
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
 }
 
-/// Build the process for a declarative script command: `sh -c <cmd>` with
-/// cwd = the worktree and the `WS_*` env plus `WS_WORKTREE`. The single home for
-/// the script env contract. Stdio is left to the caller.
+/// Build `sh -c <cmd>` in the worktree with the `WS_*` env; stdio left to caller.
 fn script_command(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -150,9 +126,8 @@ fn script_command(
     c
 }
 
-/// Build the process for a legacy hook file: executed directly (honoring its
-/// shebang) with the worktree path as `$1`, cwd = the workspace root. `hook_rel`
-/// must be relative (callers guard). Stdio is left to the caller.
+/// Build the process for a legacy hook file (worktree path as `$1`, cwd =
+/// workspace root); `hook_rel` must be relative — callers guard.
 fn file_command(
     workspace_root: &Path,
     hook_rel: &str,
@@ -170,9 +145,8 @@ fn file_command(
     c
 }
 
-/// Run a resolved streaming action (`up` / `down` / `post-create` / `post-remove`).
-/// `extra_env` carries the injection context (`WS_HOST_*`/`WS_PORT_*` + declared
-/// `env`) the caller computed for this repo; pass `&[]` when there's none.
+/// Dispatch a resolved streaming action; pass `&[]` for `extra_env` when the
+/// caller has no injection context.
 pub fn run_action(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -195,11 +169,8 @@ pub fn run_action(
     }
 }
 
-/// Run a declarative script in the worktree via one `sh -c` with cwd = the
-/// worktree and the `WS_*` env (plus `WS_WORKTREE`). A `Many` is joined with
-/// `&&` — sequential and fail-fast, in a single shell so `cd`/env carry across
-/// commands (the same shape `capture_action` uses, so the two agree). Output is
-/// streamed like a hook.
+/// `Many` is joined with `&&` in a single shell so `cd`/env carry across
+/// commands (same shape as `capture_action`, so the two agree).
 fn run_script(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -209,9 +180,8 @@ fn run_script(
     script: &Script,
     extra_env: &[(String, String)],
 ) -> Result<()> {
-    // Anchor `.ws-hooks/…` references to `$WS_WORKSPACE_ROOT` — same as the remote
-    // path's `command_for` — so a config names `.ws-hooks/up.sh` and it resolves
-    // whether the hook runs here or on the server.
+    // Anchor `.ws-hooks/…` to `$WS_WORKSPACE_ROOT` so the same config path
+    // resolves whether the hook runs here or on the server.
     let joined = script
         .commands()
         .iter()
@@ -221,8 +191,6 @@ fn run_script(
     run_one(workspace_root, worktree_path, repo, branch_sanitized, event, &joined, extra_env)
 }
 
-/// Run one already-joined shell command in the worktree, streaming its output.
-/// Shared by a declared `scripts` entry and a synthesized container default.
 #[allow(clippy::too_many_arguments)]
 fn run_one(
     workspace_root: &Path,
@@ -245,8 +213,7 @@ fn run_one(
     Ok(())
 }
 
-/// Run a legacy hook file: executed directly (honoring its shebang) with the
-/// worktree path as `$1` and cwd = the workspace root.
+/// Run a legacy hook file (worktree path as `$1`, cwd = workspace root).
 fn run(
     workspace_root: &Path,
     hook_rel: &str,
@@ -275,11 +242,8 @@ fn run(
     Ok(())
 }
 
-/// Stream a child's stdout+stderr through `ui::hook_line` on helper threads and
-/// wait for exit. Shared by file-hook `run`, declarative `run_script`, and the
-/// remote lifecycle dispatch (`remote::run_event`) so a hook's output gets the
-/// same gutter + spinner-suspend whether it ran locally or over SSH. The child
-/// must be spawned with stdout+stderr piped.
+/// Shared by local and remote dispatch so a hook's output gets the same gutter
+/// and spinner-suspend either way; child must be spawned with both pipes.
 pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     let stdout = child.stdout.take().context("child stdout was not piped")?;
     let stderr = child.stderr.take().context("child stderr was not piped")?;
@@ -295,8 +259,8 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     Ok(status)
 }
 
-/// Run a resolved action for a read-only `status`-style event and capture its
-/// first non-empty stdout line, giving up after `timeout`. Used by `ws list`.
+/// Run an action and capture its first non-empty stdout line, giving up after
+/// `timeout`; used by `ws list`.
 #[allow(clippy::too_many_arguments)]
 pub fn capture_action(
     workspace_root: &Path,
@@ -309,9 +273,7 @@ pub fn capture_action(
     extra_env: &[(String, String)],
 ) -> Option<String> {
     let mut cmd = match action {
-        // A status probe is normally one command; a `Many` runs as a fail-fast
-        // `cmd1 && cmd2 …` sequence (nothing silently dropped) and its output is
-        // captured.
+        // `Many` runs as fail-fast `cmd1 && cmd2 …` so nothing is silently dropped.
         Action::Script(s) => {
             let joined = s.commands().join(" && ");
             script_command(
@@ -332,9 +294,8 @@ pub fn capture_action(
     capture_child(cmd.spawn().ok()?, timeout)
 }
 
-/// Drain a child's stdout on a helper thread (so a full pipe buffer can't
-/// deadlock the wait loop), enforce `timeout`, and return its first non-empty
-/// line. `None` on non-zero exit, timeout, or empty output.
+/// Drain stdout on a helper thread so a full pipe can't deadlock the wait loop;
+/// `None` on non-zero exit, timeout, or empty output.
 fn capture_child(mut child: Child, timeout: Duration) -> Option<String> {
     let mut stdout = child.stdout.take()?;
     let reader = thread::spawn(move || {
@@ -370,21 +331,20 @@ fn first_nonempty_line(s: &str) -> Option<String> {
     s.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from)
 }
 
-/// Stream lines from `r` to `ui::hook_line`, capped at `MAX_LINE` bytes per
-/// line. Overlong lines are truncated (tail discarded up to the next newline).
-/// Invalid UTF-8 is replaced with U+FFFD via `from_utf8_lossy` — never drops
-/// following lines.
+/// Stream lines to `ui::hook_line`, capped at `MAX_LINE` bytes; the tail after
+/// the cap is discarded to the next newline, and invalid UTF-8 becomes U+FFFD
+/// via `from_utf8_lossy` so following lines are never dropped.
 fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
     let mut reader = BufReader::new(r);
     let mut buf = Vec::with_capacity(1024);
     loop {
         buf.clear();
         let n = match reader.by_ref().take(MAX_LINE as u64).read_until(b'\n', &mut buf) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(n) => n,
             Err(_) => break,
         };
-        // Cap-hit without a newline: drain the rest of the line.
+        // Cap-hit without a newline: drain the rest so the next read starts on a fresh line.
         if n == MAX_LINE && buf.last() != Some(&b'\n') {
             let mut discard = Vec::new();
             let _ = reader.read_until(b'\n', &mut discard);
@@ -400,8 +360,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Mirror the read loop in `pipe()` so we can assert what the ui layer
-    /// would see, without depending on eprintln capture.
+    /// Mirror the read loop in `pipe()` so tests assert what ui would see
+    /// without depending on eprintln capture.
     fn read_lines(input: &[u8]) -> Vec<String> {
         let cursor = Cursor::new(input);
         let mut reader = BufReader::new(cursor);

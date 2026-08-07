@@ -10,8 +10,7 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // Git-sourced, so `rm` can reach everything `ws list` shows — a stale
-    // registration has no directory for a filesystem scan to find.
+    // Git-sourced so `rm` reaches stale registrations that no filesystem scan would find.
     let worktrees = workspace::worktrees_for(&ws.root, &cfg, branch);
 
     if worktrees.is_empty() {
@@ -22,8 +21,6 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
 
     crate::ui::header("ws-rm", branch);
 
-    // Safety scan — surface dirty / unpushed state. Blocks teardown unless
-    // `--force`. With `--force`, warnings still print (we're overriding them).
     let mut blocking = false;
     for (repo, wt) in &worktrees {
         let dirty = git::dirty_files(wt);
@@ -56,8 +53,7 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Commits present locally but not on the tracked upstream. Empty when there's
-/// no upstream configured (can't be "unpushed" against nothing) or on error.
+/// Commits present locally but not on the tracked upstream; empty when there is no upstream or on error.
 fn unpushed_commits(wt: &Path) -> Vec<String> {
     let out = Command::new("git")
         .arg("-C")

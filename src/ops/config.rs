@@ -1,7 +1,4 @@
-//! `ws config` — get/set the machine-global defaults in
-//! `~/.config/ws/config.toml` (see `config::GlobalConfig`). Git-style surface:
-//! `get` prints the bare value on stdout (scriptable) and exits 1 when unset;
-//! `set`/`unset` mutate the file and stay quiet on success.
+//! `ws config` get/set/unset with git-style surface: bare value on stdout, exit 1 when unset.
 
 use anyhow::Result;
 
@@ -15,9 +12,7 @@ pub fn get(key: &str) -> Result<()> {
             Ok(())
         }
         None => {
-            // Git parity: an unset key is exit 1 with nothing on stdout. The
-            // stderr note keeps the human case self-explanatory; `silent` skips
-            // the failure banner (the note already said everything).
+            // Git parity: unset key is exit 1 with nothing on stdout.
             crate::ui::note(&format!("{key} is not set"));
             Err(super::passthrough_exit(1))
         }
@@ -32,8 +27,7 @@ pub fn set(key: &str, value: &str) -> Result<()> {
 
 pub fn unset(key: &str) -> Result<()> {
     let mut cfg = GlobalConfig::load()?;
-    // Unsetting an already-unset key is a no-op, not an error (idempotent for
-    // scripts) — but skip the write so we never create the file just to say so.
+    // Skip the write on a no-op unset so we never create the file just to say so.
     if cfg.unset(key).map_err(|e| super::preflight(e.to_string()))? {
         cfg.save()?;
     }
