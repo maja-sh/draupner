@@ -18,11 +18,7 @@ pub fn run(
     let cwd = std::env::current_dir()?;
 
     if refresh_schema {
-        // Resolve the workspace the way every other op does — by walking up — rather
-        // than demanding the cwd *be* the root. Scaffolding a new workspace is
-        // rightly cwd-bound; refreshing an existing one is the same "which workspace
-        // am I in" question `ws up`/`list`/`exec` already answer from any
-        // subdirectory, and answering it differently here is just a trap.
+        // Refreshing an existing workspace resolves upward like every other op; only scaffolding is cwd-bound.
         let root = crate::workspace::locate()
             .map(|ws| ws.root)
             .map_err(|_| super::preflight(format!(
@@ -37,12 +33,7 @@ pub fn run(
     init_local(&cwd, remote_cfg, domain, runtime, no_verify)
 }
 
-/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, or
-/// `None` when `--remote` wasn't given. A bare `--remote` falls back to
-/// `$WS_REMOTE_HOST`, then the global default (`ws config set remote.host`).
-/// `workspace_path` is written explicitly (defaulting to the workspace dir
-/// name) so it's visible in `.ws.json`. `--domain` is handled separately —
-/// it's top-level now (routing is location-transparent).
+/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, falling back to `$WS_REMOTE_HOST` then the stored global default; `None` when `--remote` wasn't given.
 fn build_remote(
     root: &Path,
     remote: Option<Option<String>>,
@@ -57,11 +48,9 @@ fn build_remote(
                  or `ws config set remote.host <host>`",
             )
         })?;
-    // The flag path is fresh user input — refuse an option-shaped host here,
-    // not just when a stored config is later loaded.
+    // Fresh user input: reject an option-shaped host here, not only when a stored config later loads.
     crate::remote::ensure_connection_safe(&connection).map_err(|e| super::preflight(e.to_string()))?;
-    // An empty --remote-path (a script's unset variable) is treated as absent —
-    // storing "" would anchor the server layout at the filesystem root.
+    // Empty --remote-path is treated as absent; storing "" would anchor the server layout at the filesystem root.
     let workspace_path = remote_path
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| crate::config::default_worktree_base(root));
@@ -77,16 +66,11 @@ fn init_local(
 ) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
-    // The runtime the scaffolding itself derives with (`compose config` needs a
-    // concrete binary), kept apart from whether it gets *written*: `--runtime` is
-    // a pin the user asked for, a detected one is just this machine's answer and
-    // stays out of `.ws.json` so the workspace re-detects wherever it's opened.
+    // Only an explicit `--runtime` is persisted; a detected one stays out of `.ws.json` so the workspace re-detects wherever it's opened.
     let effective =
         runtime.clone().unwrap_or_else(|| crate::config::detect_runtime().unwrap_or("podman").to_string());
 
-    // Blocks *creating* a nested root, not running `ws` from a subdir (that
-    // still resolves upward). The hazard: under the outer's `.worktrees/`, an
-    // outer `ws clean`/`rm` would tear the inner workspace down.
+    // Blocks *creating* a nested root (not running `ws` from a subdir), because an outer `ws clean`/`rm` would tear an inner workspace down.
     if let Some(outer) = enclosing_workspace(root) {
         let detail = if root.starts_with(outer.join(".worktrees")) {
             " — inside its `.worktrees/` tree, where an outer `ws clean`/`rm` would tear this down"
@@ -108,8 +92,7 @@ fn init_local(
         );
     }
 
-    // Verify client readiness before writing anything, so a strict-mode refusal
-    // leaves no half-written config behind.
+    // Verify before writing anything so a strict-mode refusal leaves no half-written config behind.
     if let Some(r) = &remote {
         super::verify_remote_client(r, no_verify)?;
     }
@@ -144,9 +127,7 @@ fn init_local(
     if let Some(conn) = &remote_note {
         summary.push(format!("remote  → {conn}"));
     }
-    // The runtime no longer appears in the scaffold when it was detected, so say
-    // it here — otherwise a detected choice would be invisible until something
-    // used it.
+    // A detected runtime isn't written to `.ws.json`, so surface it here or it'd be invisible until something used it.
     summary.push(if pinned {
         format!("runtime → {effective} (pinned in .ws.json)")
     } else {
@@ -166,8 +147,6 @@ fn init_local(
 fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", "--refresh-schema");
 
-    // `root` is already a located workspace (the caller walked up to find it), so
-    // the schema can't land in a non-workspace dir.
     let step = crate::ui::step("cfg", ".ws.schema.json");
     let schema = schemars::schema_for!(WsConfig);
     crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
@@ -176,8 +155,7 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The nearest workspace strictly above `root` (an ancestor holding `.ws.json`),
-/// or `None` if `root` isn't nested inside one.
+/// Nearest ancestor of `root` holding `.ws.json`, or `None` if not nested inside a workspace.
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     root.ancestors()
         .skip(1)
@@ -185,15 +163,10 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Build a repo entry, scaffolding the auto-derived `services` block when the
-/// repo is a compose project so the routing is visible in `.ws.json` from day
-/// one. Best-effort: if the repo has no compose file, or `compose config` can't
-/// run (runtime absent), it stays a bare-name entry — `ws up` re-derives live
-/// regardless.
+/// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.ws.json`; `ws up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
-    // `ws init` scaffolds from the local checkout on the host (there's no server
-    // yet — the workspace is being created), so derivation runs on the local site.
+    // No server exists yet — the workspace is being created — so derivation runs on the local site.
     let services = compose::has_compose_file(&repo_dir)
         .then(|| {
             compose::derive(&crate::remote::Site::Local, runtime, &repo_dir.to_string_lossy()).ok().map(|d| d.services)
@@ -210,21 +183,17 @@ fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
 
 fn detect_repos(root: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    // Swallow per-entry read errors — one broken symlink shouldn't abort the
-    // whole scan. Errors on the top-level `read_dir` still propagate.
+    // One broken entry (e.g. dangling symlink) shouldn't abort the whole scan.
     for entry in fs::read_dir(root).context("read cwd")?.filter_map(Result::ok) {
         let path = entry.path();
-        // Skip symlinks (they can point outside the workspace and confuse
-        // later ops). Also skip anything that isn't a real dir.
+        // Symlinks can point outside the workspace and confuse later ops.
         let Ok(meta) = entry.file_type() else { continue };
         if meta.is_symlink() || !meta.is_dir() {
             continue;
         }
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else {
-            // Non-UTF-8 dir names would round-trip through `.ws.json` lossily
-            // and break later worktree lookups. Skip with a warn instead of
-            // silently corrupting the config.
+            // Non-UTF-8 names would round-trip lossily through `.ws.json` and break later worktree lookups.
             tracing::warn!(
                 path = %entry.path().display(),
                 "skipping non-UTF-8 directory name in workspace scan"

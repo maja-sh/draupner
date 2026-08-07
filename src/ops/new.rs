@@ -13,9 +13,7 @@ use crate::workspace;
 pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
-    // Where the stack lives (local, or the server for a remote workspace). For a
-    // remote workspace this fetches the server `$HOME`, so an unreachable server
-    // fails here rather than part-way through creating worktrees.
+    // Resolves the server `$HOME` up front so an unreachable remote fails here, not part-way through creating worktrees.
     let site = remote::Site::resolve(&cfg)?;
 
     let requested = parse_repos(repos_arg);
@@ -29,9 +27,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     crate::ui::header("ws-new", &format!("{repos_arg} {branch}"));
 
-    // A container repo's post-create (Activate) writes an override that joins the
-    // external `ws-net`; ensure it exists first so a post-create that runs compose
-    // (`compose run --rm app composer install`) doesn't fail on a missing network.
+    // Create `ws-net` first: a container repo's post-create writes an override that joins it, and any compose invoked there would fail on a missing network.
     if cfg.routing_active() {
         if let Err(e) = crate::caddy::ensure_net(&site, cfg.runtime()) {
             crate::ui::note(&format!("ws-net: {e}"));
@@ -73,9 +69,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             .with_context(|| format!("create worktree for {repo_name}"))?;
         step.ok();
 
-        // Artifacts ws drops into the worktree get registered in the worktree's
-        // git exclude so they never show as untracked. Seeded with the repo's
-        // configured `worktree_excludes`.
+        // Anything ws drops into the worktree gets registered here so it never reads as untracked.
         let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
 
         if repo_path.join("composer.json").is_file() && repo_path.join("vendor").is_dir() {
@@ -96,24 +90,13 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             step.ok();
         }
 
-        // Seed declared untracked files (dev certs/keys/env) from the main checkout
-        // into the fresh worktree. Ordered before the excludes registration below so
-        // the copied paths join them — `copy` seeds files that aren't in git, and one
-        // that isn't gitignored either would otherwise leave the worktree reading
-        // permanently dirty. Also before the remote sync (so they ride it to the
-        // server) and before post-create (so build steps see them).
+        // Runs before the exclude registration (so copied paths join it), before the remote sync (so they ride it up), and before post-create (so build steps see them).
         let copies = repo_entry.copy();
         if !copies.is_empty() {
             let step = crate::ui::step(repo_name, "files copied");
             match seed_copies(&repo_path, &wt_path, copies) {
                 Ok(dests) => {
-                    // Also exclude the copy *sources* in the main checkout. A
-                    // `copy` source is a ws-managed untracked file (a dev cert, a
-                    // seed dump) living in main at the same relative path it lands
-                    // in the worktree — so the worktree excludes double as main's.
-                    // Best-effort: keeps main's `git status` clean and ws's
-                    // footprint fully local (nothing committed), but a failure to
-                    // write main's exclude must not block creating the worktree.
+                    // Best-effort: also register the sources in main so its `git status` stays clean, but never block worktree creation on it.
                     let _ = git::add_worktree_excludes(&repo_path, &dests);
                     excludes.extend(dests);
                     step.ok()
@@ -125,27 +108,17 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             }
         }
 
-        // A symlinked node_modules is a *file* to git, so a repo's conventional
-        // `node_modules/` (trailing slash = dir-only) rule won't match it —
-        // without this the worktree reads as permanently dirty.
+        // A symlinked `node_modules` is a file to git, so a repo's `node_modules/` (dir-only) rule won't match it and the worktree reads dirty without this.
         git::add_worktree_excludes(&wt_path, &excludes)
             .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
-        // Advisory isolation lint — run once, here, when the worktree's compose
-        // file first lands (not on every `ws up`): its constructs are static
-        // properties of the committed file. Warn on the ones that silently defeat
-        // per-worktree isolation (`container_name`, external volumes). Never
-        // blocks `new`; empty for non-compose repos.
+        // Runs here (not on every `ws up`) because it inspects committed static properties of the compose file; advisory, never blocks.
         let lint = crate::compose::lint(cfg.runtime(), &wt_path);
         if !lint.is_empty() {
             crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
         }
 
-        // A remote workspace establishes the file sync FIRST, so the injection
-        // (server-side compose derive + override) and post-create below run
-        // against files that exist on the server; a local workspace has them
-        // already. Ignores (configured + on-disk dep artifacts) keep per-host
-        // trees off the wire — shared with `ws remote set`'s backfill.
+        // Sync first so the server-side derive/override and post-create below run against files that already exist there.
         if let Some(r) = &cfg.remote {
             let step = crate::ui::step(repo_name, "Sync created");
             let session = mutagen::session_name(branch, repo_name);
@@ -155,10 +128,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
                 // Settle the initial push before we derive/render against the server.
                 .and_then(|()| {
                     let _ = mutagen::flush(&session);
-                    // Confirm the files actually landed. A session whose transfer
-                    // fails still reports `Watching for changes` — the problem shows
-                    // only in `mutagen sync list --long` — so without this the step
-                    // reports success and the *next* step fails somewhere confusing.
+                    // A session whose transfer fails still reports `Watching for changes`; without this verification the step lies green and the next step fails somewhere confusing.
                     mutagen::verify_beta(&r.connection, &remote_path)
                 });
             match synced {
@@ -170,16 +140,11 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             }
         }
 
-        // Render templates + compute the injection env before post-create so
-        // one-time setup (composer install, migrate) sees the per-worktree config
-        // and `WS_HOST_*`/`WS_PORT_*` values. Runs at the stack's site — derive,
-        // override, and port allocation land on the server for a remote workspace.
+        // Render templates before post-create so one-time setup sees the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
         let extra_env = inject::prepare(
             &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
         )?;
 
-        // Post-create runs where the stack lives: over SSH on the server (in the
-        // synced worktree) for a remote workspace, or locally.
         run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
 
         wt_paths.push((repo_name.clone(), wt_path));
@@ -191,9 +156,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         .collect();
     crate::ui::summary_ok(&summary);
 
-    // `--up`: chain straight into the bring-up rather than making the caller run a
-    // second command. Delegates to the same op `ws up` runs, so the two can't
-    // drift — including its own header, per-repo steps, and failure semantics.
+    // Delegates to the same op `ws up` runs so the two can't drift.
     if up {
         return super::up::run(branch);
     }
@@ -202,11 +165,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run a repo's `post-create` where its stack lives: on the server over SSH (in
-/// the synced worktree) for a remote workspace, or locally. A remote workspace
-/// runs the declarative `post-create` script (a legacy `.ws-hooks` file lives on
-/// the host and can't run there); a repo with nothing declared is a no-op.
-/// Failure is fatal for `new` (one-time setup that didn't complete).
+/// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared.
 #[allow(clippy::too_many_arguments)]
 fn run_post_create(
     cfg: &config::WsConfig,
@@ -224,8 +183,7 @@ fn run_post_create(
         };
         let r = cfg.remote.as_ref().expect("remote site ⇒ a remote config");
         let step = crate::ui::step(repo, "Post-create hook");
-        // `run_remote_event` flushes the sync first so the just-rendered templates
-        // (and the initial sync) are on the server before post-create runs there.
+        // `run_remote_event` flushes the sync first so the rendered templates are on the server before the hook runs.
         match super::run_remote_event(site, r, ws_root, branch, sanitized, repo, "post-create", &cmd, extra_env) {
             Ok(()) => {
                 step.ok();
@@ -345,22 +303,14 @@ fn cp_r(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Seed `entries` (repo-relative files, directories, or globs) from the main
-/// checkout `repo` into worktree `wt`. No-clobber: an existing dest is left as-is.
-/// A source with no match is skipped (seed-if-present). `..` is refused so a
-/// config entry can't escape the repo.
-///
-/// Returns the anchored git-exclude entries (`/build-dev/cert`) for what it
-/// actually copied, so the caller can keep them out of `git status` — a seeded
-/// file that the repo doesn't already gitignore would otherwise read as untracked.
+/// Seed `entries` (files, directories, globs) from `repo` into `wt` with no-clobber, returning anchored git-exclude entries for the paths actually copied.
 fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>> {
     let mut excludes = Vec::new();
     for entry in entries {
         if Path::new(entry).components().any(|c| c == Component::ParentDir) {
             bail!("copy entry `{entry}` must not contain `..`");
         }
-        // Only `entry` is a glob — escape the repo prefix so a workspace path that
-        // happens to contain `*`/`[`/`?` isn't misread as a pattern.
+        // Escape the repo prefix so a workspace path containing `*`/`[`/`?` isn't misread as glob syntax.
         let pattern = format!("{}/{entry}", glob::Pattern::escape(&repo.to_string_lossy()));
         let matches =
             glob::glob(&pattern).with_context(|| format!("invalid copy pattern `{entry}`"))?;
@@ -372,13 +322,7 @@ fn seed_copies(repo: &Path, wt: &Path, entries: &[String]) -> Result<Vec<String>
     Ok(excludes)
 }
 
-/// Seed a single source path (file or directory) into the worktree with
-/// **per-file** no-clobber. A directory is walked and merged file-by-file rather
-/// than copied as a unit: the worktree already contains any tracked file the dir
-/// carries (e.g. a `.gitkeep`), so a whole-directory `exists()` check would skip
-/// the dir and strand its *untracked* contents — the exact reason a generated
-/// cert under a tracked `certs/` never arrived. Each copied file is recorded as an
-/// anchored git-exclude so it stays out of `git status`.
+/// Per-file no-clobber: a directory is merged rather than treated as a unit, so a `certs/` that already exists for a tracked `.gitkeep` still receives its untracked siblings.
 fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Result<()> {
     if src.is_dir() {
         for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
@@ -395,9 +339,7 @@ fn seed_one(src: &Path, rel: &Path, wt: &Path, excludes: &mut Vec<String>) -> Re
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     cp_r(src, &dst)?;
-    // Anchored to the worktree root (`/certs/local.crt`), matching the
-    // `/vendor` + `/node_modules` convention — an unanchored pattern would match
-    // the same name at any depth.
+    // Anchored so it can't match the same name at another depth.
     excludes.push(format!("/{}", rel.display()));
     Ok(())
 }
@@ -411,9 +353,7 @@ fn symlink_node_modules(repo_name: &str, wt: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort rollback of a half-created worktree. Failures are ignored — this
-/// only runs while unwinding from an earlier error, and the original error is
-/// what the caller propagates.
+/// Best-effort rollback while unwinding an earlier error; failures are ignored because the original error is what the caller propagates.
 fn remove_worktree(repo: &Path, wt: &Path) {
     let _ = Command::new("git")
         .arg("-C")
@@ -457,8 +397,6 @@ mod tests {
         assert!(wt.join("storage/oauth-private.key").is_file());
         assert!(!wt.join("storage/other.txt").exists(), "glob must not pull non-matches");
 
-        // Every copied path comes back as an anchored exclude entry, so a seeded
-        // file the repo doesn't gitignore can't leave the worktree reading dirty.
         let mut got = excludes.clone();
         got.sort();
         // Per-file excludes (a directory is merged file-by-file, not as a unit).
@@ -470,16 +408,12 @@ mod tests {
 
     #[test]
     fn merges_into_an_existing_dir_seeding_its_untracked_files() {
-        // The real bug: a `copy` dir that already exists in the worktree because it
-        // holds a tracked file (a `.gitkeep`) must still receive its untracked
-        // siblings. A whole-directory no-clobber skipped them — stranding, e.g., a
-        // generated cert under a tracked `certs/`.
+        // Regression: a `copy` dir that already exists for a tracked `.gitkeep` must still receive its untracked siblings.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let wt = tmp.path().join("wt");
         touch(&repo.join("certs/.gitkeep"), "");
         touch(&repo.join("certs/local.crt"), "CERT");
-        // The worktree already has the tracked .gitkeep (as after `git worktree add`).
         touch(&wt.join("certs/.gitkeep"), "");
 
         let excludes = seed_copies(&repo, &wt, &["certs".into()]).unwrap();
