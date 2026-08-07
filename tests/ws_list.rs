@@ -19,7 +19,7 @@ fn one_task_one_repo_shows_table() {
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
 
-    // Group label is the (unsanitized) branch name.
+    // Group label carries the raw branch name, not the path-sanitized form.
     assert!(err.contains("feat/foo"), "expected branch label in:\n{err}");
     assert!(err.contains("api"), "expected repo in:\n{err}");
     assert!(err.contains("clean"), "expected clean status in:\n{err}");
@@ -43,7 +43,6 @@ fn dirty_worktree_shows_dirty() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/dirty"]);
 
-    // Introduce an untracked file in the worktree.
     std::fs::write(
         f.path().join(".worktrees/feat-dirty/api/scratch.txt"),
         "wip",
@@ -60,13 +59,11 @@ fn missing_status_hook_does_not_crash() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/nostatus"]);
 
-    // No status hook present — op should still succeed and list the worktree.
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
     assert!(err.contains("feat/nostatus"), "expected worktree listed in:\n{err}");
 
-    // With no status hook anywhere, the status column is suppressed entirely —
-    // no bare placeholder dash dangling off the row.
+    // With no status hook anywhere the column is suppressed, so no placeholder dash trails the row.
     let row = err
         .lines()
         .find(|l| l.contains("api") && l.contains("clean"))
@@ -79,14 +76,10 @@ fn missing_status_hook_does_not_crash() {
 
 #[test]
 fn recorded_host_ports_are_shown_as_sub_rows() {
-    // The port a repo actually publishes was invisible in `ws list` — a
-    // container repo's status hook summarizes (`6 up`), and the sibling DB you
-    // need to dial has no representation at all. Recorded ports live in
-    // `.ws-meta`; the row now surfaces them.
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/ports"]);
 
-    // Simulate what `ws up` records: two allocated services under this repo.
+    // JSON shape mirrors what `ws up` writes into `.ws-meta`; keep in sync with that writer.
     let meta_dir = f.path().join(".ws-meta");
     std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(
@@ -109,17 +102,12 @@ fn recorded_host_ports_are_shown_as_sub_rows() {
 
 #[test]
 fn a_repo_with_no_recorded_ports_emits_no_sub_rows() {
-    // The compact case: a worktree that predates `up` (or a host repo whose
-    // sole port is already spoken for by the status column) must not sprout
-    // dead sub-rows or blank ones.
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/empty"]);
 
     let out = f.run_ok(&["list"]);
     let err = stderr(&out);
-    // Every non-empty line after the group header contains either the repo
-    // name ("api") or the group label / path — nothing bare-indented at 6
-    // spaces (the sub-row indent).
+    // Six leading spaces is the sub-row indent; no line should carry it when nothing was recorded.
     for line in err.lines() {
         assert!(
             !line.starts_with("      ") || line.trim().is_empty(),

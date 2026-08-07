@@ -1,22 +1,5 @@
-//! Per-service host-port allocation for raw-TCP services, persisted in
-//! `.ws-meta/<branch>-<repo>.json`.
-//!
-//! Two properties matter:
-//!
-//! - **Stable** — a service keeps the same port across `ws up` runs, so
-//!   connection strings (and, later, Caddy routes) don't churn. The recorded
-//!   allocation is reused; only a genuinely new service is allocated.
-//! - **Collision-free across parallel worktrees** — a freshly allocated port
-//!   avoids every port already recorded across the whole `.ws-meta` dir, and is
-//!   test-bound to confirm it's free right now. Concurrent `ws` processes are
-//!   serialized by an `O_EXCL` lockfile so two simultaneous allocators can't
-//!   hand out the same port.
-//!
-//! The record in `.ws-meta` *is* the reservation. Truly atomic hold-until-bind
-//! (the socket kept open until the service binds it) is a routing-slice
-//! refinement; here the port is only test-bound, so a non-`ws` process could in
-//! principle steal it in the window before the stack comes up — acceptable for
-//! the local-first path.
+//! Per-service host-port allocation persisted in `.ws-meta/<branch>-<repo>.json`,
+//! stable across `up` runs and collision-free across parallel worktrees.
 
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashSet};
@@ -27,45 +10,29 @@ use std::time::{Duration, Instant};
 use crate::config::ServiceConfig;
 use crate::remote::Site;
 
-/// Port scan window: above the common service defaults, below the ephemeral
-/// range, with room for many parallel worktrees.
+/// Above common service defaults, below the ephemeral range.
 const RANGE: std::ops::Range<u16> = 20000..40000;
 
-/// Width of the window when [`WS_PORT_BASE`](range) moves its start. Far smaller
-/// than the default window because a relocated window serves one workspace, not
-/// every worktree on the machine.
+/// Width when `WS_PORT_BASE` relocates the window — smaller than the default
+/// because a relocated window serves one workspace, not the whole machine.
 const MOVED_WIDTH: u16 = 500;
 
-/// The window [`free_port`] scans, honouring the `WS_PORT_BASE` seam.
-///
-/// Allocation reserves a port in `.ws-meta` and probes that nothing holds it
-/// *right now* — so two workspaces allocating concurrently are both told the
-/// same port is free, and whichever binds first wins. That's a real
-/// cross-workspace limitation (`ws` reports it as "port held by another
-/// process" rather than preventing it), and it makes any test asserting on a
-/// *specific* allocation race every other such test on the machine.
-///
-/// Moving the start is enough to give those tests non-overlapping windows;
-/// nothing else about allocation changes. Kept a seam rather than a `.ws.json`
-/// field: it exists to isolate concurrent test runs, not to configure a
-/// workspace.
+/// Scan window for [`free_port`], honouring the `WS_PORT_BASE` seam that gives
+/// concurrent test workspaces non-overlapping windows.
 fn range() -> std::ops::Range<u16> {
     window_from(std::env::var("WS_PORT_BASE").ok().and_then(|v| v.trim().parse().ok()))
 }
 
-/// The pure core of [`range`], so the seam's rules are testable without mutating
-/// the process environment — the shared-state hazard that made the port tests
-/// race in the first place.
+/// Pure core of [`range`] so the seam's rules are testable without mutating the
+/// process environment.
 fn window_from(base: Option<u16>) -> std::ops::Range<u16> {
     match base {
-        // A base below 1024 would hand out privileged ports, which no rootless
-        // process can bind. Ignore it rather than allocate something unusable.
+        // A base below 1024 would hand out privileged ports no rootless process can bind.
         Some(base) if base >= 1024 => base..base.saturating_add(MOVED_WIDTH),
         _ => RANGE,
     }
 }
 
-/// The `.ws-meta` dir under a workspace root (per-machine allocation state).
 pub fn meta_dir(root: &Path) -> PathBuf {
     root.join(".ws-meta")
 }
@@ -74,21 +41,14 @@ fn meta_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
     meta_dir(root).join(format!("{branch_sanitized}-{repo}.json"))
 }
 
-/// The generated compose override for a worktree, alongside its port record in
-/// `.ws-meta`. Gitignored and per-worktree; regenerated on each `up`.
 pub fn override_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
     meta_dir(root).join(format!("{branch_sanitized}-{repo}.override.yml"))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct Meta {
-    /// service name → allocated host port
     #[serde(default)]
     ports: BTreeMap<String, u16>,
-    /// The effective service set recorded at the last `up` (derived + declared),
-    /// so read-only phases (`down`/`status`/`list`/`exec`) can reconstruct
-    /// `WS_HOST_*`/`WS_PORT_*` for services that were auto-derived from compose
-    /// and never declared. Empty for a workspace that predates this.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     services: BTreeMap<String, ServiceConfig>,
 }
@@ -104,20 +64,17 @@ fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
     crate::config::write_json_pretty(path, meta)
 }
 
-/// Load the persisted host-port map for a worktree without allocating. Empty
-/// when nothing has been allocated yet. Used by read-only / teardown paths.
 pub fn load(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, u16> {
     read_meta(&meta_file(root, branch_sanitized, repo)).ports
 }
 
-/// The effective service set recorded at the last `up`, or empty if none. Read
-/// paths use it so a derived-but-undeclared service still resolves its host/port.
+/// Effective service set from the last `up` so derived-but-undeclared services
+/// still resolve their host/port on read paths.
 pub fn services(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, ServiceConfig> {
     read_meta(&meta_file(root, branch_sanitized, repo)).services
 }
 
-/// Persist the effective service set for a worktree (called at `up`, preserving
-/// the recorded ports). Best-effort context on write failure.
+/// Persist the effective service set for a worktree, preserving the recorded ports.
 pub fn record_services(
     root: &Path,
     branch_sanitized: &str,
@@ -126,9 +83,7 @@ pub fn record_services(
 ) -> Result<()> {
     let dir = meta_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    // Under the same lock `resolve` takes: read → set services → write. Without
-    // it, a concurrent `resolve` (another terminal) that allocated a port
-    // between our read and write would be silently clobbered.
+    // Under `resolve`'s lock so a concurrent allocation between our read and write isn't clobbered.
     let _lock = Lock::acquire(&dir);
     let path = meta_file(root, branch_sanitized, repo);
     let mut meta = read_meta(&path);
@@ -136,18 +91,8 @@ pub fn record_services(
     write_meta(&path, &meta)
 }
 
-/// Ensure every service in `needs` has a host port at `site`, allocating (and
-/// persisting) any that are missing while preserving existing allocations.
-/// Returns the full persisted map (may include services beyond `needs`).
-///
-/// The record, the used-set scan, and the lock all stay **host-side** — every
-/// `ws` invocation for a workspace runs on the host, so the host's `.ws-meta` is
-/// the single source of truth for what this workspace reserved and the host lock
-/// serializes concurrent `ws up`s correctly. Only the *freeness probe* follows
-/// `site`: a candidate must be free on the machine that will actually publish it
-/// (the server, for a remote workspace). Because the fast path skips allocation
-/// when everything is already recorded, a steady-state remote `up` makes no probe
-/// round trips at all.
+/// Allocate any missing host ports for `needs` while preserving existing ones;
+/// state and lock stay host-side, but the freeness probe follows `site`.
 pub fn resolve(
     site: &Site,
     root: &Path,
@@ -159,15 +104,14 @@ pub fn resolve(
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
     let path = meta_file(root, branch_sanitized, repo);
-    // Fast path: nothing to allocate → skip the lock entirely.
+    // Fast path skips the lock entirely when nothing needs allocating.
     let existing = read_meta(&path);
     if needs.iter().all(|s| existing.ports.contains_key(s)) {
         return Ok(existing.ports);
     }
 
     let _lock = Lock::acquire(&dir);
-    // Re-read under the lock — another process may have allocated since our
-    // fast-path read.
+    // Re-read under the lock; another process may have allocated since our fast-path read.
     let mut meta = read_meta(&path);
     let mut used = used_ports(&dir);
     used.extend(meta.ports.values().copied());
@@ -184,16 +128,13 @@ pub fn resolve(
     Ok(meta.ports)
 }
 
-/// Drop the persisted allocation for a worktree (frees its ports for reuse) and
-/// its generated compose override. Best-effort — called from teardown, where a
-/// missing file is fine.
+/// Best-effort drop; a missing file is fine at teardown.
 pub fn forget(root: &Path, branch_sanitized: &str, repo: &str) {
     let _ = std::fs::remove_file(meta_file(root, branch_sanitized, repo));
     let _ = std::fs::remove_file(override_file(root, branch_sanitized, repo));
 }
 
-/// Every port recorded across the whole `.ws-meta` dir — the set a new
-/// allocation must avoid so parallel worktrees never collide.
+/// Every port recorded across `.ws-meta`, so parallel worktrees never collide.
 fn used_ports(dir: &Path) -> HashSet<u16> {
     let mut set = HashSet::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -207,9 +148,6 @@ fn used_ports(dir: &Path) -> HashSet<u16> {
     set
 }
 
-/// First port in the [`range`] that isn't already recorded and is free at `site`
-/// right now. The reservation is the `.ws-meta` record; the probe just confirms
-/// nothing else currently holds the port on the machine that will publish it.
 fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
     let window = range();
     for port in window.clone() {
@@ -223,24 +161,13 @@ fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
     anyhow::bail!("no free host port in {}..{}", window.start, window.end)
 }
 
-/// Whether `port` is free at `site`. Local: try to bind it (the listener is
-/// dropped immediately). Remote: ask the server whether anything is listening on
-/// it (`ss`), since the port must be free where it will actually be published.
-/// Both are "no live holder right now"; the record is the durable reservation.
-///
-/// The remote probe echoes an explicit `free`/`busy` token rather than inferring
-/// freeness from a pipeline exit code — a bare `grep` exit also fires (as "no
-/// match") when `ss` is missing or the SSH errored, which would read as free and
-/// hand out a possibly-taken port. Requiring a literal `free` means any failure
-/// (no `ss`, unreachable) reads as **not free**, so `free_port` moves on / fails
-/// loudly rather than colliding silently. (`ss` — iproute2 — is a server
-/// prerequisite; without it every port reads busy and allocation bails clearly.)
+/// Remote probe requires a literal `free` token so an `ss`/SSH failure reads
+/// as not-free instead of silently handing out a taken port.
 pub fn port_free_at(site: &Site, port: u16) -> bool {
     match site {
         Site::Local => TcpListener::bind(("127.0.0.1", port)).is_ok(),
         Site::Remote { .. } => {
-            // Match `:<port>` / `.<port>` at the end of the local-address column so
-            // `:200` can't match `:2000`.
+            // Anchor `:<port>` / `.<port>` at end of column so `:200` can't match `:2000`.
             let script = format!(
                 "command -v ss >/dev/null 2>&1 || exit 3; \
                  if ss -Hltn 2>/dev/null | awk '{{print $4}}' | grep -qE '[.:]{port}$'; \
@@ -254,10 +181,8 @@ pub fn port_free_at(site: &Site, port: u16) -> bool {
     }
 }
 
-/// A best-effort inter-process lock over `.ws-meta` via an `O_EXCL` lockfile,
-/// removed on drop. Allocation holds it for milliseconds, so contention that
-/// lasts a full window means the holder almost certainly crashed — we then
-/// *steal* the stale lock rather than stall forever or leave it wedged.
+/// Best-effort `O_EXCL` lockfile over `.ws-meta`; a full-window wait presumes
+/// the holder crashed and steals the stale lock rather than stall forever.
 struct Lock {
     path: PathBuf,
     held: bool,
@@ -274,17 +199,13 @@ impl Lock {
                 Ok(_) => return Lock { path, held: true },
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
-                        // Presumed-dead holder: remove the stale file and take it
-                        // on the next iteration. Give a fresh window so we don't
-                        // thrash a holder that legitimately re-acquired just now
-                        // (if two waiters race, one wins `create_new`).
+                        // Steal, then reset the deadline so a legitimate re-acquirer isn't thrashed.
                         let _ = std::fs::remove_file(&path);
                         deadline = Instant::now() + LOCK_WINDOW;
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
-                // Any other error (e.g. a read-only dir) → give up on locking
-                // but still allocate; correctness degrades gracefully.
+                // Other errors (e.g. read-only dir): give up on locking but still allocate.
                 Err(_) => return Lock { path, held: false },
             }
         }
@@ -315,11 +236,9 @@ mod tests {
         assert_ne!(mysql, redis);
         assert!((RANGE.start..RANGE.end).contains(&mysql));
 
-        // Second resolve reuses the recorded ports (stable across runs).
         let again = resolve(&Site::Local, root, "feat-x", "api", &["mysql".into()]).unwrap();
         assert_eq!(again["mysql"], mysql);
 
-        // Meta file is persisted where load() expects it.
         assert_eq!(load(root, "feat-x", "api")["mysql"], mysql);
     }
 
@@ -332,16 +251,12 @@ mod tests {
         assert_ne!(a, b, "parallel worktrees must not share a host port");
     }
 
-    /// The seam exists so concurrent test workspaces get windows that cannot
-    /// overlap, so the moved window must actually leave the default one.
     #[test]
     fn a_moved_window_is_disjoint_from_the_default() {
         let moved = window_from(Some(41000));
         assert_eq!(moved, 41000..41000 + MOVED_WIDTH);
         assert!(moved.start >= RANGE.end, "a moved window must clear the default: {moved:?}");
 
-        // Two bases a full width apart don't overlap — the property the port
-        // tests depend on.
         let a = window_from(Some(41000));
         let b = window_from(Some(41000 + MOVED_WIDTH));
         assert!(a.end <= b.start, "{a:?} and {b:?} must not overlap");
@@ -350,14 +265,11 @@ mod tests {
     #[test]
     fn an_absent_or_privileged_base_keeps_the_default_window() {
         assert_eq!(window_from(None), RANGE);
-        // A privileged base would allocate ports no rootless process can bind.
         assert_eq!(window_from(Some(80)), RANGE);
         assert_eq!(window_from(Some(1023)), RANGE);
         assert_eq!(window_from(Some(1024)), 1024..1024 + MOVED_WIDTH);
     }
 
-    /// A base near the top of the range must clamp rather than wrap to an empty
-    /// window, which would make every allocation fail with "no free host port".
     #[test]
     fn a_base_near_u16_max_clamps_instead_of_wrapping() {
         let w = window_from(Some(u16::MAX - 10));

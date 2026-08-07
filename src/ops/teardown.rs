@@ -1,10 +1,5 @@
-//! Worktree teardown pipeline shared by `ws rm` and `ws clean`.
-//!
-//! Both ops end the same way: run each repo's `down` then `post-remove` hook,
-//! drop the dep symlinks, `git worktree remove`, delete the local branch, and
-//! prune the now-empty task dir. `ws rm` gates this behind a dirty/unpushed
-//! safety check; `ws clean` gates it behind a merged/clean audit. The gating
-//! differs — the teardown itself does not.
+//! Shared teardown for `ws rm` and `ws clean` — the gating differs, but from
+//! hooks through branch-delete the sequence is identical.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -18,12 +13,9 @@ use crate::ports;
 use crate::remote::Site;
 use crate::workspace;
 
-/// Tear down every worktree of a task. Runs teardown hooks, removes the
-/// worktrees, deletes the branch, and prunes the task dir.
-///
-/// Returns `Ok(true)` when a hook exited non-zero (the worktrees are still
-/// removed — resource leakage is the lesser evil), `Ok(false)` when clean.
-/// Errors only when `git worktree remove` itself fails even with `--force`.
+/// Tear down every worktree of a task. `Ok(true)` signals a hook exited
+/// non-zero (worktrees are removed anyway — resource leakage beats a stuck
+/// removal); errors only when `git worktree remove` fails even with `--force`.
 pub fn remove_task(
     root: &Path,
     cfg: &WsConfig,
@@ -33,20 +25,15 @@ pub fn remove_task(
     let sanitized = workspace::sanitize_branch(branch);
     let mut hook_failed = false;
 
-    // Where the stack lives. `None` ⇒ a remote workspace whose server is
-    // unreachable — teardown then skips the server-side steps but still drops the
-    // local worktrees (you must be able to `ws rm` even with the server down).
+    // `None` ⇒ remote server unreachable; still drop the local worktrees so
+    // `ws rm` isn't blocked when the server is down.
     let site = Site::resolve(cfg).ok();
 
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
-        // Run the resource-teardown lifecycle where the stack lives. A host
-        // process's lifecycle IS a detached ws-owned process, so teardown stops it
-        // (at its site — local, or the server over SSH) instead of running
-        // hooks (the same exclusive split as `ws down`). A remote container runs
-        // its down/post-remove scripts on the server; a local container runs them
-        // as hooks here.
+        // Host processes are ws-owned units — stop them at their site instead of
+        // running hooks (same exclusive split as `ws down`).
         if cfg.is_host_repo(repo) {
             match site.as_ref() {
                 Some(s) => {
@@ -59,20 +46,17 @@ pub fn remove_task(
                         }
                     }
                 }
-                // Remote server unreachable — can't stop the unit now; still drop
-                // the local worktree below so `ws rm` isn't blocked.
                 None => crate::ui::skip(repo, "server unreachable — skipping host stop"),
             }
         } else if cfg.remote.is_some() {
             teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
         } else {
-            // Read the existing allocation (never allocate) for the hook env.
+            // Inspect: read the existing allocation, never allocate.
             let extra_env =
                 inject::prepare(cfg, &Site::Local, root, wt, &sanitized, repo, inject::Phase::Inspect)
                     .unwrap_or_default();
 
-            // Resource teardown hooks — best-effort. A failing hook is reported
-            // but doesn't stop removal (the user wants the worktree gone).
+            // Best-effort: a failing hook is reported but doesn't block removal.
             for event in ["down", "post-remove"] {
                 if let Some(action) = hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
                     let step = crate::ui::step(repo, &format!("{event} hook"));
@@ -87,9 +71,7 @@ pub fn remove_task(
             }
         }
 
-        // Remove this worktree's Caddy routes before `forget` drops the recorded
-        // service set they're derived from. Best-effort: Caddy may be down, or (for
-        // a remote workspace) the server unreachable.
+        // Drop routes before `ports::forget` wipes the service set they derive from.
         if cfg.routing_active() {
             if let Some(site) = site.as_ref() {
                 for r in inject::routes(cfg, root, &sanitized, repo) {
@@ -98,28 +80,24 @@ pub fn remove_task(
             }
         }
 
-        // Drop the generated compose override on the server (the local one is
-        // removed by `ports::forget` just below).
+        // Server-side override only; the local one is removed by `ports::forget` below.
         if let Some(s @ Site::Remote { .. }) = site.as_ref() {
             s.remove_file(&inject::override_path_at(cfg, s, root, &sanitized, repo));
         }
 
-        // Drop any localhost→server port forwards before `ports::forget` wipes
-        // the record of which ports were allocated. Best-effort, remote-only.
+        // Kill port forwards before `ports::forget` drops their record.
         if cfg.remote.is_some() {
             for (_, port) in ports::load(root, &sanitized, repo) {
                 let _ = mutagen::forward_terminate(&mutagen::forward_session_name(branch, repo, port));
             }
         }
 
-        // Free the host ports this worktree held, now that its teardown hooks
-        // have run. Done before the worktree removal so a failed `git worktree
-        // remove` (which aborts the op) can't leak the `.ws-meta` reservation.
+        // Free ports before worktree removal so a `git worktree remove` failure
+        // can't leak the `.ws-meta` reservation.
         ports::forget(root, &sanitized, repo);
 
-        // Remote workspace → tear down the file sync before we delete the
-        // worktree (so mutagen stops watching a dir that's about to vanish).
-        // Best-effort: a failed terminate is reported but doesn't block removal.
+        // Terminate the sync before deleting the worktree so mutagen isn't
+        // watching a directory that's about to vanish.
         if cfg.remote.is_some() {
             let session = mutagen::session_name(branch, repo);
             let step = crate::ui::step(repo, "sync terminated");
@@ -146,32 +124,24 @@ pub fn remove_task(
             }
         }
 
-        // Delete the local branch — best-effort. A branch that's gone (merged
-        // and pruned) or checked out elsewhere just leaves this a no-op.
         delete_branch(&main, branch);
     }
 
-    // Free port reservations for configured repos that never got a worktree for
-    // this branch. A cross-repo `${WS_PORT_<peer>.<svc>}` pre-allocates the peer's
-    // port (so it resolves before the peer is built); a peer that's never created
-    // would otherwise leak that `.ws-meta` reservation past the branch's teardown.
-    // Exact repo names — never a prefix match — so a sibling branch is untouched.
+    // Cross-repo `${WS_PORT_<peer>.<svc>}` pre-allocates the peer's port, so a
+    // peer that never got a worktree still holds a reservation to free here.
     let torn_down: std::collections::HashSet<&str> =
         worktrees.iter().map(|(r, _)| r.as_str()).collect();
     for repo in cfg.repos.iter().map(|r| r.name()).filter(|r| !torn_down.contains(r)) {
         ports::forget(root, &sanitized, repo);
     }
 
-    // Best-effort: drop the now-empty task dir. Leftover files (a stray
-    // .DS_Store, an unmanaged sibling) make this a silent no-op.
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
 
     Ok(hook_failed)
 }
 
-/// Run a remote workspace's `down` + `post-remove` scripts on the server
-/// (best-effort). Skips with a note when the server is unreachable — `ws rm` /
-/// `ws clean` must still drop the local worktree even when the server is gone.
+/// Run a remote workspace's `down` + `post-remove` scripts on the server;
+/// skipped when unreachable so local teardown can still proceed.
 #[allow(clippy::too_many_arguments)]
 fn teardown_remote(
     cfg: &WsConfig,
@@ -213,8 +183,7 @@ fn remove_if_symlink(p: &Path) {
     }
 }
 
-/// Remove a worktree, retrying with `--force` when a soft remove refuses
-/// (dirty tree, untracked deps). Errors only when even `--force` fails.
+/// Retries with `--force` when a soft remove refuses (dirty tree, untracked deps).
 fn remove_worktree(main: &Path, wt: &Path) -> Result<()> {
     let soft = Command::new("git")
         .arg("-C")

