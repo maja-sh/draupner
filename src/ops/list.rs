@@ -37,8 +37,7 @@ pub fn run() -> Result<()> {
             .then(|| {
                 let site = site.as_ref()?;
                 let name = crate::supervise::proc_name(branch.as_deref().unwrap_or(""), repo);
-                let ports: Vec<u16> =
-                    crate::ports::load(&ws.root, &sanitized, repo).into_values().collect();
+                let ports = host_probe_ports(&cfg, site, &ws.root, &wt_path, &sanitized, repo);
                 crate::supervise::health(site, &name, &ports)
             })
             .flatten();
@@ -47,7 +46,7 @@ pub fn run() -> Result<()> {
         let declared = || if !managed {
             None
         } else if let Some(r) = cfg.remote.as_ref() {
-            // Runs on the server; a legacy `.ws-hooks` file on the host can't reach the remote stack.
+            // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
             match site.as_ref() {
                 Some(s @ crate::remote::Site::Remote { .. }) => {
                     cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
@@ -65,18 +64,24 @@ pub fn run() -> Result<()> {
                 _ => None,
             }
         } else {
-            // Inspect phase must stay — no allocation or derivation from a status probe.
-            hooks::resolve(&cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|action| {
-                let extra_env = inject::prepare(
-                    &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
-                    inject::Phase::Inspect,
-                )
-                .unwrap_or_default();
-                hooks::capture_action(
-                    &ws.root, &wt_path, repo, &sanitized, "status", &action, STATUS_TIMEOUT,
-                    &extra_env,
-                )
-            })
+            // Local status; Inspect phase — no allocation or derivation from a status probe. `ws list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
+            let cmd = match hooks::resolve(
+                &cfg, &ws.root, repo, "status", cfg.is_container_repo(repo, &wt_path),
+            ) {
+                Ok(cmd) => cmd?,
+                Err(e) => {
+                    crate::ui::note(&format!("{repo}: {e}"));
+                    return Some("hook file not migrated".to_string());
+                }
+            };
+            let extra_env = inject::prepare(
+                &cfg, &crate::remote::Site::Local, &ws.root, &wt_path, &sanitized, repo,
+                inject::Phase::Inspect,
+            )
+            .unwrap_or_default();
+            hooks::capture_command(
+                &ws.root, &wt_path, repo, &sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
+            )
         };
 
         // ws's crash beats the script; a healthy process defers to the script for detail.
@@ -128,6 +133,23 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Not the raw `.ws-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.ws.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
+fn host_probe_ports(
+    cfg: &config::WsConfig,
+    site: &crate::remote::Site,
+    root: &std::path::Path,
+    worktree: &std::path::Path,
+    sanitized: &str,
+    repo: &str,
+) -> Vec<u16> {
+    inject::prepare(cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("WS_PORT_"))
+        .filter_map(|(_, v)| v.parse().ok())
+        .collect()
+}
+
 /// Prefer the shared branch name; fall back to the task-dir key when rows disagree.
 fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
     let mut branches = rows.iter().filter_map(|(_, b)| b.as_deref());
@@ -137,4 +159,39 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
         }
     }
     key.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `.ws-meta` state a removed service leaves behind: its port is still in
+    /// `ports` (nothing prunes that map short of teardown) while `services` was
+    /// rewritten to the current set by the last `up`.
+    #[test]
+    fn host_probe_ports_ignores_a_port_left_by_a_removed_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join(".ws.json"),
+            r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}}}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ws-meta")).unwrap();
+        std::fs::write(
+            root.join(".ws-meta/feat-x-api.json"),
+            r#"{"ports":{"gone":20001,"web":20002},"services":{"web":{"port":8080}}}"#,
+        )
+        .unwrap();
+
+        let cfg = config::load(root).unwrap();
+        let wt = root.join(".worktrees/feat-x/api");
+        let ports = host_probe_ports(&cfg, &crate::remote::Site::Local, root, &wt, "feat-x", "api");
+        assert_eq!(
+            ports,
+            vec![20002],
+            "only the current service set's ports may be probed — :20001 belongs to a \
+             service that no longer exists"
+        );
+    }
 }

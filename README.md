@@ -78,7 +78,8 @@ and writes three things:
 - **`.ws.schema.json`** — a JSON Schema for it, generated from the code, so your
   editor completes and validates every field. Regenerate after an upgrade with
   `ws init --refresh-schema`.
-- **`.ws-hooks/`** — starter scripts for the lifecycle events you want to fill in.
+- **`.ws-hooks/`** — starter scripts for the lifecycle events you want to fill
+  in. Each is inert until a repo's `scripts` block in `.ws.json` names it.
 
 Then work a task:
 
@@ -171,7 +172,6 @@ Read by `ws`:
 | `WS_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH` |
 | `WS_MUTAGEN` | `mutagen` | Override the `mutagen` binary |
 | `CLAUDE_SKILLS_DIR` | `~/.claude/skills` | Where `ws claude` installs skill files |
-| `RUST_LOG` | `warn` | Tracing filter; quiet by default. `RUST_LOG=ws=debug ws <op>` for a full trace |
 
 `HOME` is read to resolve `~/.config/ws` and the default skills directory.
 
