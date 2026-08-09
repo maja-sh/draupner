@@ -90,9 +90,6 @@ pub struct RepoConfig {
     /// Untracked files seeded verbatim from the main checkout into each new worktree at `ws new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
-    /// Legacy per-event hook path overrides, deprecated by `scripts`; kept until the execution path migrates.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub hooks: BTreeMap<String, String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_excludes: Vec<String>,
@@ -173,6 +170,11 @@ impl Script {
             Script::One(s) => std::slice::from_ref(s),
             Script::Many(v) => v,
         }
+    }
+
+    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.ws-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
+    pub fn joined(&self) -> String {
+        self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
     }
 }
 
@@ -263,12 +265,10 @@ impl WsConfig {
 
     /// Repo's `scripts[event]` joined fail-fast (`cmd1 && cmd2`); the single owner shared by the host-repo launch path and every remote-dispatch caller.
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
-        self.repo_config(repo)
-            .and_then(|rc| rc.scripts.get(event))
-            .map(|s| s.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && "))
+        self.repo_config(repo).and_then(|rc| rc.scripts.get(event)).map(Script::joined)
     }
 
-    /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for callers dispatching a command rather than an `Action`.
+    /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for the paths that never ran a hook file.
     pub fn command_for(&self, repo: &str, event: &str, is_container: bool) -> Option<String> {
         self.script_command(repo, event)
             .or_else(|| is_container.then(|| default_script(self.runtime(), event)).flatten())
@@ -322,9 +322,46 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
 }
 
+/// Whether `runtime` is safe to hand to the process spawner as a program name.
+///
+/// `.ws.json` isn't gitignored, so this value arrives with a clone, and it is
+/// executed directly — `Site::command` / the compose calls pass it as `argv[0]`,
+/// and Rust runs any program string containing `/` as a path **relative to the
+/// process cwd**, i.e. the very workspace the hostile config came in. A clone
+/// carrying `{"runtime": ".ws-hooks/helper"}` plus a committed, executable
+/// `.ws-hooks/helper` would run it on the first `ws setup` / `ws remote check`,
+/// before any prompt. `shell_quote` is no defence: the value *is* the program,
+/// not a shell word.
+///
+/// So: a bare program name, resolved through `PATH` (`podman`, `docker`,
+/// `nerdctl`, `podman-remote`, …), or an absolute path to a binary. Deliberately
+/// not an allow-list of two names — people do run other runtimes — the point is
+/// only that a cloned config can't name a program inside the clone.
+fn runtime_looks_safe(runtime: &str) -> bool {
+    // Whitespace/control chars can't appear in a real program name, and rejecting
+    // them keeps a hostile value from smuggling escape sequences into output.
+    if runtime.is_empty()
+        || runtime.starts_with('-')
+        || runtime.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let Some(path) = runtime.strip_prefix('/') else {
+        return !runtime.contains('/'); // bare name → PATH resolves it
+    };
+    // An absolute path is trusted, but `/proc/self/cwd/...` is an absolute path
+    // that resolves straight back into the clone, and `..` climbs anywhere, so
+    // neither counts as one.
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.first() != Some(&"proc")
+        && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
+}
+
 /// Load a workspace config from `<workspace-root>/.ws.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
-    let cfg: WsConfig = read_json(&root.join(".ws.json"))?;
+    let path = root.join(".ws.json");
+    let cfg: WsConfig = read_json(&path)?;
+    refuse_legacy_hooks_field(&path)?;
     // Reject a dangerous SSH destination at the choke point every op shares — `.ws.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
         if !crate::remote::connection_looks_safe(&r.connection) {
@@ -349,7 +386,57 @@ pub fn load(root: &Path) -> Result<WsConfig> {
             }
         }
     }
+    // Same choke point, same reason as `remote.connection`: the value comes from
+    // a possibly-cloned `.ws.json` and is executed. See `runtime_looks_safe`.
+    if let Some(rt) = cfg.runtime.as_deref() {
+        if !runtime_looks_safe(rt) {
+            anyhow::bail!(
+                "refusing an unsafe runtime `{rt}` in .ws.json — the container runtime must \
+                 be a bare program name (`podman`, `docker`) or an absolute path to one; a \
+                 relative path would run a program out of the repo this config arrived in"
+            );
+        }
+    }
     Ok(cfg)
+}
+
+// Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. `RepoConfig.hooks`
+// was silently parseable and would be dropped on the next `ws remote set` rewrite;
+// name it at load instead so a leftover block can't erase a user's config.
+
+/// Refuse a `.ws.json` still carrying a repo's `hooks` override map.
+fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    // Cheap gate — `".ws-hooks/…"` script values don't have the bare-key quote pattern, so the reparse stays rare.
+    if !raw.contains("\"hooks\"") {
+        return Ok(());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(
+        raw.strip_prefix('\u{feff}').unwrap_or(&raw),
+    ) else {
+        return Ok(()); // `read_json` will surface the parse error.
+    };
+    let stale: Vec<&str> = v["repos"]
+        .as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .filter(|r| r["hooks"].is_object())
+                .filter_map(|r| r["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`hooks` in {} ({}) points at the hook-file mechanism removed in ws 0.6 — move each \
+         entry into that repo's `scripts` block instead. The contract changed with it: a script \
+         runs with cwd = the worktree (not the workspace root), and the worktree path arrives as \
+         $WS_WORKTREE (not $1).",
+        path.display(),
+        stale.join(", "),
+    )
 }
 
 /// Machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
@@ -534,6 +621,23 @@ mod tests {
         }
     }
 
+    /// The migration shim (delete with it): a leftover `hooks` override map must
+    /// be named, not parsed away — `ws remote set` rewrites this file, so a
+    /// silently-ignored block would be silently deleted.
+    #[test]
+    fn load_refuses_a_leftover_hooks_override_map() {
+        let dir = tempfile::tempdir().unwrap();
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".ws-hooks/api/up"}}]}"#);
+        let err = load(dir.path()).err().expect("a `hooks` block must be refused").to_string();
+        assert!(err.contains("`hooks`") && err.contains("api"), "{err}");
+        assert!(err.contains("$WS_WORKTREE"), "the new worktree contract must be named: {err}");
+
+        // A `.ws-hooks/…` *script* value is the supported lane — never mistaken
+        // for the removed field by the cheap substring gate.
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#);
+        assert!(load(dir.path()).is_ok());
+    }
+
     #[test]
     fn read_json_strips_utf8_bom() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -617,6 +721,47 @@ mod tests {
         }
         // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `ws` command.
         assert!(ensure_available("git").is_ok());
+    }
+
+    #[test]
+    fn load_refuses_a_runtime_that_isnt_a_program_name() {
+        // The value is executed as `argv[0]`, and a cloned `.ws.json` can name a
+        // program *inside the clone* — `.ws-hooks/helper` next to a committed,
+        // executable helper runs on the first `ws setup`, before any prompt.
+        for bad in [
+            ".ws-hooks/setup-helper",
+            "./payload",
+            "../evil/podman",
+            "sub/dir/podman",
+            "/proc/self/cwd/.ws-hooks/setup-helper",
+            "/usr/bin/../../tmp/payload",
+            "-oProxyCommand=x",
+            "podman --remote",
+            "",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(dir.path(), &format!(r#"{{"runtime":"{bad}","repos":[]}}"#));
+            let err = match load(dir.path()) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected runtime {bad:?} to be refused"),
+            };
+            assert!(err.contains("unsafe runtime"), "expected {bad:?} refused, got: {err}");
+        }
+    }
+
+    #[test]
+    fn load_accepts_any_bare_or_absolute_runtime() {
+        // Not an allow-list of two names: a bare name is PATH-resolved and an
+        // absolute path is a deliberate choice the user made on their own machine.
+        for good in ["podman", "docker", "nerdctl", "podman-remote", "/usr/local/bin/podman"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(dir.path(), &format!(r#"{{"runtime":"{good}","repos":["api"]}}"#));
+            let cfg = match load(dir.path()) {
+                Ok(c) => c,
+                Err(e) => panic!("expected runtime {good:?} accepted: {e}"),
+            };
+            assert_eq!(cfg.runtime(), good);
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::compose;
 use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
@@ -45,9 +45,7 @@ impl Phase {
     }
 }
 
-/// Compute the injection env for a repo's worktree; `site` decides where
-/// derivation, port probes, and the compose override run, while `worktree` is
-/// always the local (synced) path used for file checks and template rendering.
+/// Compute the injection env for a repo's worktree; `site` decides where derivation, port probes, and the compose override run, while `worktree` is always the local (synced) path used for file checks and template rendering. A bare-name entry is treated as an object with no overrides (see `repo_config`), not an opt-out.
 pub fn prepare(
     cfg: &WsConfig,
     site: &Site,
@@ -57,9 +55,9 @@ pub fn prepare(
     repo: &str,
     phase: Phase,
 ) -> Result<Vec<(String, String)>> {
-    // Emitted even for a bare-name repo, which returns early with no routing env.
+    // Emitted even for a repo that isn't in this workspace at all, which returns early below.
     let context = workspace_context(cfg);
-    let Some(rc) = cfg.repo_config(repo) else { return Ok(context) };
+    let Some(rc) = repo_config(cfg, repo) else { return Ok(context) };
 
     let site_worktree = site_worktree_path(cfg, site, root, worktree, branch_sanitized, repo);
 
@@ -134,9 +132,30 @@ pub fn prepare(
     Ok(env)
 }
 
-/// `WS_REMOTE` reflects the *workspace*, not the current site, so a hook reads
-/// one consistent answer wherever it runs. Not named `WS_REMOTE_HOST` because
-/// that is an input override a nested `ws` call would silently inherit.
+/// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `ws rm` wiped the sibling's DB volumes).
+fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
+    let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
+    match entry.config() {
+        Some(rc) => Some(rc),
+        None => {
+            static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
+            Some(BARE.get_or_init(RepoConfig::default))
+        }
+    }
+}
+
+/// Prefer the effective set recorded at the last `up` — it covers services auto-derived from compose — falling back to declared for a worktree that predates the record.
+fn recorded_or_declared(
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+    rc: &RepoConfig,
+) -> BTreeMap<String, ServiceConfig> {
+    let recorded = ports::services(root, branch_sanitized, repo);
+    if recorded.is_empty() { rc.services.clone() } else { recorded }
+}
+
+/// `WS_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `WS_REMOTE_HOST` because that is an input override a nested `ws` call would silently inherit.
 fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     vec![
         ("WS_RUNTIME".to_string(), cfg.runtime().to_string()),
@@ -226,15 +245,14 @@ fn compose_env(
     Ok(env)
 }
 
-/// Read-only: uses the service set recorded at the last `up` so `down`/`rm`
-/// resolve the same route `@id`s `up` created; never allocates or derives.
+/// Read-only: uses the service set recorded at the last `up` so `down`/`rm` resolve the same route `@id`s `up` created; never allocates or derives.
 pub fn routes(
     cfg: &WsConfig,
     root: &Path,
     branch_sanitized: &str,
     repo: &str,
 ) -> Vec<crate::caddy::RouteSpec> {
-    let (Some(rc), Some(domain)) = (cfg.repo_config(repo), cfg.domain.as_deref()) else {
+    let (Some(rc), Some(domain)) = (repo_config(cfg, repo), cfg.domain.as_deref()) else {
         return Vec::new();
     };
     // Recorded set covers auto-derived services; declared is the pre-record fallback.
@@ -352,9 +370,8 @@ fn peer_vars(
     peer: &str,
     phase: Phase,
 ) -> Result<BTreeMap<String, String>> {
-    let Some(rc) = cfg.repo_config(peer) else { return Ok(BTreeMap::new()) };
-    let recorded = ports::services(root, branch_sanitized, peer);
-    let services = if recorded.is_empty() { rc.services.clone() } else { recorded };
+    let Some(rc) = repo_config(cfg, peer) else { return Ok(BTreeMap::new()) };
+    let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 
     // Allocating phases pre-reserve the peer's ports so `${WS_PORT_<peer>.<svc>}`
@@ -400,6 +417,43 @@ fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>)
     git::add_worktree_excludes(worktree, &dests)
 }
 
+/// `.ws.json` arrives with a clone, so `dest` is attacker-controlled: without this, an entry like `../../../../.ssh/authorized_keys` had `ws new` and every `ws up` write anywhere the user could. Same rule `copy` entries have always had (`ops::new::seed_copies`); the `is_tracked` guard below inverts for escaping paths and never caught this.
+fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
+    let rel = Path::new(p);
+    if rel.is_absolute() {
+        bail!(
+            "template {field} `{p}` must be a path inside the worktree — \
+             an absolute path would write outside it"
+        );
+    }
+    if rel.components().any(|c| c == Component::ParentDir) {
+        bail!("template {field} `{p}` must not contain `..` — it would escape the worktree");
+    }
+
+    // Lexically clean, but a committed symlink on the way still lands outside; canonicalise the deepest existing ancestor and require it under the worktree.
+    let Ok(root) = worktree.canonicalize() else { return Ok(()) };
+    let joined = worktree.join(rel);
+    let mut probe = joined.as_path();
+    loop {
+        match probe.canonicalize() {
+            Ok(real) => {
+                if !real.starts_with(&root) {
+                    bail!(
+                        "template {field} `{p}` resolves to {} — outside the worktree {}",
+                        real.display(),
+                        root.display()
+                    );
+                }
+                return Ok(());
+            }
+            Err(_) => match probe.parent() {
+                Some(parent) => probe = parent,
+                None => return Ok(()),
+            },
+        }
+    }
+}
+
 /// Refuses if `dest` is tracked — rendering would dirty a committed file.
 fn render_one(
     worktree: &Path,
@@ -407,6 +461,10 @@ fn render_one(
     dest: &str,
     vars: &BTreeMap<String, String>,
 ) -> Result<()> {
+    // Before anything touches the filesystem: both fields are attacker-controlled
+    // config, and both are joined onto the worktree below.
+    ensure_within_worktree(worktree, "src", src)?;
+    ensure_within_worktree(worktree, "dest", dest)?;
     if git::is_tracked(worktree, dest) {
         bail!(
             "template dest `{dest}` is tracked by git — rendering it would dirty the repo; \
@@ -465,7 +523,6 @@ mod tests {
             scripts: Default::default(),
             env: Default::default(),
             templates: Vec::new(),
-            hooks: Default::default(),
             worktree_excludes: Vec::new(),
             copy: Vec::new(),
         }
@@ -496,6 +553,55 @@ mod tests {
         assert!(ctx.contains(&("WS_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
         assert!(ctx.contains(&("WS_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
         assert!(ctx.contains(&("WS_CONNECTION".to_string(), "srv".to_string())), "{ctx:?}");
+    }
+
+    #[test]
+    fn a_bare_name_compose_repo_gets_a_namespaced_compose_project() {
+        // A bare-name entry (`{"repos":["api"]}`) whose worktree has a compose
+        // file still runs the compose lifecycle (`is_container_repo` infers it, so
+        // `hooks::resolve` hands back `<runtime> compose up -d`). It must therefore
+        // get `COMPOSE_PROJECT_NAME`: without it compose falls back to the worktree
+        // dir's basename `api`, the same for every branch, and the second
+        // worktree's `up` adopts the first's containers/network/volumes.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let wt = root.join(".worktrees/feat-a/api");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+        let cfg: WsConfig = serde_json::from_str(r#"{"repos":["api"]}"#).unwrap();
+        // Inspect: no derive, no allocation, no runtime call — the project name is
+        // set on every phase, so this exercises the fix without a container runtime.
+        let env = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "api", Phase::Inspect).unwrap();
+        let proj = env.iter().find(|(k, _)| k == "COMPOSE_PROJECT_NAME").map(|(_, v)| v.as_str());
+        assert_eq!(proj, Some("feat-a-api"), "bare-name compose repo must be namespaced: {env:?}");
+
+        // A name that isn't a repo here still gets only the workspace context.
+        let none = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "nope", Phase::Inspect).unwrap();
+        assert!(!none.iter().any(|(k, _)| k == "COMPOSE_PROJECT_NAME"), "{none:?}");
+    }
+
+    #[test]
+    fn a_bare_name_repo_routes_its_recorded_services() {
+        // Same rule on the routing side: `prepare` hands a bare-name repo's HTTP
+        // services a `WS_HOST_*`, so `routes` must produce the Caddy route that
+        // hostname resolves to — otherwise the injected host is a dead name.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cfg: WsConfig =
+            serde_json::from_str(r#"{"domain":"myapp.test","repos":["api"]}"#).unwrap();
+        let recorded = services(&repo_with(&[("web", svc(Some(HttpDecl::Enabled(true)), 80))]));
+        ports::record_services(root, "feat-a", "api", &recorded).unwrap();
+
+        let specs = routes(&cfg, root, "feat-a", "api");
+        assert_eq!(
+            specs.len(),
+            1,
+            "bare-name repo must still route: {:?}",
+            specs.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(specs[0].hostname, "feat-a.web.myapp.test");
+        assert_eq!(specs[0].upstream, "feat-a-api-web-1:80");
     }
 
     #[test]
@@ -706,6 +812,40 @@ mod tests {
         let local = WsConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
         assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
+    }
+
+    #[test]
+    fn template_paths_must_stay_inside_the_worktree() {
+        // `templates` is attacker-controlled config (`.ws.json` ships with a
+        // clone), and both fields are joined onto the worktree. Every escape
+        // shape is refused; ordinary relative paths are not.
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(wt.join("deploy")).unwrap();
+
+        // Ordinary config keeps working: a plain name, a nested dest, a `./` prefix.
+        for ok in ["svc.conf", "deploy/nginx.conf", "./config/generated/svc.conf"] {
+            ensure_within_worktree(&wt, "dest", ok).unwrap_or_else(|e| panic!("`{ok}` refused: {e}"));
+        }
+
+        // Traversal, in the middle as well as at the front.
+        let err = ensure_within_worktree(&wt, "dest", "../../../pwned.txt").unwrap_err().to_string();
+        assert!(err.contains("must not contain `..`"), "{err}");
+        assert!(ensure_within_worktree(&wt, "src", "deploy/../../escape").is_err());
+
+        // Absolute: `Path::join` would drop the worktree entirely.
+        let err = ensure_within_worktree(&wt, "dest", "/etc/cron.d/pwn").unwrap_err().to_string();
+        assert!(err.contains("must be a path inside the worktree"), "{err}");
+
+        // Lexically clean but symlinked out — a committed `esc -> /` needs no `..`.
+        #[cfg(unix)]
+        {
+            let outside = tmp.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, wt.join("esc")).unwrap();
+            let err = ensure_within_worktree(&wt, "dest", "esc/pwned.txt").unwrap_err().to_string();
+            assert!(err.contains("outside the worktree"), "{err}");
+        }
     }
 
     #[test]

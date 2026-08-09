@@ -54,7 +54,7 @@ pub fn is_tracked(wt: &Path, rel: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Append `entries` to the worktree's `info/exclude` idempotently, resolving the path via `git rev-parse --git-path` so linked-worktree gitdir pointers are followed.
+/// Append `entries` to the worktree's `info/exclude` idempotently, resolving the path via `git rev-parse --git-path` so linked-worktree gitdir pointers are followed. `info/` is in git's common list so this bleeds into every sibling worktree; enabling `extensions.worktreeConfig` for per-worktree scope would silently override the user's global excludes and isn't worth it.
 pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -125,7 +125,16 @@ pub fn ref_exists(path: &Path, refspec: &str) -> bool {
 
 /// The repo's default branch as a start-point name (`origin/main`, `main`, …), or `None`; probes fully-qualified refspecs so a `main`/`master` tag can't shadow the branch.
 pub fn default_ref(path: &Path) -> Option<String> {
-    if let Some(head) = symbolic_origin_head(path) {
+    // `origin/HEAD` is only usable if it still *resolves*. When upstream renames
+    // its default branch, a `git fetch --prune` deletes `refs/remotes/origin/master`
+    // but leaves the `origin/HEAD` symref pointing at it; `symbolic-ref` doesn't
+    // dereference, so it keeps reporting the dead branch. Handing that to
+    // `git worktree add` failed the whole op ("not a valid object name") for a
+    // repo whose ladder below resolves `origin/main` fine — so probe, then fall
+    // through instead of trusting the symref.
+    if let Some(head) =
+        symbolic_origin_head(path).filter(|h| ref_exists(path, &format!("refs/remotes/{h}")))
+    {
         return Some(head);
     }
     [
