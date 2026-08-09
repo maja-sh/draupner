@@ -1,6 +1,41 @@
 mod common;
 
 use common::{stderr, WorkspaceFixture};
+use std::path::Path;
+use std::process::Command;
+
+/// The `git status --porcelain` command for a worktree, carrying the isolated git
+/// env every other git invocation in a fixture runs with.
+///
+/// A bare `Command::new("git")` inherits the developer's real `$HOME` and an unset
+/// `GIT_CONFIG_GLOBAL`, so a global `core.excludesFile` listing `node_modules` (a
+/// very common local setup) made the cleanliness tests below pass even with the
+/// worktree-exclude write removed — silently voiding the only regression coverage
+/// `add_worktree_excludes` has.
+fn git_status_cmd(wt: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(wt)
+        .args(["status", "--porcelain"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
+    cmd
+}
+
+/// `git status --porcelain` in a worktree. Panics if git itself failed: a git that
+/// dies (exit 128 — bad config, no repo) writes nothing to stdout, which an
+/// stdout-only check happily reads as "clean".
+fn git_status(wt: &Path) -> String {
+    let out = git_status_cmd(wt).output().expect("run git status");
+    assert!(
+        out.status.success(),
+        "git status in {} failed (exit {:?}):\n{}",
+        wt.display(),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
 
 #[test]
 fn new_on_a_remote_workspace_creates_a_sync_session() {
@@ -71,9 +106,51 @@ fn a_tag_named_main_does_not_shadow_the_default_branch() {
 }
 
 #[test]
+fn a_dangling_origin_head_falls_back_to_the_default_branch_ladder() {
+    // Regression: upstream renamed its default branch, so a pruning fetch deleted
+    // `refs/remotes/origin/master` but left `origin/HEAD` pointing at it.
+    // `git symbolic-ref` doesn't dereference, so it keeps reporting the dead
+    // branch — taking it as the start point aborted `ws new` with "not a valid
+    // object name: 'origin/master'" even though `origin/main` resolves fine.
+    let f = WorkspaceFixture::empty();
+    f.add_repo_with_origin("api"); // pushes + tracks `main`, so origin/main exists
+    f.write_ws_json(r#"{"repos":["api"]}"#);
+    f.git(
+        "api",
+        &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"],
+    );
+
+    let out = f.run(&["new", "api", "feat/dangling"]);
+    assert!(
+        out.status.success(),
+        "ws new must fall through to the main/master ladder:\n{}",
+        stderr(&out)
+    );
+
+    let wt = f.path().join(".worktrees/feat-dangling/api");
+    assert!(wt.is_dir(), "worktree should have been created");
+    // …and off `origin/main`, not off some other commit.
+    let head = rev_parse(&wt, "HEAD");
+    let origin_main = rev_parse(&f.path().join("api"), "refs/remotes/origin/main");
+    assert_eq!(head, origin_main, "worktree should start from origin/main");
+}
+
+/// The commit `rev` resolves to in `repo`, for asserting a worktree's start point.
+fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", rev])
+        .output()
+        .expect("git rev-parse");
+    assert!(out.status.success(), "rev-parse {rev} failed in {}", repo.display());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
 fn happy_path_two_repos() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    f.add_hook("api", "post-create", "echo \"api-hook: wt=$1\"");
+    f.add_hook("api", "post-create", "echo \"api-hook: wt=$WS_WORKTREE\"");
 
     let out = f.run_ok(&["new", "api,app", "feat/login"]);
     let err = stderr(&out);
@@ -239,6 +316,38 @@ fn vendor_copied_when_composer_present() {
 }
 
 #[test]
+fn tracked_vendor_is_not_copied_over_itself() {
+    // A repo that commits its vendor/: `git worktree add` already checked it out,
+    // so copying main's on top would nest it (`cp -R src dst` copies *into* an
+    // existing dst) and leave a silent duplicate dependency tree at vendor/vendor.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+
+    std::fs::write(f.path().join("api/composer.json"), "{}").unwrap();
+    let vendor = f.path().join("api/vendor");
+    std::fs::create_dir_all(vendor.join("acme/lib")).unwrap();
+    std::fs::write(vendor.join("autoload.php"), "<?php // autoload").unwrap();
+    std::fs::write(vendor.join("acme/lib/Lib.php"), "<?php // lib").unwrap();
+    f.git("api", &["add", "composer.json", "vendor"]);
+    f.git("api", &["commit", "-q", "-m", "commit vendor"]);
+
+    let out = f.run_ok(&["new", "api", "feat/tracked-vendor"]);
+    let err = stderr(&out);
+
+    let wt = f.path().join(".worktrees/feat-tracked-vendor/api");
+    assert!(
+        !wt.join("vendor/vendor").exists(),
+        "vendor/ must not be copied into the worktree's own tracked vendor/"
+    );
+    // The tracked copy git checked out is still there and complete.
+    assert!(wt.join("vendor/autoload.php").is_file());
+    assert!(wt.join("vendor/acme/lib/Lib.php").is_file());
+    assert!(
+        !err.contains("vendor/ copied"),
+        "no copy happens, so no copy step should be reported:\n{err}"
+    );
+}
+
+#[test]
 fn worktree_is_clean_despite_symlinked_node_modules() {
     // The gitignore's trailing-slash rule is dir-only, so a node_modules symlink would read as untracked without the worktree exclude ws installs.
     let f = WorkspaceFixture::with_repos(&["app"]);
@@ -250,13 +359,7 @@ fn worktree_is_clean_despite_symlinked_node_modules() {
 
     f.run_ok(&["new", "app", "feat/clean"]);
 
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(f.path().join(".worktrees/feat-clean/app"))
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap();
-    let status = String::from_utf8_lossy(&out.stdout);
+    let status = git_status(&f.path().join(".worktrees/feat-clean/app"));
     assert!(
         status.trim().is_empty(),
         "worktree should be clean, got:\n{status}"
@@ -277,14 +380,44 @@ fn config_worktree_excludes_are_applied() {
     std::fs::create_dir(f.path().join(".worktrees/feat-excl/api/.cache")).unwrap();
     std::fs::write(f.path().join(".worktrees/feat-excl/api/.cache/blob"), "z").unwrap();
 
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(f.path().join(".worktrees/feat-excl/api"))
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap();
-    let status = String::from_utf8_lossy(&out.stdout);
+    let status = git_status(&f.path().join(".worktrees/feat-excl/api"));
     assert!(status.trim().is_empty(), "expected clean worktree, got:\n{status}");
+}
+
+#[test]
+fn git_status_helper_runs_with_the_isolated_git_env() {
+    // The cleanliness checks above are the only regression coverage for the
+    // worktree-exclude write; reading the developer's own gitconfig (a global
+    // `core.excludesFile` with `node_modules` in it) makes them pass regardless.
+    let cmd = git_status_cmd(Path::new("."));
+    let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
+    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new(key),
+                Some(std::ffi::OsStr::new("/dev/null"))
+            )),
+            "worktree cleanliness must be judged with {key}=/dev/null, got {envs:?}"
+        );
+    }
+}
+
+#[test]
+fn git_status_helper_does_not_read_a_failed_git_as_clean() {
+    let f = WorkspaceFixture::empty();
+    let broken = f.path().join("broken");
+    std::fs::create_dir(&broken).unwrap();
+    // A `.git` *file* pointing nowhere: discovery stops here, so git dies with
+    // exit 128 and an empty stdout — indistinguishable from a clean worktree to
+    // anything that only looks at stdout.
+    std::fs::write(broken.join(".git"), "gitdir: /nonexistent/gitdir\n").unwrap();
+
+    let out = git_status_cmd(&broken).output().expect("run git status");
+    assert!(!out.status.success(), "precondition: this git status must fail");
+    assert!(out.stdout.is_empty(), "precondition: a failing git status prints no status");
+
+    let panicked = std::panic::catch_unwind(|| git_status(&broken)).is_err();
+    assert!(panicked, "a `git status` that failed must not be reported as a clean worktree");
 }
 
 #[test]

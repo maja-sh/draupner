@@ -50,6 +50,15 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         )));
     }
 
+    // Raise the 0.6 hook-file migration refusal here, alongside the other static
+    // preflights, rather than from `ctx.command` in the middle of the creation
+    // loop. It is a config-plus-`stat` check with no reason to land after
+    // worktrees and sync sessions already exist — and the fix it asks for
+    // (declare the script in `.ws.json`) is unreachable while the half-created
+    // task blocks the re-run.
+    crate::hooks::preflight_legacy_hook_files(&cfg, &ws.root, &requested, &["post-create"])
+        .map_err(|e| super::preflight(e.to_string()))?;
+
     std::fs::create_dir_all(&task_dir)
         .with_context(|| format!("create {}", task_dir.display()))?;
 
@@ -72,7 +81,17 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         // Anything ws drops into the worktree gets registered here so it never reads as untracked.
         let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
 
-        if repo_path.join("composer.json").is_file() && repo_path.join("vendor").is_dir() {
+        // Seeding `vendor/` from the main checkout only makes sense for a
+        // gitignored, per-host one. A repo that *commits* its vendor/ already has
+        // it in the fresh worktree (`git worktree add` checked it out), and
+        // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
+        // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
+        // exclude below stops git descending, and pushed over SSH on a remote
+        // workspace since a tracked vendor/ is source and isn't sync-ignored.
+        if repo_path.join("composer.json").is_file()
+            && repo_path.join("vendor").is_dir()
+            && !wt_path.join("vendor").exists()
+        {
             let step = crate::ui::step(repo_name, "vendor/ copied");
             if let Err(e) = copy_vendor(&repo_path, &wt_path) {
                 remove_worktree(&repo_path, &wt_path);
@@ -165,7 +184,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     Ok(())
 }
 
-/// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared.
+/// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared. Failure is fatal for `new` — one-time setup that didn't complete.
 #[allow(clippy::too_many_arguments)]
 fn run_post_create(
     cfg: &config::WsConfig,
@@ -195,9 +214,9 @@ fn run_post_create(
             }
         }
     } else {
-        if let Some(action) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path)) {
+        if let Some(cmd) = hooks::resolve(cfg, ws_root, repo, "post-create", cfg.is_container_repo(repo, wt_path))? {
             let step = crate::ui::step(repo, "Post-create hook");
-            hooks::run_action(ws_root, wt_path, repo, sanitized, "post-create", &action, extra_env)?;
+            hooks::run_command(ws_root, wt_path, repo, sanitized, "post-create", &cmd, extra_env)?;
             step.ok();
         }
         Ok(())

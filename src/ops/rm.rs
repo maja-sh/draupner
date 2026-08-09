@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config;
@@ -10,16 +10,51 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    // Git-sourced so `rm` reaches stale registrations that no filesystem scan would find.
-    let worktrees = workspace::worktrees_for(&ws.root, &cfg, branch);
+    // Git-sourced so `rm` reaches stale registrations no filesystem scan would find. Match branch OR task-dir name so detached-HEAD worktrees still resolve.
+    let known = workspace::worktrees(&ws.root, &cfg);
+    let task = workspace::sanitize_branch(branch);
+    let worktrees: Vec<(String, PathBuf)> = known
+        .iter()
+        .filter(|w| w.branch.as_deref() == Some(branch) || w.task.as_deref() == Some(task.as_str()))
+        .map(|w| (w.repo.clone(), w.path.clone()))
+        .collect();
+
+    // Reported, not acted on — same contract `ws clean` states.
+    let task_dir = workspace::task_dir(&ws.root, branch);
+    let leftovers: Vec<String> = workspace::orphan_dirs(&ws.root, &known)
+        .into_iter()
+        .filter(|p| p.starts_with(&task_dir))
+        .map(|p| p.display().to_string())
+        .collect();
 
     if worktrees.is_empty() {
-        return Err(super::preflight(format!(
-            "no worktrees for {branch}; nothing to remove"
-        )));
+        let mut msg = format!("no worktrees for {branch}; nothing to remove");
+        if !leftovers.is_empty() {
+            msg.push_str(&format!(
+                " ({} director{} under {} {} not registered with git — `ws clean` lists them)",
+                leftovers.len(),
+                if leftovers.len() == 1 { "y" } else { "ies" },
+                task_dir.display(),
+                if leftovers.len() == 1 { "is" } else { "are" },
+            ));
+        }
+        return Err(super::preflight(msg));
     }
 
     crate::ui::header("ws-rm", branch);
+
+    if !leftovers.is_empty() {
+        crate::ui::note(&format!(
+            "{} director{} under {} {} not registered with git — left in place; \
+             remove by hand once you've checked {}:",
+            leftovers.len(),
+            if leftovers.len() == 1 { "y" } else { "ies" },
+            task_dir.display(),
+            if leftovers.len() == 1 { "is" } else { "are" },
+            if leftovers.len() == 1 { "it" } else { "them" },
+        ));
+        crate::ui::command_block(&leftovers);
+    }
 
     let mut blocking = false;
     for (repo, wt) in &worktrees {

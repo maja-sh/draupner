@@ -1,4 +1,4 @@
-//! Declarative `scripts` in `.ws.json` — the successor to `.ws-hooks/` files.
+//! Declarative `scripts` in `.ws.json` — the only lifecycle mechanism; also covers the migration error for a leftover executable `.ws-hooks/<repo>/<event>` file.
 
 mod common;
 
@@ -36,19 +36,53 @@ fn declarative_up_script_multi_command_runs_in_order() {
     assert!(first < second, "commands should run in order:\n{err}");
 }
 
-#[test]
-fn script_takes_precedence_over_hook_file() {
-    let f = fixture_with_scripts(r#"{"up":"echo FROM-SCRIPT"}"#);
-    f.add_hook("api", "up", "echo FROM-HOOK-FILE");
-    f.run_ok(&["new", "api", "feat/prec"]);
+/// Write an executable `.ws-hooks/<repo>/<event>` — the layout the removed hook-file mechanism discovered by convention.
+fn write_legacy_hook_file(f: &WorkspaceFixture, repo: &str, event: &str) {
+    let dir = f.path().join(".ws-hooks").join(repo);
+    std::fs::create_dir_all(&dir).expect("create hook dir");
+    let path = dir.join(event);
+    std::fs::write(&path, "#!/usr/bin/env bash\necho FROM-HOOK-FILE\n").expect("write hook file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
 
-    let out = f.run_ok(&["up", "feat/prec"]);
+// Hook files discovered by convention are gone. Dropping one silently would turn
+// a working `up` into the compose default (or nothing), so the repo fails with
+// the `scripts` entry to paste and the two contract changes that come with it.
+#[test]
+fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    write_legacy_hook_file(&f, "api", "up");
+    f.run_ok(&["new", "api", "feat/legacy"]);
+
+    let out = f.run(&["up", "feat/legacy"]);
+    assert_eq!(out.status.code(), Some(1), "a leftover hook file must fail the repo");
     let err = stderr(&out);
-    assert!(err.contains("FROM-SCRIPT"), "script should win:\n{err}");
+    assert!(!err.contains("FROM-HOOK-FILE"), "the hook file must not run:\n{err}");
     assert!(
-        !err.contains("FROM-HOOK-FILE"),
-        "the hook file must not run when a script is declared:\n{err}"
+        err.contains(r#""scripts": {"up": ".ws-hooks/api/up"}"#),
+        "the error must name the exact JSON to paste:\n{err}"
     );
+    assert!(err.contains("$WS_WORKTREE"), "the error must name the new worktree var:\n{err}");
+}
+
+// ...and declaring it is the whole migration: the same file, now named under
+// `scripts`, runs again (with the new contract).
+#[test]
+fn declaring_a_hook_file_under_scripts_runs_it_again() {
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    write_legacy_hook_file(&f, "api", "up");
+    f.write_ws_json(
+        r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#,
+    );
+    f.run_ok(&["new", "api", "feat/migrated"]);
+
+    let err = stderr(&f.run_ok(&["up", "feat/migrated"]));
+    assert!(err.contains("FROM-HOOK-FILE"), "the declared script should run:\n{err}");
 }
 
 #[test]
@@ -105,4 +139,30 @@ fn script_runs_in_the_worktree_dir() {
         err.contains(".worktrees/feat-cwd/api"),
         "script cwd should be the worktree:\n{err}"
     );
+}
+
+#[test]
+fn a_legacy_post_create_file_is_refused_before_any_worktree_is_created() {
+    let f = WorkspaceFixture::with_repos(&["api", "app"]);
+    // The refusal used to reach `ws new` through the per-repo creation loop, so
+    // it landed after `git worktree add` and the sync session for `api` — and the
+    // migration it asks for then couldn't be retried, because the half-created
+    // task blocked `ws new` for the same branch.
+    write_legacy_hook_file(&f, "app", "post-create");
+
+    let out = f.run(&["new", "api,app", "feat/legacy-pc"]);
+    assert_eq!(out.status.code(), Some(2), "expected a preflight refusal: {}", stderr(&out));
+    assert!(stderr(&out).contains("ws 0.6"), "must be the migration message: {}", stderr(&out));
+
+    // Nothing may exist yet — not even for `api`, which sorts before the repo
+    // that carries the stale file.
+    let task = f.path().join(".worktrees").join("feat-legacy-pc");
+    assert!(!task.join("api").exists(), "no worktree may survive a preflight refusal");
+    assert!(!task.join("app").exists(), "no worktree may survive a preflight refusal");
+
+    // And declaring the script suppresses it — the preflight must mirror
+    // `resolve`'s condition, not refuse a repo that has already migrated while
+    // still owning the old file.
+    f.add_hook("app", "post-create", "echo MIGRATED");
+    f.run_ok(&["new", "api,app", "feat/legacy-pc2"]);
 }

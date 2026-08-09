@@ -148,18 +148,38 @@ are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 
 ---
 
-## Legacy hook files
+## The `.ws-hooks/` directory
 
-Before `scripts`, events were files at `.ws-hooks/<repo>/<event>`. They still
-work: they run from the **workspace root** with the worktree path as `$1`, and
-receive the same `WS_*` variables.
+Anything longer than a line belongs in a shell file rather than inline JSON.
+`.ws-hooks/` at the workspace root is where those live — `ws init` scaffolds a
+starter `.ws-hooks/<repo>-<event>.sh` per event, and `ws` pushes the whole
+directory to the server on each `up`, so a shared script works the same in both
+places. Point a `scripts` entry at one:
 
-They're superseded. A legacy hook file exists only on the client, so an offloaded
-workspace can't run one — `ws list`, for instance, skips a legacy `status` hook
-when the stack is on a server. Prefer `scripts`, and keep shared shell in
-`.ws-hooks/*.sh` invoked from a `scripts` entry, which `ws` pushes to the server
-for you.
+```json
+"scripts": { "up": ".ws-hooks/api-up.sh" }
+```
+
+Nothing in `.ws-hooks/` runs unless a `scripts` entry names it. The scaffolded
+files are inert until you declare one.
 
 Scripts must be executable. `ws` restores the executable bit on the copy it
 pushes to a server, but a client-side script (notably `prepare`) that an editor
 rewrote to `644` will fail with a bare `Permission denied` — `chmod +x` it.
+
+### Upgrading from hook files (pre-0.6)
+
+`ws` used to *discover* an executable `.ws-hooks/<repo>/<event>` and run it with
+no `scripts` entry at all. That mechanism is gone; a leftover file now fails the
+repo with the line to paste rather than silently doing nothing:
+
+```json
+"scripts": { "up": ".ws-hooks/api/up" }
+```
+
+The file itself keeps working, but its contract changed with the move — it now
+runs with **cwd = the worktree** instead of the workspace root, and the worktree
+path arrives as **`$WS_WORKTREE`** instead of `$1`. So `grep -n '\$1' .ws-hooks/`
+and fix those, and prefix a `cd "$WS_WORKSPACE_ROOT"` anywhere the script relied
+on running from the root. In exchange the hook becomes remote-capable: a declared
+script runs on an offloaded workspace, which a discovered file never could.

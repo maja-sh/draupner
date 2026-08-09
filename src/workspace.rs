@@ -92,20 +92,6 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     out
 }
 
-/// Branch-scoped [`worktrees`]; matches on task-dir name as a fallback so detached-HEAD worktrees still resolve.
-pub fn worktrees_for(
-    root: &Path,
-    cfg: &crate::config::WsConfig,
-    branch: &str,
-) -> Vec<(String, PathBuf)> {
-    let task = sanitize_branch(branch);
-    worktrees(root, cfg)
-        .into_iter()
-        .filter(|w| w.branch.as_deref() == Some(branch) || w.task.as_deref() == Some(task.as_str()))
-        .map(|w| (w.repo, w.path))
-        .collect()
-}
-
 /// Directories under `.worktrees/` git doesn't know — reported by `ws clean`, never acted
 /// on, because silently syncing a leftover to a server as if it were real is the failure mode.
 pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {

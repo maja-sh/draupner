@@ -7,7 +7,6 @@ mod git;
 mod hooks;
 mod inject;
 mod mutagen;
-mod obs;
 mod ops;
 mod ports;
 mod probe;
@@ -21,7 +20,6 @@ mod workspace;
 
 fn main() {
     compat::check();
-    obs::init_logging();
     signal::install();
     if let Err(e) = cli::run() {
         let exit = e.downcast_ref::<ops::ExitError>();
