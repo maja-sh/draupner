@@ -8,6 +8,10 @@ license = "MIT"
 name = "ws"
 path = "src/main.rs"
 
+[[bin]]
+name = "ws-dns-spike"
+path = "src/bin/ws_dns_spike.rs"
+
 [dependencies]
 clap             = { version = "4", features = ["derive"] }
 serde            = { version = "1", features = ["derive"] }
@@ -19,9 +23,14 @@ console          = "0.15"
 glob             = "0.3"
 indicatif        = "0.17"
 ctrlc            = "3"
+hickory-server   = "0.24"
+hickory-proto    = "0.24"
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+async-trait      = "0.1"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile         = "3"
+hickory-resolver = "0.24"
 
 [profile.release]
 strip = true
