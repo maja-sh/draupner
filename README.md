@@ -28,7 +28,7 @@ Each release attaches prebuilt binaries for `aarch64-apple-darwin` and
 `x86_64-unknown-linux-gnu`:
 
 ```sh
-gh release download vX.Y.Z --repo maja-sh/workspaces -p '*aarch64-apple-darwin*' -O ws
+gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O ws
 chmod +x ws && mv ws ~/.local/bin/ws
 ```
 
