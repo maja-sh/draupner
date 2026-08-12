@@ -415,6 +415,7 @@ fn sweep_host(
                 .collect();
             let health = crate::supervise::health_settled(site, &name, &allocated, BIND_GRACE);
             let crashed = health == Some(crate::supervise::Health::Crashed);
+            let squatted = matches!(&health, Some(crate::supervise::Health::Squatted(_)));
 
             match &health {
                 // Died after launch = failed `up`, not a green line with caveats.
@@ -458,7 +459,10 @@ fn sweep_host(
                 // Best-effort (see the `down` arm): a host service keeps its bound `WS_PORT`.
                 let _ = sync_routes(cfg, site, root, sanitized, repo, "up");
             }
-            sync_forwards(cfg, root, branch, sanitized, repo, "up");
+            // A squatted port belongs to some other process; forwarding `localhost:<port>` there would silently tunnel client traffic to the squatter.
+            if !squatted {
+                sync_forwards(cfg, root, branch, sanitized, repo, "up");
+            }
         }
         Err(e) => {
             crate::ui::step(repo, "start").fail(&format!("{e}"));
