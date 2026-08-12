@@ -6,13 +6,14 @@ runs the Caddy container) — no prompts, no privilege. What's left is the stuff
 expects to find, and three bits that genuinely need root. How they're delivered
 depends on the host:
 
-- **macOS host** (workspace owner's machine): `ws setup` walks each gap
+- **macOS workspace owner's machine**: `ws setup` walks each gap
   interactively — shows the exact command, `[R]un / [S]kip / show-me`. `[R]un`
   shells the command with its own `sudo`, so `sudo` prompts you directly; `ws`
   never sees your password.
-- **Linux host / remote offload box**: the bits live in a versioned, readable
-  script here that you run yourself. The script *is* the transparency — read it,
-  then run it. `ws setup` on Linux reports what's missing and points you here.
+- **Linux offload server**: the bits live in a versioned, readable script here
+  that you run on the server yourself. The script *is* the transparency — read
+  it, then run it. `ws setup` and `ws remote check` will point at this script
+  when they find something missing.
 
 ## Prerequisites
 

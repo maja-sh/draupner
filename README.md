@@ -27,8 +27,7 @@ Several tasks can run at once. Nothing is shared between them unless you say so.
 
 ## Install
 
-Each release attaches prebuilt binaries for `aarch64-apple-darwin` and
-`x86_64-unknown-linux-gnu`:
+Each release attaches a prebuilt binary for `aarch64-apple-darwin` (Apple Silicon):
 
 ```sh
 gh release download vX.Y.Z --repo hbackman/wsx -p '*aarch64-apple-darwin*' -O ws
@@ -49,16 +48,16 @@ On the machine you run `ws` from:
 |---|---|
 | `git` | worktrees — always |
 | `docker` or `podman` | `kind: container` repos — whichever is installed, docker first |
-| `ss` (Linux) / `lsof` (macOS) | reporting whether a host process is serving its port |
+| `lsof` | reporting whether a host process is serving its port |
 | `mutagen` | offloading a workspace to a server ([docs/offload.md](docs/offload.md)) |
 
 Per-worktree **hostnames** are optional and need a little more: a wildcard DNS
 answer for `*.<domain>` and a trusted local CA. `ws setup` reports what's
-missing and, on macOS, offers to run each privileged step for you (showing the
-command first — it never handles your password). On Linux, and on an offload
-server, the same ground is covered by the readable script in
-[`server-setup/`](server-setup/). Without a `domain` configured, `ws` skips
-routing entirely and services are reached on allocated ports.
+missing and offers to run each privileged step for you (showing the command
+first — it never handles your password). On an offload server, the same ground
+is covered by the readable script in [`server-setup/`](server-setup/). Without
+a `domain` configured, `ws` skips routing entirely and services are reached on
+allocated ports.
 
 ---
 
@@ -199,8 +198,8 @@ cargo test
 
 Tests run the real mechanisms — real git repos, real worktrees, real detached
 processes — in temporary fixtures with `$HOME` redirected. A few are gated on an
-external binary (`docker compose`, `ss`/`lsof`, `python3`) and skip with a note
+external binary (`docker compose`, `lsof`, `python3`) and skip with a note
 rather than failing when it isn't there.
 
-Releases are cut by pushing a version tag; CI builds each target natively and
-attaches the binaries.
+Releases are cut by pushing a version tag; CI builds the macOS binary natively
+and attaches it to the release.
