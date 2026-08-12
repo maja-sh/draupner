@@ -440,14 +440,24 @@ fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
 }
 
 /// Machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
-pub fn global_dir() -> PathBuf {
+///
+/// Errors when neither `XDG_CONFIG_HOME` nor `HOME` is set — falling back to `.`
+/// would let a hostile clone's `./.config/ws/config.toml` be trusted as global config.
+pub fn global_dir() -> Result<PathBuf> {
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
         if !x.is_empty() {
-            return PathBuf::from(x).join("ws");
+            return Ok(PathBuf::from(x).join("ws"));
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("ws")
+    let home = std::env::var("HOME").map_err(|_| {
+        anyhow::anyhow!(
+            "cannot locate global ws config: neither $XDG_CONFIG_HOME nor $HOME is set"
+        )
+    })?;
+    if home.is_empty() {
+        anyhow::bail!("cannot locate global ws config: $HOME is empty");
+    }
+    Ok(PathBuf::from(home).join(".config").join("ws"))
 }
 
 /// Cross-workspace defaults at `~/.config/ws/config.toml`. `deny_unknown_fields` because `ws config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `ws` wrote before a downgrade) would be silently dropped on next write.
@@ -473,13 +483,13 @@ fn unknown_key(key: &str) -> anyhow::Error {
 }
 
 impl GlobalConfig {
-    pub fn path() -> PathBuf {
-        global_dir().join("config.toml")
+    pub fn path() -> Result<PathBuf> {
+        Ok(global_dir()?.join("config.toml"))
     }
 
     /// Missing file is empty; malformed is an error — never silently drop a user's edits.
     pub fn load() -> Result<Self> {
-        let p = Self::path();
+        let p = Self::path()?;
         let raw = match std::fs::read_to_string(&p) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -489,10 +499,11 @@ impl GlobalConfig {
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = global_dir();
+        let dir = global_dir()?;
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let s = toml::to_string_pretty(self).context("serialize global config")?;
-        std::fs::write(Self::path(), s).with_context(|| format!("write {}", Self::path().display()))
+        let path = Self::path()?;
+        std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))
     }
 
     pub fn get(&self, key: &str) -> Result<Option<&str>> {

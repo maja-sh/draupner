@@ -50,8 +50,9 @@ pub fn https_port() -> u16 {
             return p;
         }
     }
-    std::fs::read_to_string(config_dir().join("https_port"))
+    config_dir()
         .ok()
+        .and_then(|d| std::fs::read_to_string(d.join("https_port")).ok())
         .and_then(|s| s.trim().parse().ok())
         .filter(|&p| p != 0)
         .unwrap_or(DEFAULT_HTTPS_PORT)
@@ -100,7 +101,7 @@ fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
 }
 
 pub fn set_https_port(port: u16) -> Result<()> {
-    let dir = config_dir();
+    let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("https_port"), format!("{port}\n"))
         .with_context(|| "persist https_port".to_string())
@@ -112,15 +113,16 @@ pub fn admin_port() -> u16 {
             return p;
         }
     }
-    std::fs::read_to_string(config_dir().join("admin_port"))
+    config_dir()
         .ok()
+        .and_then(|d| std::fs::read_to_string(d.join("admin_port")).ok())
         .and_then(|s| s.trim().parse().ok())
         .filter(|&p| p != 0)
         .unwrap_or(DEFAULT_ADMIN_PORT)
 }
 
 pub fn set_admin_port(port: u16) -> Result<()> {
-    let dir = config_dir();
+    let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("admin_port"), format!("{port}\n"))
         .with_context(|| "persist admin_port".to_string())
@@ -474,7 +476,7 @@ pub fn root_ca_pem(site: &Site) -> Result<String> {
 pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     // Fetched at `site` where Caddy runs, written to the HOST dir — CA is trusted in the client's store.
     let pem = root_ca_pem(site)?;
-    let dir = config_dir();
+    let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("ws-caddy-root.crt");
     std::fs::write(&path, pem).with_context(|| format!("write {}", path.display()))?;
@@ -493,27 +495,27 @@ fn container_running(site: &Site, runtime: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn config_dir() -> PathBuf {
+fn config_dir() -> Result<PathBuf> {
     crate::config::global_dir()
 }
 
 /// Canonicalized locally so the bind-mount source is absolute (relative paths are runtime-rejected).
-fn config_dir_at(site: &Site) -> PathBuf {
+fn config_dir_at(site: &Site) -> Result<PathBuf> {
     match site {
         Site::Local => {
-            let dir = config_dir();
+            let dir = config_dir()?;
             std::fs::create_dir_all(&dir).ok();
-            std::fs::canonicalize(&dir).unwrap_or(dir)
+            Ok(std::fs::canonicalize(&dir).unwrap_or(dir))
         }
         Site::Remote { .. } => {
-            PathBuf::from(site.home_path(".config/ws").expect("remote site carries a home"))
+            Ok(PathBuf::from(site.home_path(".config/ws").expect("remote site carries a home")))
         }
     }
 }
 
 
 fn write_boot_config(site: &Site) -> Result<String> {
-    let dir = config_dir_at(site).to_string_lossy().into_owned();
+    let dir = config_dir_at(site)?.to_string_lossy().into_owned();
     let json = serde_json::to_string_pretty(&boot_config())? + "\n";
     site.write_file(&format!("{dir}/caddy.json"), &json)?;
     Ok(dir)
