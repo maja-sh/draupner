@@ -1,8 +1,14 @@
 [package]
-name = "wsx"
-version = "0.6.0"
-edition = "2021"
-license = "MIT"
+name         = "wsx"
+version      = "0.6.0"
+edition      = "2021"
+rust-version = "1.75"
+license      = "MIT"
+description  = "Multi-repo git-worktree orchestration — task-scoped, de-conflicted stacks per branch."
+repository   = "https://github.com/maja-sh/wsx"
+readme       = "README.md"
+keywords     = ["git-worktree", "workspace", "orchestration", "containers", "multi-repo"]
+categories   = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "ws"
