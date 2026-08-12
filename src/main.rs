@@ -1,3 +1,10 @@
+//! `wsx` — multi-repo git-worktree orchestration.
+//!
+//! The `ws` binary treats a task (one branch across N repos) as the unit of work:
+//! it spawns matching worktrees, brings each repo's stack up with de-conflicted
+//! ports and hostnames, and tears the whole set down again. See the README for
+//! usage; module-level docs describe internals.
+
 mod caddy;
 mod cli;
 mod compat;
