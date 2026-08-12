@@ -431,7 +431,9 @@ fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
     }
 
     // Lexically clean, but a committed symlink on the way still lands outside; canonicalise the deepest existing ancestor and require it under the worktree.
-    let Ok(root) = worktree.canonicalize() else { return Ok(()) };
+    let root = worktree
+        .canonicalize()
+        .with_context(|| format!("canonicalize worktree {}", worktree.display()))?;
     let joined = worktree.join(rel);
     let mut probe = joined.as_path();
     loop {
