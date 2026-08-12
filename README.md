@@ -2,6 +2,9 @@
 
 Multi-repo worktree orchestration.
 
+> **Platform:** macOS is the only supported platform today. Linux support is
+> on the roadmap.
+
 One command creates a git worktree for the same branch across several repos,
 brings each repo's stack up in isolation — its own containers, its own ports, its
 own hostnames — and tears the whole thing down again.
