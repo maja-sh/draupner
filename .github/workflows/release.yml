@@ -2,9 +2,9 @@ name: release
 
 # Cut a release by pushing a version tag:
 #   git tag v0.1.0 && git push origin v0.1.0
-# Each target builds natively (no cross-compilation) and the binaries are
-# attached to a GitHub Release. Install on a machine with:
-#   gh release download vX.Y.Z --repo maja-sh/workspaces -p '*<target>*' -O ws
+# Builds natively on macOS (no cross-compilation) and attaches the binary to a
+# GitHub Release. Install with:
+#   gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O ws
 on:
   push:
     tags: ['v*']
@@ -12,19 +12,17 @@ on:
 jobs:
   build:
     strategy:
-      # Don't cancel the other targets when one fails — a platform-specific
-      # break should still leave the others' binaries to inspect.
+      # Kept as a matrix even with one entry so re-adding targets is one line
+      # and a per-target break wouldn't cancel the others.
       fail-fast: false
       matrix:
         include:
           - os: macos-14        # Apple Silicon
             target: aarch64-apple-darwin
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-        # Intel macOS (x86_64-apple-darwin) is deliberately omitted: no Intel Mac
-        # in this setup, and GitHub's Intel runners are scarce and being retired,
-        # so gating every release on one just stalls the targets that matter. Add
-        # a `{ os: macos-13, target: x86_64-apple-darwin }` entry if that changes.
+        # Deliberately omitted (add back as a matrix entry when a target lands):
+        # - `x86_64-unknown-linux-gnu` — Linux is on the README roadmap but not shipping.
+        # - `x86_64-apple-darwin` — no Intel Mac in this setup, and GitHub's Intel
+        #   runners are scarce and being retired.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +39,7 @@ jobs:
         run: cargo nextest run
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-      # Name the asset by target so all three can live on one release.
+      # Name the asset by target so re-added targets slot in without churn.
       - name: Rename
         run: cp target/${{ matrix.target }}/release/ws ws-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
