@@ -197,7 +197,11 @@ fn error_existing_worktree() {
 }
 
 #[test]
-fn hook_exits_nonzero_leaves_worktree() {
+fn hook_exits_nonzero_rolls_back_the_worktree() {
+    // `ws new` is atomic across every fallible step past `create_worktree`: a
+    // post-create hook that exits non-zero unwinds the worktree so a rerun
+    // isn't blocked by half-created state (previously the worktree stayed and
+    // the user had to `ws rm` before retrying).
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "post-create", "echo 'failing'; exit 1");
 
@@ -208,8 +212,35 @@ fn hook_exits_nonzero_leaves_worktree() {
     assert!(err.contains("exited 1"), "expected exit code in error:\n{err}");
 
     assert!(
-        f.path().join(".worktrees/feat-broke/api").is_dir(),
-        "worktree should be left in place after hook failure"
+        !f.path().join(".worktrees/feat-broke/api").exists(),
+        "worktree must be rolled back when the hook fails, not left orphaned"
+    );
+}
+
+#[test]
+fn second_repo_hook_failure_rolls_back_the_first_repo_too() {
+    // The scenario the pre-oss review flagged: two repos, second fails, first
+    // was fully created (worktree + branch). Without cross-repo rollback the
+    // first repo's worktree lingered and the only path forward was `ws rm`
+    // (which then wiped the sibling too), so the user paid the same cost for
+    // a partial success. Both must unwind so a retry is clean.
+    let f = WorkspaceFixture::with_repos(&["api", "web"]);
+    f.add_hook("web", "post-create", "echo failing; exit 1");
+
+    let out = f.run(&["new", "api,web", "feat/broke"]);
+    assert!(!out.status.success(), "expected failure when repo 2's hook exits non-zero");
+
+    assert!(
+        !f.path().join(".worktrees/feat-broke/api").exists(),
+        "repo 1 must be rolled back after repo 2 fails, not left orphaned"
+    );
+    assert!(
+        !f.path().join(".worktrees/feat-broke/web").exists(),
+        "repo 2's partial worktree must be rolled back"
+    );
+    assert!(
+        !f.path().join(".worktrees/feat-broke").exists(),
+        "the empty task dir must be swept once its repos are gone"
     );
 }
 

@@ -62,116 +62,138 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     std::fs::create_dir_all(&task_dir)
         .with_context(|| format!("create {}", task_dir.display()))?;
 
-    let mut wt_paths = Vec::new();
+    let mut completed: Vec<CompletedRepo> = Vec::new();
 
     for repo_name in &requested {
+        // Deliberately outside the IIFE below: SIGINT is the user asking to
+        // stop, not an error to unwind — completed repos stay put so a Ctrl-C
+        // between repos preserves the work already done. Step failures inside
+        // the IIFE do trigger cross-repo rollback.
         super::bail_if_interrupted()?;
 
         let repo_entry = cfg.repos.iter().find(|r| r.name() == repo_name).unwrap();
         let repo_path = ws.root.join(repo_name);
         let wt_path = task_dir.join(repo_name);
+        // Captured before `create_worktree` since that's what would create it —
+        // rollback needs to know whether to also delete the branch.
+        let branch_was_new = !git::ref_exists(&repo_path, &format!("refs/heads/{branch}"));
 
-        fetch_origin(&repo_path);
+        // IIFE wraps every fallible step so a `?` failure lands in one arm —
+        // the outer match then rolls back this repo (if a worktree exists) and
+        // every previously-completed repo in reverse, rather than leaving a
+        // half-created task the user can't `ws rm` without hand-cleanup.
+        let created: Result<()> = (|| {
+            fetch_origin(&repo_path);
 
-        let step = crate::ui::step(repo_name, "Worktree created");
-        create_worktree(&repo_path, branch, &wt_path)
-            .with_context(|| format!("create worktree for {repo_name}"))?;
-        step.ok();
-
-        // Anything ws drops into the worktree gets registered here so it never reads as untracked.
-        let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
-
-        // Seeding `vendor/` from the main checkout only makes sense for a
-        // gitignored, per-host one. A repo that *commits* its vendor/ already has
-        // it in the fresh worktree (`git worktree add` checked it out), and
-        // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
-        // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
-        // exclude below stops git descending, and pushed over SSH on a remote
-        // workspace since a tracked vendor/ is source and isn't sync-ignored.
-        if repo_path.join("composer.json").is_file()
-            && repo_path.join("vendor").is_dir()
-            && !wt_path.join("vendor").exists()
-        {
-            let step = crate::ui::step(repo_name, "vendor/ copied");
-            if let Err(e) = copy_vendor(&repo_path, &wt_path) {
-                remove_worktree(&repo_path, &wt_path);
-                return Err(e.context("vendor/ copy failed"));
-            }
-            excludes.push("/vendor".to_string());
+            let step = crate::ui::step(repo_name, "Worktree created");
+            create_worktree(&repo_path, branch, &wt_path)
+                .with_context(|| format!("create worktree for {repo_name}"))?;
             step.ok();
-        }
 
-        #[cfg(unix)]
-        if repo_path.join("node_modules").is_dir() {
-            let step = crate::ui::step(repo_name, "node_modules symlinked");
-            symlink_node_modules(repo_name, &wt_path)?;
-            excludes.push("/node_modules".to_string());
-            step.ok();
-        }
+            // Anything ws drops into the worktree gets registered here so it never reads as untracked.
+            let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
 
-        // Runs before the exclude registration (so copied paths join it), before the remote sync (so they ride it up), and before post-create (so build steps see them).
-        let copies = repo_entry.copy();
-        if !copies.is_empty() {
-            let step = crate::ui::step(repo_name, "files copied");
-            match seed_copies(&repo_path, &wt_path, copies) {
-                Ok(dests) => {
-                    // Best-effort: also register the sources in main so its `git status` stays clean, but never block worktree creation on it.
-                    let _ = git::add_worktree_excludes(&repo_path, &dests);
-                    excludes.extend(dests);
-                    step.ok()
-                }
-                Err(e) => {
-                    remove_worktree(&repo_path, &wt_path);
-                    return Err(e.context(format!("copy for {repo_name}")));
+            // Seeding `vendor/` from the main checkout only makes sense for a
+            // gitignored, per-host one. A repo that *commits* its vendor/ already has
+            // it in the fresh worktree (`git worktree add` checked it out), and
+            // `cp -R src dst` onto an existing dst copies *into* it — landing a silent
+            // full duplicate at `<wt>/vendor/vendor`, invisible because the `/vendor`
+            // exclude below stops git descending, and pushed over SSH on a remote
+            // workspace since a tracked vendor/ is source and isn't sync-ignored.
+            if repo_path.join("composer.json").is_file()
+                && repo_path.join("vendor").is_dir()
+                && !wt_path.join("vendor").exists()
+            {
+                let step = crate::ui::step(repo_name, "vendor/ copied");
+                copy_vendor(&repo_path, &wt_path).context("vendor/ copy failed")?;
+                excludes.push("/vendor".to_string());
+                step.ok();
+            }
+
+            #[cfg(unix)]
+            if repo_path.join("node_modules").is_dir() {
+                let step = crate::ui::step(repo_name, "node_modules symlinked");
+                symlink_node_modules(repo_name, &wt_path)?;
+                excludes.push("/node_modules".to_string());
+                step.ok();
+            }
+
+            // Runs before the exclude registration (so copied paths join it), before the remote sync (so they ride it up), and before post-create (so build steps see them).
+            let copies = repo_entry.copy();
+            if !copies.is_empty() {
+                let step = crate::ui::step(repo_name, "files copied");
+                let dests = seed_copies(&repo_path, &wt_path, copies)
+                    .with_context(|| format!("copy for {repo_name}"))?;
+                // Best-effort: also register the sources in main so its `git status` stays clean, but never block worktree creation on it.
+                let _ = git::add_worktree_excludes(&repo_path, &dests);
+                excludes.extend(dests);
+                step.ok();
+            }
+
+            // A symlinked `node_modules` is a file to git, so a repo's `node_modules/` (dir-only) rule won't match it and the worktree reads dirty without this.
+            git::add_worktree_excludes(&wt_path, &excludes)
+                .with_context(|| format!("register worktree excludes for {repo_name}"))?;
+
+            // Runs here (not on every `ws up`) because it inspects committed static properties of the compose file; advisory, never blocks.
+            let lint = crate::compose::lint(cfg.runtime(), &wt_path);
+            if !lint.is_empty() {
+                crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
+            }
+
+            // Sync first so the server-side derive/override and post-create below run against files that already exist there.
+            if let Some(r) = &cfg.remote {
+                let step = crate::ui::step(repo_name, "Sync created");
+                let session = mutagen::session_name(branch, repo_name);
+                let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
+                let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
+                let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
+                    // Settle the initial push before we derive/render against the server.
+                    .and_then(|()| {
+                        let _ = mutagen::flush(&session);
+                        // A session whose transfer fails still reports `Watching for changes`; without this verification the step lies green and the next step fails somewhere confusing.
+                        mutagen::verify_beta(&r.connection, &remote_path)
+                    });
+                match synced {
+                    Ok(()) => step.ok(),
+                    Err(e) => {
+                        step.fail(&format!("{e}"));
+                        return Err(super::op_failure(format!("mutagen sync for {repo_name}: {e}")));
+                    }
                 }
             }
-        }
 
-        // A symlinked `node_modules` is a file to git, so a repo's `node_modules/` (dir-only) rule won't match it and the worktree reads dirty without this.
-        git::add_worktree_excludes(&wt_path, &excludes)
-            .with_context(|| format!("register worktree excludes for {repo_name}"))?;
+            // Render templates before post-create so one-time setup sees the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
+            let extra_env = inject::prepare(
+                &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
+            )?;
 
-        // Runs here (not on every `ws up`) because it inspects committed static properties of the compose file; advisory, never blocks.
-        let lint = crate::compose::lint(cfg.runtime(), &wt_path);
-        if !lint.is_empty() {
-            crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
-        }
+            run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
+            Ok(())
+        })();
 
-        // Sync first so the server-side derive/override and post-create below run against files that already exist there.
-        if let Some(r) = &cfg.remote {
-            let step = crate::ui::step(repo_name, "Sync created");
-            let session = mutagen::session_name(branch, repo_name);
-            let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
-            let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
-            let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
-                // Settle the initial push before we derive/render against the server.
-                .and_then(|()| {
-                    let _ = mutagen::flush(&session);
-                    // A session whose transfer fails still reports `Watching for changes`; without this verification the step lies green and the next step fails somewhere confusing.
-                    mutagen::verify_beta(&r.connection, &remote_path)
-                });
-            match synced {
-                Ok(()) => step.ok(),
-                Err(e) => {
-                    step.fail(&format!("{e}"));
-                    return Err(super::op_failure(format!("mutagen sync for {repo_name}: {e}")));
-                }
+        if let Err(e) = created {
+            if wt_path.exists() {
+                rollback_repo(&cfg, &ws.root, branch, &sanitized, repo_name, &wt_path, branch_was_new);
             }
+            for done in completed.iter().rev() {
+                rollback_repo(&cfg, &ws.root, branch, &sanitized, &done.name, &done.wt_path, done.branch_was_new);
+            }
+            // Remove the task dir if the rollback emptied it; a sibling task's
+            // dir (impossible for a fresh `ws new` but cheap to defend against)
+            // would keep `remove_dir` from succeeding, and that's fine.
+            let _ = std::fs::remove_dir(&task_dir);
+            return Err(e);
         }
-
-        // Render templates before post-create so one-time setup sees the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
-        let extra_env = inject::prepare(
-            &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
-        )?;
-
-        run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
-
-        wt_paths.push((repo_name.clone(), wt_path));
+        completed.push(CompletedRepo {
+            name: repo_name.clone(),
+            wt_path,
+            branch_was_new,
+        });
     }
 
-    let summary: Vec<String> = wt_paths
+    let summary: Vec<String> = completed
         .iter()
-        .map(|(name, path)| format!("{name}: {}", path.display()))
+        .map(|c| format!("{}: {}", c.name, c.wt_path.display()))
         .collect();
     crate::ui::summary_ok(&summary);
 
@@ -380,6 +402,44 @@ fn remove_worktree(repo: &Path, wt: &Path) {
         .args(["worktree", "remove", "--force"])
         .arg(wt)
         .output();
+}
+
+struct CompletedRepo {
+    name: String,
+    wt_path: PathBuf,
+    /// The branch didn't exist locally before `create_worktree` created it;
+    /// rollback deletes it so a rerun of `ws new` isn't blocked by a stray head.
+    branch_was_new: bool,
+}
+
+/// Undo everything one repo's iteration created, in reverse dependency order:
+/// mutagen session → port meta → git worktree → branch (only if we created it).
+/// Every step is best-effort — the caller propagates the original error, and
+/// blocking rollback on a secondary failure would eat the useful diagnostic.
+fn rollback_repo(
+    cfg: &config::WsConfig,
+    ws_root: &Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    wt_path: &Path,
+    branch_was_new: bool,
+) {
+    if cfg.remote.is_some() {
+        let _ = mutagen::terminate(&mutagen::session_name(branch, repo));
+    }
+    crate::ports::forget(ws_root, sanitized, repo);
+    let repo_path = ws_root.join(repo);
+    remove_worktree(&repo_path, wt_path);
+    if branch_was_new {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["branch", "-D", branch])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(test)]
