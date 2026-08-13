@@ -148,8 +148,11 @@ pub fn resolve(
     Ok(meta.ports)
 }
 
-/// Best-effort drop; a missing file is fine at teardown.
+/// Best-effort drop; a missing file is fine at teardown. Held under the same
+/// lock as `resolve` so a concurrent allocation's atomic rename can't land
+/// after our removal and leave a fresh-but-forgotten meta behind.
 pub fn forget(root: &Path, branch_sanitized: &str, repo: &str) {
+    let _lock = Lock::acquire(&meta_dir(root));
     let _ = std::fs::remove_file(meta_file(root, branch_sanitized, repo));
     let _ = std::fs::remove_file(override_file(root, branch_sanitized, repo));
 }
@@ -213,18 +216,42 @@ pub fn port_free_at(site: &Site, port: u16) -> bool {
 /// the holder crashed and steals the stale lock rather than stall forever.
 struct Lock {
     path: PathBuf,
-    held: bool,
+    /// Cookie written into the lock file at acquire time. `None` means acquire
+    /// fell through (e.g. read-only dir) and drop must stay a no-op.
+    cookie: Option<String>,
 }
 
 const LOCK_WINDOW: Duration = Duration::from_secs(5);
 
+/// `pid-nanos` — unique per acquire because two live processes can't share a
+/// PID and one process can't call `acquire` twice in the same nanosecond.
+/// Readable in the file so a stuck lock is diagnosable with `cat .lock`.
+fn lock_cookie() -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{pid}-{nanos}")
+}
+
 impl Lock {
     fn acquire(dir: &Path) -> Lock {
         let path = dir.join(".lock");
+        let cookie = lock_cookie();
         let mut deadline = Instant::now() + LOCK_WINDOW;
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Lock { path, held: true },
+                Ok(mut f) => {
+                    use std::io::Write;
+                    // A best-effort write: even if it fails, drop's cookie
+                    // check just reads an empty file and doesn't match, so the
+                    // worst case is that we don't clean up our own lock —
+                    // never that we clobber someone else's.
+                    let _ = f.write_all(cookie.as_bytes());
+                    let _ = f.sync_all();
+                    return Lock { path, cookie: Some(cookie) };
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
                         // Steal, then reset the deadline so a legitimate re-acquirer isn't thrashed.
@@ -234,7 +261,7 @@ impl Lock {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 // Other errors (e.g. read-only dir): give up on locking but still allocate.
-                Err(_) => return Lock { path, held: false },
+                Err(_) => return Lock { path, cookie: None },
             }
         }
     }
@@ -242,7 +269,12 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        if self.held {
+        let Some(cookie) = &self.cookie else { return };
+        // The cookie check exists exactly for the case where our deadline
+        // expired, someone else stole and re-acquired, and unlinking now
+        // would leave them unlocked without knowing.
+        let Ok(actual) = std::fs::read_to_string(&self.path) else { return };
+        if actual.trim() == cookie {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -382,5 +414,43 @@ mod tests {
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta_file(root, "feat-x", "api"), "corrupt").unwrap();
         assert!(load(root, "feat-x", "api").is_empty(), "lossy path defaults on a corrupt file");
+    }
+
+    #[test]
+    fn lock_drop_removes_when_the_cookie_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".lock");
+        let lock = Lock::acquire(dir.path());
+        assert!(path.exists(), "acquire must create the lock file");
+        drop(lock);
+        assert!(!path.exists(), "matching cookie must remove on drop");
+    }
+
+    #[test]
+    fn lock_drop_leaves_a_foreign_cookie_alone() {
+        // The scenario: A's steal window expires, B removes A's file and
+        // creates B's fresh one; then A's drop finally fires. Without the
+        // cookie check, A would unlink B's live lock and leave B unlocked.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".lock");
+        let a = Lock::acquire(dir.path());
+        std::fs::remove_file(&path).expect("simulate the steal");
+        std::fs::write(&path, "999-someone-elses-cookie").expect("write B's cookie");
+        drop(a);
+        assert!(path.exists(), "A's drop must not unlink B's fresh lock");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "999-someone-elses-cookie",
+            "B's cookie must survive A's drop",
+        );
+    }
+
+    #[test]
+    fn lock_drop_is_a_noop_when_acquire_fell_through() {
+        // Acquire against a non-existent directory yields `Lock { cookie: None }`;
+        // drop must stay a no-op instead of panicking or removing something.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        drop(Lock::acquire(&missing));
     }
 }
