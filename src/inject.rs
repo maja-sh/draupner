@@ -685,10 +685,10 @@ mod tests {
             &services, &BTreeMap::new(), false, "feat-x-api", "feat-x", "api", "myapp.test",
         );
         assert_eq!(specs.len(), 2, "only HTTP services route: {:?}", specs.iter().map(|r| &r.id).collect::<Vec<_>>());
-        let web = specs.iter().find(|r| r.id == "ws-feat-x-api-web").unwrap();
+        let web = specs.iter().find(|r| r.id == "ws-6_feat-x-3_api-3_web").unwrap();
         assert_eq!(web.hostname, "feat-x.web.myapp.test");
         assert_eq!(web.upstream, "feat-x-api-web-1:80");
-        let admin = specs.iter().find(|r| r.id == "ws-feat-x-api-admin").unwrap();
+        let admin = specs.iter().find(|r| r.id == "ws-6_feat-x-3_api-5_admin").unwrap();
         assert_eq!(admin.hostname, "feat-x.admin.myapp.test");
         assert_eq!(admin.upstream, "feat-x-api-admin-1:8080");
     }
@@ -702,7 +702,7 @@ mod tests {
         let ports = [("web".to_string(), 20001u16)].into_iter().collect();
         let specs = route_specs(&services, &ports, true, "", "feat-x", "svc", "myapp.test");
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].id, "ws-feat-x-svc-web");
+        assert_eq!(specs[0].id, "ws-6_feat-x-3_svc-3_web");
         assert_eq!(specs[0].upstream, "host.containers.internal:20001");
         assert!(!specs[0].wildcard, "web is not a wildcard service");
     }
