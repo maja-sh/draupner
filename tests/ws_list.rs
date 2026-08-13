@@ -83,7 +83,7 @@ fn recorded_host_ports_are_shown_as_sub_rows() {
     let meta_dir = f.path().join(".ws-meta");
     std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(
-        meta_dir.join("feat-ports-api.json"),
+        meta_dir.join("10_feat-ports-3_api.json"),
         r#"{"ports":{"mysql":20021,"redis":20022}}"#,
     )
     .unwrap();

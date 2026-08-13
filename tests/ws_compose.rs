@@ -197,8 +197,8 @@ fn container_override_deconflicts_raw_tcp_ports() {
     assert!(err_b.contains("PROJ=feat-b-api"), "project name not namespaced:\n{err_b}");
 
     // HTTP services drop their host publish (`!reset []`) so they're only reachable via Caddy on `ws-net`.
-    let ov_a = read_override(&f, "feat-a-api");
-    let ov_b = read_override(&f, "feat-b-api");
+    let ov_a = read_override(&f, "feat-a", "api");
+    let ov_b = read_override(&f, "feat-b", "api");
     assert!(ov_a.contains("db:") && ov_a.contains("ports: !override"), "no db override:\n{ov_a}");
     assert!(ov_a.contains("ws-net"), "HTTP web should join ws-net:\n{ov_a}");
     assert!(ov_a.contains("web:\n    ports: !reset []"), "6.2b must !reset the HTTP publish:\n{ov_a}");
@@ -245,8 +245,8 @@ fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
 
     // And the derived raw-TCP service is reissued on a distinct host port per
     // worktree, so the two stacks don't fight over 3306 either.
-    let a = override_port(&read_override(&f, "feat-a-api"));
-    let b = override_port(&read_override(&f, "feat-b-api"));
+    let a = override_port(&read_override(&f, "feat-a", "api"));
+    let b = override_port(&read_override(&f, "feat-b", "api"));
     assert!((20000..40000).contains(&a), "db host port out of range ({a})");
     assert_ne!(a, b, "parallel worktrees must reissue db on distinct host ports");
 }
@@ -276,16 +276,19 @@ fn container_override_injects_declared_env() {
     f.run_ok(&["new", "api", "feat/a"]);
     assert!(stderr(&f.run_ok(&["up", "feat/a"])).contains("OK"), "merged config should validate");
 
-    let ov = read_override(&f, "feat-a-api");
+    let ov = read_override(&f, "feat-a", "api");
     assert!(
         ov.contains("APP_URL: \"https://feat-a.web.myapp.test\""),
         "declared env not materialized into the override:\n{ov}"
     );
 }
 
-fn read_override(f: &WorkspaceFixture, stem: &str) -> String {
+fn read_override(f: &WorkspaceFixture, branch_sanitized: &str, repo: &str) -> String {
+    // Build the filename via the same length-prefix scheme `ports::override_file`
+    // uses so this stays parity with the production naming.
+    let stem = format!("{}_{branch_sanitized}-{}_{repo}", branch_sanitized.len(), repo.len());
     std::fs::read_to_string(f.path().join(".ws-meta").join(format!("{stem}.override.yml")))
-        .unwrap_or_else(|e| panic!("read override for {stem}: {e}"))
+        .unwrap_or_else(|e| panic!("read override for {branch_sanitized}/{repo}: {e}"))
 }
 
 fn override_port(ov: &str) -> u16 {

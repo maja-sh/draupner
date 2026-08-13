@@ -207,8 +207,9 @@ pub(crate) fn override_path_at(
         None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
         // Absolute, same reason as `site_worktree_path`.
         Some(r) => format!(
-            "{}/.ws-meta/{branch_sanitized}-{repo}.override.yml",
-            site.abs_base(&r.worktree_base(root)).trim_end_matches('/')
+            "{}/.ws-meta/{}",
+            site.abs_base(&r.worktree_base(root)).trim_end_matches('/'),
+            ports::override_filename(branch_sanitized, repo),
         ),
     }
 }
@@ -631,7 +632,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(crate::ports::meta_dir(root)).unwrap();
         std::fs::write(
-            crate::ports::meta_dir(root).join("feat-app.json"),
+            crate::ports::meta_dir(root).join("4_feat-3_app.json"),
             r#"{"ports":{"web":20008}}"#,
         )
         .unwrap();
@@ -809,11 +810,11 @@ mod tests {
         };
         let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
         let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
-        assert_eq!(p, "/home/u/myapp/.ws-meta/feat-x-api.override.yml");
+        assert_eq!(p, "/home/u/myapp/.ws-meta/6_feat-x-3_api.override.yml");
 
         let local = WsConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
-        assert!(lp.ends_with(".ws-meta/feat-x-api.override.yml"), "{lp}");
+        assert!(lp.ends_with(".ws-meta/6_feat-x-3_api.override.yml"), "{lp}");
     }
 
     #[test]

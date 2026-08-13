@@ -209,7 +209,7 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     // up` no-ops on the name collision and `localhost:20000` still reaches
     // old-host while the port-forwards table claims the new one.
     std::fs::create_dir_all(ws.path().join(".ws-meta")).unwrap();
-    std::fs::write(ws.path().join(".ws-meta/feat-x-api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
+    std::fs::write(ws.path().join(".ws-meta/6_feat-x-3_api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
 
     let ok = ws.stub("ok", "exit 0");
     let rec = ws.arg_recorder("mutagen-rec");
