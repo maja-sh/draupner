@@ -103,8 +103,8 @@ fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
 pub fn set_https_port(port: u16) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(dir.join("https_port"), format!("{port}\n"))
-        .with_context(|| "persist https_port".to_string())
+    crate::config::write_atomic(&dir.join("https_port"), format!("{port}\n").as_bytes())
+        .context("persist https_port")
 }
 
 pub fn admin_port() -> u16 {
@@ -124,8 +124,8 @@ pub fn admin_port() -> u16 {
 pub fn set_admin_port(port: u16) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    std::fs::write(dir.join("admin_port"), format!("{port}\n"))
-        .with_context(|| "persist admin_port".to_string())
+    crate::config::write_atomic(&dir.join("admin_port"), format!("{port}\n").as_bytes())
+        .context("persist admin_port")
 }
 
 /// Repo included so same-named services in two repos don't collide on one `@id`.
@@ -479,7 +479,7 @@ pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("ws-caddy-root.crt");
-    std::fs::write(&path, pem).with_context(|| format!("write {}", path.display()))?;
+    crate::config::write_atomic(&path, pem.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -503,7 +503,7 @@ impl GlobalConfig {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let s = toml::to_string_pretty(self).context("serialize global config")?;
         let path = Self::path()?;
-        std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))
+        write_atomic(&path, s.as_bytes())
     }
 
     pub fn get(&self, key: &str) -> Result<Option<&str>> {
@@ -539,10 +539,54 @@ impl GlobalConfig {
     }
 }
 
+/// Crash-safe write: same-dir tempfile, fsync, rename over `path`.
+///
+/// A crash between the `open` and the `rename` leaves either the previous
+/// contents intact (rename hasn't happened) or the new contents fully
+/// written — never a truncated file. The tempfile is created in `path`'s
+/// parent because `rename` is only atomic within one filesystem.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .with_context(|| format!("write {}: path has no file name", path.display()))?;
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}.{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+
+    let staged = (|| -> Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("create tempfile {}", tmp.display()))?;
+        f.write_all(contents).with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e).context(format!("rename to {}", path.display())));
+    }
+    Ok(())
+}
+
 /// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `ws` writes.
 pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, format!("{s}\n")).with_context(|| format!("write {}", path.display()))
+    write_atomic(path, format!("{s}\n").as_bytes())
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
@@ -881,5 +925,36 @@ mod tests {
         assert_eq!(r.worktree_base(Path::new("/home/me/myapp")), "myapp");
         let r2 = RemoteConfig { workspace_path: Some("ws/x".into()), ..r };
         assert_eq!(r2.worktree_base(Path::new("/home/me/myapp")), "ws/x");
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_without_leaving_a_tempfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+
+        write_atomic(&path, b"initial contents that are long").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"initial contents that are long");
+
+        // A shorter overwrite must fully replace — the rename swaps a fresh inode in, so no trailing bytes survive.
+        write_atomic(&path, b"short").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"short");
+
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(strays.is_empty(), "unexpected tempfiles left behind: {strays:?}");
+    }
+
+    #[test]
+    fn write_atomic_leaves_the_previous_file_when_the_write_fails() {
+        // A path whose parent doesn't exist can't be written; the target must be untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good");
+        write_atomic(&good, b"kept").unwrap();
+        let bad = dir.path().join("nope").join("x");
+        assert!(write_atomic(&bad, b"anything").is_err());
+        assert_eq!(std::fs::read(&good).unwrap(), b"kept");
     }
 }
