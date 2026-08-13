@@ -25,7 +25,7 @@ fn ws_port_is_allocated_and_injected() {
     let port = port_in(&err);
     assert!((20000..40000).contains(&port), "port {port} out of range:\n{err}");
     assert!(
-        f.path().join(".ws-meta/feat-foo-api.json").is_file(),
+        f.path().join(".ws-meta/8_feat-foo-3_api.json").is_file(),
         "expected .ws-meta record"
     );
 }

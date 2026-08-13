@@ -179,7 +179,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(root.join(".ws-meta")).unwrap();
         std::fs::write(
-            root.join(".ws-meta/feat-x-api.json"),
+            root.join(".ws-meta/6_feat-x-3_api.json"),
             r#"{"ports":{"gone":20001,"web":20002},"services":{"web":{"port":8080}}}"#,
         )
         .unwrap();

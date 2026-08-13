@@ -1,5 +1,8 @@
-//! Per-service host-port allocation persisted in `.ws-meta/<branch>-<repo>.json`,
-//! stable across `up` runs and collision-free across parallel worktrees.
+//! Per-service host-port allocation persisted in
+//! `.ws-meta/<len>_<branch>-<len>_<repo>.json`, stable across `up` runs and
+//! collision-free across parallel worktrees. The length-prefix on each
+//! segment closes a `-`-split ambiguity where `(feat-web, api)` and
+//! `(feat, web-api)` used to share the same filename.
 
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashSet};
@@ -37,12 +40,27 @@ pub fn meta_dir(root: &Path) -> PathBuf {
     root.join(".ws-meta")
 }
 
+/// Filename stem = `<len>_<branch>-<len>_<repo>`. Length-prefixed segments
+/// so `(feat-web, api)` and `(feat, web-api)` can't collapse to the same
+/// file via the `-` split — bare concatenation had those two tuples both
+/// producing `feat-web-api.json`, so a `.ws-meta` file could be shared
+/// between two live tasks and their port maps would step on each other.
+fn meta_stem(branch_sanitized: &str, repo: &str) -> String {
+    format!("{}_{branch_sanitized}-{}_{repo}", branch_sanitized.len(), repo.len())
+}
+
 fn meta_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
-    meta_dir(root).join(format!("{branch_sanitized}-{repo}.json"))
+    meta_dir(root).join(format!("{}.json", meta_stem(branch_sanitized, repo)))
 }
 
 pub fn override_file(root: &Path, branch_sanitized: &str, repo: &str) -> PathBuf {
-    meta_dir(root).join(format!("{branch_sanitized}-{repo}.override.yml"))
+    meta_dir(root).join(override_filename(branch_sanitized, repo))
+}
+
+/// Just the basename — the remote path builder assembles its own dir prefix
+/// but still needs the identity-collision-proof filename shape.
+pub fn override_filename(branch_sanitized: &str, repo: &str) -> String {
+    format!("{}.override.yml", meta_stem(branch_sanitized, repo))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -443,6 +461,22 @@ mod tests {
             "999-someone-elses-cookie",
             "B's cookie must survive A's drop",
         );
+    }
+
+    #[test]
+    fn meta_file_does_not_collide_across_dash_split() {
+        // Bare `<branch>-<repo>.json` collapsed these two tuples onto the same
+        // filename, so two live tasks shared one port map and clobbered each
+        // other's allocations. Length-prefixed segments are provably unique.
+        let root = std::path::Path::new("/ws");
+        let a = meta_file(root, "feat-web", "api");
+        let b = meta_file(root, "feat", "web-api");
+        assert_ne!(a, b, "distinct tuples must produce distinct meta files: {a:?} vs {b:?}");
+
+        // Same guarantee for the override yml.
+        let a = override_file(root, "feat-web", "api");
+        let b = override_file(root, "feat", "web-api");
+        assert_ne!(a, b, "distinct tuples must produce distinct overrides: {a:?} vs {b:?}");
     }
 
     #[test]
