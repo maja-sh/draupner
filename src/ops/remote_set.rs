@@ -56,16 +56,12 @@ pub fn set(
 
     super::verify_remote_client(&new_remote, no_verify)?;
 
-    cfg.remote = Some(new_remote);
-    if domain.is_some() {
-        cfg.domain = domain;
-    }
-
-    let step = crate::ui::step("cfg", ".ws.json");
-    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
-    step.ok();
-
-    // Create-then-flush so the initial syncs run concurrently instead of serializing N pushes.
+    // Sync backfill runs *before* the cfg write: an interrupt mid-loop then
+    // leaves `.ws.json` still pointing at the old host, so the user can re-run
+    // from a consistent state instead of a workspace whose config points at a
+    // new host that has none of its files. Every helper below reads the flip
+    // target from local args (`connection`, `base`, `new_remote`) rather than
+    // `cfg.remote`, so the in-memory cfg staying stale here is deliberate.
     let mut created = Vec::new();
     let mut failed = false;
     // git-sourced enumeration: unrecognised directories aren't ours to push to a server.
@@ -110,6 +106,16 @@ pub fn set(
     for session in &created {
         let _ = mutagen::flush(session);
     }
+
+    // Cfg commits only after the syncs settle so a mid-flip crash leaves the
+    // workspace pointing at a host that still has its files.
+    cfg.remote = Some(new_remote);
+    if domain.is_some() {
+        cfg.domain = domain;
+    }
+    let step = crate::ui::step("cfg", ".ws.json");
+    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
+    step.ok();
 
     let mut summary = vec![format!("remote  → {connection}:{base}")];
     if !created.is_empty() {
