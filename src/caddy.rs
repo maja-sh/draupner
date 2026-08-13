@@ -129,8 +129,16 @@ pub fn set_admin_port(port: u16) -> Result<()> {
 }
 
 /// Repo included so same-named services in two repos don't collide on one `@id`.
+///
+/// Each segment is length-prefixed (`<len>_<value>`) so `(feat-web, api, x)`
+/// and `(feat, web-api, x)` can't collapse to the same id via the `-` split —
+/// bare concatenation had those two tuples producing `ws-feat-web-api-x` and
+/// the second worktree silently clobbered the first's route.
 pub fn route_id(branch_sanitized: &str, repo: &str, service: &str) -> String {
-    format!("ws-{}-{}-{}", id_part(branch_sanitized), id_part(repo), id_part(service))
+    let a = id_part(branch_sanitized);
+    let b = id_part(repo);
+    let c = id_part(service);
+    format!("ws-{}_{a}-{}_{b}-{}_{c}", a.len(), b.len(), c.len())
 }
 
 /// The id becomes one segment of the admin API path, and `.ws.json` (attacker-controlled) supplies `repo`/`service`; a slash or `..` in either would let curl's dot-segment normalisation retarget the request.
@@ -694,11 +702,27 @@ mod tests {
 
     #[test]
     fn route_id_is_stable_and_namespaced() {
-        assert_eq!(route_id("feat-foo", "api", "web"), "ws-feat-foo-api-web");
+        assert_eq!(route_id("feat-foo", "api", "web"), "ws-8_feat-foo-3_api-3_web");
         assert_ne!(route_id("feat-foo", "api", "web"), route_id("feat-foo", "ui", "web"));
-        // Ordinary names survive untouched, including the underscores and digits
-        // compose service names routinely carry.
-        assert_eq!(route_id("release-1.2", "web_api", "app2"), "ws-release-1-2-web_api-app2");
+        // Ordinary names survive their id_part encoding, including the underscores
+        // and digits compose service names routinely carry.
+        assert_eq!(route_id("release-1.2", "web_api", "app2"), "ws-11_release-1-2-7_web_api-4_app2");
+    }
+
+    #[test]
+    fn route_id_does_not_collide_across_dash_split() {
+        // Bare concatenation collapsed these two tuples onto the same id
+        // (`ws-feat-web-api-x`), and Caddy's `@id`-keyed CRUD meant the second
+        // worktree silently overwrote the first's route in the admin config.
+        // Length-prefixed segments are provably unique per tuple.
+        let a = route_id("feat-web", "api", "x");
+        let b = route_id("feat", "web-api", "x");
+        assert_ne!(a, b, "distinct tuples must produce distinct ids: {a} vs {b}");
+
+        // Same collision family with underscores instead of dashes.
+        let c = route_id("feat_web", "api", "x");
+        let d = route_id("feat", "web_api", "x");
+        assert_ne!(c, d, "distinct tuples must produce distinct ids: {c} vs {d}");
     }
 
     #[test]
