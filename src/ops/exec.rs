@@ -56,32 +56,55 @@ pub fn run(
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let wt = workspace::task_dir(&ws.root, &task).join(&repo);
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
-    let mut env: Vec<(&str, &str)> = vec![("WS_REPO", &repo), ("WS_BRANCH_SANITIZED", &task)];
-    env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     let status = match remote {
-        Some(r) => exec_remote(r, &ws.root, &task, &repo, no_flush, &env, command),
-        None => exec_local(&ws.root, &task, &repo, &env, program, args),
+        Some(r) => exec_remote(r, &ws.root, &task, &repo, no_flush, &injected, command),
+        None => exec_local(&ws.root, &wt, &task, &repo, &injected, program, args),
     }?;
 
     propagate(status)
 }
 
+/// Base `WS_*` env every dispatched command sees. Deliberately does NOT set
+/// `WS_HOOK_NAME` — `ws exec` isn't a hook, so lying about the event context
+/// would surprise a script that special-cases lifecycle events.
+///
+/// Kept in lockstep with `hooks::base_env`; the parity test in this module
+/// asserts they agree on every key except `WS_HOOK_NAME`.
+fn build_env<'a>(
+    workspace_root: &'a str,
+    worktree: &'a str,
+    repo: &'a str,
+    branch_sanitized: &'a str,
+    injected: &'a [(String, String)],
+) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![
+        ("WS_WORKSPACE_ROOT", workspace_root),
+        ("WS_WORKTREE", worktree),
+        ("WS_REPO", repo),
+        ("WS_BRANCH_SANITIZED", branch_sanitized),
+    ];
+    env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    env
+}
+
 /// Run in the local worktree at `<root>/.worktrees/<task>/<repo>`.
 fn exec_local(
     root: &Path,
+    wt: &Path,
     task: &str,
     repo: &str,
-    env: &[(&str, &str)],
+    injected: &[(String, String)],
     program: &str,
     args: &[String],
 ) -> Result<ExitStatus> {
-    let wt = workspace::worktree_for(root, task, repo).ok_or_else(|| {
-        super::preflight(format!("no worktree for `{repo}` in task `{task}`"))
-    })?;
+    let root_s = root.to_string_lossy();
+    let wt_s = wt.to_string_lossy();
+    let env = build_env(&root_s, &wt_s, repo, task, injected);
+
     let mut c = Command::new(program);
-    c.args(args).current_dir(&wt);
-    for (k, v) in env {
+    c.args(args).current_dir(wt);
+    for (k, v) in &env {
         c.env(k, v);
     }
     c.status().with_context(|| format!("run `{program}`"))
@@ -94,7 +117,7 @@ fn exec_remote(
     task: &str,
     repo: &str,
     no_flush: bool,
-    env: &[(&str, &str)],
+    injected: &[(String, String)],
     command: &[String],
 ) -> Result<ExitStatus> {
     if !no_flush {
@@ -105,8 +128,20 @@ fn exec_remote(
         }
     }
 
-    let dir = remote::worktree_path(&r.worktree_base(ws_root), task, repo);
-    let script = remote::remote_script(&dir, env, command);
+    let base = r.worktree_base(ws_root);
+    let dir = remote::worktree_path(&base, task, repo);
+    let mut env = build_env(&base, &dir, repo, task, injected);
+    // Version-manager shims (nvm, rbenv, pyenv) install into `.zshrc`/`.bashrc`
+    // and aren't on non-interactive SSH's PATH; harvest it once per connection.
+    // Appended last so a repo's declared PATH (via `injected`) still wins.
+    let harvested = remote::login_path(&r.connection);
+    if let Some(p) = &harvested {
+        if !injected.iter().any(|(k, _)| k == "PATH") {
+            env.push(("PATH", p));
+        }
+    }
+
+    let script = remote::remote_script(&dir, &env, command);
     // Both TTYs required: keying on stdin alone puts a pty on `ws exec … > file` and corrupts the redirect with CRLF/control sequences.
     let want_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
@@ -137,4 +172,45 @@ fn exit_code(status: &ExitStatus) -> i32 {
 #[cfg(not(unix))]
 fn exit_code(status: &ExitStatus) -> i32 {
     status.code().unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The parity invariant: every `WS_*` key `hooks::base_env` sets — except
+    /// `WS_HOOK_NAME`, which exec deliberately omits — must appear in
+    /// `build_env` with the same value. Prevents `ws exec` from silently
+    /// drifting away from the hook env contract when a new key is added.
+    #[test]
+    fn build_env_matches_hooks_base_env_minus_hook_name() {
+        let root = Path::new("/ws");
+        let wt = Path::new("/ws/.worktrees/foo/api");
+        let root_s = root.to_string_lossy();
+        let wt_s = wt.to_string_lossy();
+        let injected: Vec<(String, String)> = vec![
+            ("WS_PORT_mysql".to_string(), "20001".to_string()),
+            ("WS_RUNTIME".to_string(), "podman".to_string()),
+        ];
+
+        let env = build_env(&root_s, &wt_s, "api", "foo", &injected);
+        let hook_env = crate::hooks::base_env(root, &wt_s, "api", "foo", "up");
+
+        for (k, v) in &hook_env {
+            if k == "WS_HOOK_NAME" {
+                continue;
+            }
+            let got = env.iter().find(|(ek, _)| *ek == k.as_str()).map(|(_, ev)| *ev);
+            assert_eq!(got, Some(v.as_str()), "exec must match hook for {k}");
+        }
+        assert!(
+            !env.iter().any(|(k, _)| *k == "WS_HOOK_NAME"),
+            "exec must not set WS_HOOK_NAME — it isn't a hook",
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| *k == "WS_PORT_mysql").map(|(_, v)| *v),
+            Some("20001"),
+            "injected env must survive",
+        );
+    }
 }
