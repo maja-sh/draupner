@@ -47,8 +47,6 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
     let sanitized = workspace::sanitize_branch(branch);
-    // Resolving a remote site fetches the server `$HOME` up front, so an unreachable server fails here before any bring-up.
-    let site = Site::resolve(&cfg)?;
 
     let targets: Vec<(String, std::path::PathBuf)> = cfg
         .repos
@@ -64,6 +62,35 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             "no worktrees for {branch}; run `ws new` first"
         )));
     }
+
+    // Resolving a remote site fetches the server `$HOME`, so this doubles as
+    // reachability probe. `down` degrades to local-only cleanup when the
+    // server is out of reach — the local mutagen forwards would otherwise
+    // leak (`ws rm` already handles this the same way). Every other event
+    // still hard-fails: `up` without a reachable site would silently skip
+    // half its work.
+    let site = match Site::resolve(&cfg) {
+        Ok(s) => s,
+        Err(e) if event == "down" => {
+            let conn = cfg.remote.as_ref().map(|r| r.connection.as_str()).unwrap_or("remote");
+            crate::ui::header(op, branch);
+            crate::ui::note(&format!(
+                "{conn}: server unreachable ({e:#}); tearing down local forwards only, \
+                 server-side stacks and routes are left as-is"
+            ));
+            let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
+            for (repo, _wt) in &targets {
+                for (_, port) in crate::ports::load(&ws.root, &sanitized, repo) {
+                    let _ = crate::mutagen::forward_terminate(
+                        &crate::mutagen::forward_session_name(branch, repo, port),
+                    );
+                }
+                result.skipped.push(repo.clone());
+            }
+            return Ok(result);
+        }
+        Err(e) => return Err(e),
+    };
 
     crate::ui::header(op, branch);
 

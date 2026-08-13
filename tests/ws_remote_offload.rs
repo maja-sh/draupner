@@ -193,6 +193,38 @@ fn down_runs_the_script_on_the_server_over_ssh() {
 }
 
 #[test]
+fn down_degrades_to_local_cleanup_when_the_server_is_unreachable() {
+    // Parity with `ws rm`: a `down` on an unreachable server used to abort at
+    // `Site::resolve`, orphaning local mutagen forwards even though the
+    // teardown code that would free them is entirely local. Now `down` runs
+    // its local cleanup and warns about the server-side leftovers instead.
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(remote_container_ws());
+    let ssh = ssh_stub(&f);
+    let mg = mutagen_noop(&f);
+    new_remote(&f, "api", &ssh, &mg);
+
+    // Swap in a failing ssh so any server round-trip errors — the reachability
+    // probe inside `Site::resolve` (`printf $HOME`) is what trips.
+    let bad = f.stub("bad-ssh", "exit 1");
+    let out = f.run_with_env(
+        &["down", "feat/foo"],
+        &[
+            ("WS_SSH", bad.to_str().unwrap()),
+            ("WS_MUTAGEN", mg.to_str().unwrap()),
+        ],
+    );
+
+    assert!(out.status.success(), "down must not bail when the server is unreachable:\n{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("server unreachable") && err.contains("local forwards"),
+        "expected the degrade note in stderr:\n{err}"
+    );
+}
+
+#[test]
 fn list_runs_status_on_the_server_for_a_remote_workspace() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
