@@ -92,7 +92,7 @@ pub fn add_worktree_excludes(wt: &Path, entries: &[String]) -> Result<()> {
         }
     }
     if added {
-        std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+        crate::config::write_atomic(&path, content.as_bytes())?;
     }
     Ok(())
 }
