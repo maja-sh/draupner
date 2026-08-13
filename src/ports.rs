@@ -53,11 +53,31 @@ struct Meta {
     services: BTreeMap<String, ServiceConfig>,
 }
 
-fn read_meta(path: &Path) -> Meta {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// A missing file is fine (nothing recorded yet); every other IO or parse
+/// error propagates so allocation paths (`resolve`, `used_ports`,
+/// `record_services`) refuse to write around a corrupt file — otherwise a
+/// truncated meta silently reallocates while old containers still hold
+/// those ports.
+fn read_meta(path: &Path) -> Result<Meta> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Meta::default()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Best-effort read for the status/render paths (`load`, `services`) that
+/// must not short-circuit a whole listing on one corrupt file. A note
+/// surfaces the corruption so it isn't invisible.
+fn read_meta_lossy(path: &Path) -> Meta {
+    match read_meta(path) {
+        Ok(m) => m,
+        Err(e) => {
+            crate::ui::note(&format!("ignoring corrupt {}: {e:#}", path.display()));
+            Meta::default()
+        }
+    }
 }
 
 fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
@@ -65,13 +85,13 @@ fn write_meta(path: &Path, meta: &Meta) -> Result<()> {
 }
 
 pub fn load(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, u16> {
-    read_meta(&meta_file(root, branch_sanitized, repo)).ports
+    read_meta_lossy(&meta_file(root, branch_sanitized, repo)).ports
 }
 
 /// Effective service set from the last `up` so derived-but-undeclared services
 /// still resolve their host/port on read paths.
 pub fn services(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<String, ServiceConfig> {
-    read_meta(&meta_file(root, branch_sanitized, repo)).services
+    read_meta_lossy(&meta_file(root, branch_sanitized, repo)).services
 }
 
 /// Persist the effective service set for a worktree, preserving the recorded ports.
@@ -86,7 +106,7 @@ pub fn record_services(
     // Under `resolve`'s lock so a concurrent allocation between our read and write isn't clobbered.
     let _lock = Lock::acquire(&dir);
     let path = meta_file(root, branch_sanitized, repo);
-    let mut meta = read_meta(&path);
+    let mut meta = read_meta(&path)?;
     meta.services = services.clone();
     write_meta(&path, &meta)
 }
@@ -105,15 +125,15 @@ pub fn resolve(
 
     let path = meta_file(root, branch_sanitized, repo);
     // Fast path skips the lock entirely when nothing needs allocating.
-    let existing = read_meta(&path);
+    let existing = read_meta(&path)?;
     if needs.iter().all(|s| existing.ports.contains_key(s)) {
         return Ok(existing.ports);
     }
 
     let _lock = Lock::acquire(&dir);
     // Re-read under the lock; another process may have allocated since our fast-path read.
-    let mut meta = read_meta(&path);
-    let mut used = used_ports(&dir);
+    let mut meta = read_meta(&path)?;
+    let mut used = used_ports(&dir)?;
     used.extend(meta.ports.values().copied());
 
     for svc in needs {
@@ -135,17 +155,25 @@ pub fn forget(root: &Path, branch_sanitized: &str, repo: &str) {
 }
 
 /// Every port recorded across `.ws-meta`, so parallel worktrees never collide.
-fn used_ports(dir: &Path) -> HashSet<u16> {
+///
+/// A missing `.ws-meta` dir is fine — no allocations yet. A corrupt peer
+/// file must NOT be treated as empty: that peer's ports would drop off the
+/// used set and the allocator would hand them out again while the peer's
+/// containers are still bound to them.
+fn used_ports(dir: &Path) -> Result<HashSet<u16>> {
     let mut set = HashSet::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.filter_map(std::result::Result::ok) {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("json") {
-                set.extend(read_meta(&p).ports.values().copied());
-            }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(set),
+        Err(e) => return Err(e).with_context(|| format!("scan {}", dir.display())),
+    };
+    for e in rd.filter_map(std::result::Result::ok) {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("json") {
+            set.extend(read_meta(&p)?.ports.values().copied());
         }
     }
-    set
+    Ok(set)
 }
 
 fn free_port(used: &HashSet<u16>, site: &Site) -> Result<u16> {
@@ -300,5 +328,59 @@ mod tests {
         assert!(!load(root, "feat-x", "api").is_empty());
         forget(root, "feat-x", "api");
         assert!(load(root, "feat-x", "api").is_empty());
+    }
+
+    #[test]
+    fn read_meta_defaults_on_missing_but_surfaces_a_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.json");
+        assert!(
+            read_meta(&missing).unwrap().ports.is_empty(),
+            "a missing file must default — nothing recorded yet",
+        );
+
+        let corrupt = dir.path().join("bad.json");
+        std::fs::write(&corrupt, "{not json").unwrap();
+        // `unwrap_err` needs `Meta: Debug`, which serves no callers otherwise.
+        let err = match read_meta(&corrupt) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a parse error on corrupt input"),
+        };
+        assert!(err.contains("parse"), "should surface as a parse error: {err}");
+    }
+
+    #[test]
+    fn used_ports_refuses_to_ignore_a_corrupt_peer() {
+        // A corrupt peer file, if silently defaulted, drops the peer's ports off the used
+        // set and the allocator hands them out again — exactly the bug this refusal fixes.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = meta_dir(dir.path());
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("feat-a-api.json"), r#"{"ports":{"mysql":20005}}"#).unwrap();
+        std::fs::write(meta.join("feat-b-api.json"), "garbage").unwrap();
+        assert!(used_ports(&meta).is_err(), "a corrupt file must propagate, not silently drop ports");
+    }
+
+    #[test]
+    fn resolve_refuses_to_reallocate_over_a_corrupt_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let meta = meta_dir(root);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta_file(root, "feat-x", "api"), "not json").unwrap();
+        let err = resolve(&Site::Local, root, "feat-x", "api", &["mysql".into()]).unwrap_err();
+        assert!(err.to_string().contains("parse"), "expected a parse-error propagation: {err}");
+    }
+
+    #[test]
+    fn load_stays_lossy_on_a_corrupt_file() {
+        // A single corrupt task must not break `ws list` for its siblings; the strict
+        // refusal belongs to the allocation path only.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let meta = meta_dir(root);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta_file(root, "feat-x", "api"), "corrupt").unwrap();
+        assert!(load(root, "feat-x", "api").is_empty(), "lossy path defaults on a corrupt file");
     }
 }
