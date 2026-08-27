@@ -13,6 +13,12 @@ pub fn proc_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
+/// Filesystem path of a supervised process's log — the reader-side counterpart to the shell-quoted `paths` writer, so consumers (`ws show`) don't have to duplicate the `~/.ws-run/<name>.log` convention. `None` when `$HOME` isn't set.
+pub fn log_path(name: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    Some(std::path::PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
+}
+
 const DIED_MARKER: &str = "__WS_HOST_DIED__";
 const STRANGER_MARKER: &str = "__WS_HOST_STRANGER__";
 

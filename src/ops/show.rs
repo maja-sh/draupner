@@ -56,17 +56,29 @@ fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<S
     let cwd = std::env::current_dir()?.canonicalize()?;
     let worktrees_root = root.join(".worktrees");
     let worktrees_root = worktrees_root.canonicalize().unwrap_or(worktrees_root);
-    let (task, _) = workspace::task_repo_under(&cwd, &worktrees_root).ok_or_else(|| {
+    let (task, cwd_repo) = workspace::task_repo_under(&cwd, &worktrees_root).ok_or_else(|| {
         super::preflight(
             "ws show without a branch must be run from inside a worktree; \
              pass `ws show <branch>` to name one explicitly",
         )
     })?;
-    for wt in workspace::worktrees(root, cfg) {
-        if wt.task.as_deref() == Some(&task) {
-            if let Some(b) = wt.branch {
-                return Ok(b);
-            }
+    // Probe git for just the repo whose worktree we're inside — sibling repos would give the same branch anyway (a task groups worktrees under one branch), and one `git worktree list` is cheaper than one per configured repo.
+    let target_dir = worktrees_root.join(&task);
+    let target_canon = target_dir.canonicalize().unwrap_or(target_dir);
+    let probe_repo = |repo: &str| -> Option<String> {
+        crate::git::worktree_list(&root.join(repo))
+            .into_iter()
+            .find(|(p, _)| p.canonicalize().unwrap_or_else(|_| p.clone()) == target_canon.join(repo))
+            .and_then(|(_, branch)| branch)
+    };
+    if let Some(repo) = cwd_repo.as_deref() {
+        if let Some(b) = probe_repo(repo) {
+            return Ok(b);
+        }
+    }
+    for entry in &cfg.repos {
+        if let Some(b) = probe_repo(entry.name()) {
+            return Ok(b);
         }
     }
     Ok(task)
@@ -126,10 +138,17 @@ fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> Sh
         let is_host = cfg.is_host_repo(name);
         let kind = if is_host { "host" } else { "container" };
 
-        let is_running = liveness(cfg, root, &worktree_absolute, branch, &sanitized, name, is_host, site);
-        let services = services_for(cfg, root, &sanitized, name);
+        // One `.ws-meta` read serves both liveness (never-up short-circuit) and the service list.
+        let (port_map, recorded_services) = crate::ports::load_meta(root, &sanitized, name);
 
-        let log_path_absolute = is_host.then(|| host_log_path(branch, name)).flatten();
+        let is_running = liveness(
+            cfg, root, &worktree_absolute, branch, &sanitized, name, is_host, site, &port_map,
+        );
+        let services = services_for(cfg, &sanitized, name, port_map, recorded_services);
+
+        let log_path_absolute = is_host
+            .then(|| crate::supervise::log_path(&crate::supervise::proc_name(branch, name)))
+            .flatten();
         let exec_command_prefix = format!("ws exec --branch {branch} {name} --");
 
         repos.push(RepoInfo {
@@ -162,6 +181,7 @@ fn liveness(
     repo: &str,
     is_host: bool,
     site: Option<&Site>,
+    port_map: &BTreeMap<String, u16>,
 ) -> Option<bool> {
     let site = site?;
     if is_host {
@@ -169,7 +189,7 @@ fn liveness(
         return Some(crate::supervise::is_active(site, &name));
     }
     // Never-up short-circuit: an empty port map means `up` never ran here, so no need to shell out for a status probe that will report zero.
-    if crate::ports::load(root, sanitized, repo).is_empty() {
+    if port_map.is_empty() {
         return Some(false);
     }
     let is_container = cfg.is_container_repo(repo, worktree);
@@ -184,15 +204,14 @@ fn liveness(
     Some(out.trim() != "0")
 }
 
-/// Services with their allocated port + routing status, sourced from the `.ws-meta` record last written at `up` (which covers auto-derived compose services), else the `.ws.json`-declared set for a not-yet-up worktree.
+/// Services with their allocated port + routing status. `recorded` comes from the `.ws-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.ws.json`-declared set for a not-yet-up worktree.
 fn services_for(
     cfg: &WsConfig,
-    root: &Path,
     sanitized: &str,
     repo: &str,
+    port_map: BTreeMap<String, u16>,
+    recorded: BTreeMap<String, ServiceConfig>,
 ) -> Vec<ServiceInfo> {
-    let port_map = crate::ports::load(root, sanitized, repo);
-    let recorded = crate::ports::services(root, sanitized, repo);
     let declared: BTreeMap<String, ServiceConfig> = cfg
         .repo_config(repo)
         .map(|rc| rc.services.clone())
@@ -207,7 +226,7 @@ fn services_for(
             let is_http_routed = routing_on && sub.is_some();
             let routed_hostname = sub
                 .filter(|_| is_http_routed)
-                .map(|s| ws_host(sanitized, s, domain.unwrap()));
+                .map(|s| inject::ws_host(sanitized, s, domain.unwrap()));
             ServiceInfo {
                 name: svc_name.clone(),
                 allocated_host_port: port_map.get(&svc_name).copied(),
@@ -216,21 +235,6 @@ fn services_for(
             }
         })
         .collect()
-}
-
-/// Local mirror of `inject::ws_host` — one dotless DNS label per component so a dotted branch can't be suffix-captured by a sibling's wildcard route.
-fn ws_host(sanitized: &str, subdomain: &str, domain: &str) -> String {
-    format!("{}.{}.{}", dns_label(sanitized), dns_label(subdomain), domain)
-}
-
-fn dns_label(s: &str) -> String {
-    s.replace('.', "-")
-}
-
-fn host_log_path(branch: &str, repo: &str) -> Option<PathBuf> {
-    let name = crate::supervise::proc_name(branch, repo);
-    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
-    Some(PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
 }
 
 fn render_human(d: &ShowData) {
@@ -249,15 +253,8 @@ fn render_human(d: &ShowData) {
         };
         println!();
         println!("  {}  ({}, {})", repo.name, repo.kind, state);
-        // Pad every label in this repo's block to the widest one so the columns line up regardless of service-name length.
-        let label_width = repo
-            .services
-            .iter()
-            .map(|s| s.name.len())
-            .chain(repo.log_path_absolute.iter().map(|_| 3)) // "log"
-            .chain(std::iter::once(4)) // "exec"
-            .max()
-            .unwrap_or(4);
+        // Pad labels to the widest one in the block. "exec" is always present at 4 chars, so it wins over "log" (3) — service names are the only variable.
+        let label_width = repo.services.iter().map(|s| s.name.len()).max().unwrap_or(0).max(4);
         for svc in &repo.services {
             let port = svc
                 .allocated_host_port
@@ -430,12 +427,6 @@ mod tests {
             repo.log_path_absolute.as_deref().and_then(|p| p.to_str()),
             Some("/home/test/.ws-run/ws-feat-x-api.log"),
         );
-    }
-
-    #[test]
-    fn a_dotted_branch_gets_labeled_so_wildcards_cannot_capture_it() {
-        assert_eq!(ws_host("feat-1.2", "web", "example.test"), "feat-1-2.web.example.test");
-        assert_eq!(ws_host("feat-x", "a.b", "example.test"), "feat-x.a-b.example.test");
     }
 
     #[test]

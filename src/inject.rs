@@ -329,13 +329,13 @@ fn effective_services(
 
 /// Shared by the `WS_HOST_*` env var and the Caddy route match so the two
 /// can't drift.
-fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
+pub(crate) fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
     format!("{}.{}.{domain}", dns_label(branch_sanitized), dns_label(subdomain))
 }
 
 /// One label so a dotted branch can't be suffix-captured by a sibling's
 /// wildcard route.
-fn dns_label(s: &str) -> String {
+pub(crate) fn dns_label(s: &str) -> String {
     s.replace('.', "-")
 }
 

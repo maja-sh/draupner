@@ -112,6 +112,16 @@ pub fn services(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<Str
     read_meta_lossy(&meta_file(root, branch_sanitized, repo)).services
 }
 
+/// Both `ports` and `services` in one read — for callers that need both and would otherwise parse the same `.ws-meta` file twice.
+pub fn load_meta(
+    root: &Path,
+    branch_sanitized: &str,
+    repo: &str,
+) -> (BTreeMap<String, u16>, BTreeMap<String, ServiceConfig>) {
+    let m = read_meta_lossy(&meta_file(root, branch_sanitized, repo));
+    (m.ports, m.services)
+}
+
 /// Persist the effective service set for a worktree, preserving the recorded ports.
 pub fn record_services(
     root: &Path,
