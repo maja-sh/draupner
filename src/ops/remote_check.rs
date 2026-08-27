@@ -128,7 +128,7 @@ fn render(p: &probe::Probe, verbose: bool) {
     crate::ui::status_line(p.ok, p.name, &p.detail);
     if verbose {
         if let Some(cmd) = &p.cmd {
-            crate::ui::command_block(&[cmd.clone()]);
+            crate::ui::command_block(std::slice::from_ref(cmd));
         }
     }
 }
