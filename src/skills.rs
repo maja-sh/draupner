@@ -9,13 +9,21 @@ const SKILLS: &[(&str, &str)] = &[
     ("ws-rm",       include_str!("../skills/ws-rm/SKILL.md")),
     ("ws-list",     include_str!("../skills/ws-list/SKILL.md")),
     ("ws-clean",    include_str!("../skills/ws-clean/SKILL.md")),
-    ("ws-init",     include_str!("../skills/ws-init/SKILL.md")),
+    ("ws-show",     include_str!("../skills/ws-show/SKILL.md")),
+    ("ws-exec",     include_str!("../skills/ws-exec/SKILL.md")),
     ("ws-resume",   include_str!("../skills/ws-resume/SKILL.md")),
 ];
+
+/// Skills that used to ship and were removed. `write_all` sweeps them from the target so a re-run of `ws claude` cleans up any prior install. Keep entries here for at least one release cycle after retirement so users who upgrade catch the removal; then drop them.
+const DEPRECATED_SKILLS: &[&str] = &["ws-init"];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(target_root)
         .with_context(|| format!("create {}", target_root.display()))?;
+    // Best-effort — a missing dir is the common case; only a real fs error would matter and it'd resurface on the write below.
+    for name in DEPRECATED_SKILLS {
+        let _ = fs::remove_dir_all(target_root.join(name));
+    }
     let mut written = Vec::with_capacity(SKILLS.len());
     for (name, body) in SKILLS {
         let dir = target_root.join(name);
@@ -80,5 +88,23 @@ mod tests {
         write_all(tmp.path()).unwrap();
         write_all(tmp.path()).unwrap();
         assert!(tmp.path().join("ws-new").join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn write_all_sweeps_deprecated_skills_from_prior_installs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A prior `ws claude` install had a skill that has since been retired — the file below stands in for whatever `~/.claude/skills/<retired>/SKILL.md` a user carried over from an older ws.
+        for name in DEPRECATED_SKILLS {
+            let dir = tmp.path().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), "stale").unwrap();
+        }
+        write_all(tmp.path()).unwrap();
+        for name in DEPRECATED_SKILLS {
+            assert!(
+                !tmp.path().join(name).exists(),
+                "deprecated skill `{name}` must be swept when `ws claude` runs against an older install"
+            );
+        }
     }
 }

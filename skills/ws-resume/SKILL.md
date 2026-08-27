@@ -1,38 +1,60 @@
 ---
 name: ws-resume
-description: Resume work on a ws worktree by branch — locate it, confirm it exists, and load how to operate it (files, exec, status, hostnames) without changing directory. Use when the user runs /ws-resume <branch> or asks to resume or work on a branch's worktree.
+description: Resume work on a ws worktree by branch — locate it, confirm it exists, and load how to operate it (files, exec, hostnames) without changing directory. Use when the user runs /ws-resume <branch> or asks to resume or work on a branch's worktree.
 ---
 
 The user wants to work on a `ws` worktree, named by its **branch** — the argument (`$ARGS`).
 
-## 1. Locate it and confirm it exists
+## 1. Ground on `ws show <branch> --json`
 
-The worktree lives at `.worktrees/<branch>/<repo>/`, where `<branch>` has slashes
-replaced by dashes (`misc/test-ws` → `misc-test-ws`).
+Run `ws show $ARGS --json`. Parse the output; it is the ground truth for this worktree. Its shape:
 
-Run `ws list` and find the branch. **If it does not appear, stop: tell the user you
-can't find a worktree for that branch.** Do not create it and do not run anything
-else. You may mention `ws new <repo> <branch>` in case they meant to create it, but
-leave the decision to them.
+```
+{
+  "branch":            original branch name (may contain "/"),
+  "workspace_root":    absolute path to the workspace root,
+  "remote":            null (local workspace) or:
+                        { "connection", "worktree_base_absolute" },
+  "repos": [{
+    "name":                repo name from .ws.json,
+    "kind":                "host" | "container",
+    "worktree_absolute":   absolute path to this repo's worktree,
+    "is_running":          true | false | null (site unreachable),
+    "services": [{
+      "name":                  service name,
+      "allocated_host_port":   integer or null (null = never brought up),
+      "routed_hostname":       HTTP hostname or null,
+      "is_http_routed":        true if reachable via https://<routed_hostname>
+    }],
+    "log_path_absolute":  absolute path to the host log (null for containers),
+    "exec_command_prefix": "ws exec --branch <branch> <repo> --" — append your command
+  }]
+}
+```
 
-## 2. You are now operating on this worktree
+If the branch has no worktree, `ws show` exits 2 with `no worktrees for <branch>; run \`ws new\` first`. In that case, **stop**: tell the user the worktree doesn't exist and mention `ws new <repos> <branch>` if they meant to create it. Do not create it yourself.
 
-For the rest of the session this branch is your working context. Operate it
-**without `cd`-ing into it**:
+## 2. Operate this worktree without `cd`-ing into it
 
-- **Edit files** under `.worktrees/<branch>/<repo>/` (the path `ws list` printed).
-- **Run commands** with `ws exec --branch <branch> <repo> -- <command>`. This runs
-  where the stack lives (locally, or on the server for a remote workspace) with the
-  right injected env. Do **not** run `podman compose` / build tools directly in the
-  worktree — they miss the injected `COMPOSE_PROJECT_NAME` / `COMPOSE_FILE` and won't
-  see the stack.
-- **Status and lifecycle**: `ws list` (status), `ws up <branch>`, `ws down <branch>`.
-  Do **not** auto-run `ws up`. If the stack is down, say so and let the user start it.
-- **Reach HTTP services** at `<branch>.<service>.<domain>` (the domain is in
-  `.ws.json`). Raw-TCP / host-process ports are forwarded to `localhost` — see
-  `.ws-meta/<branch>-<repo>.json`.
+For the rest of the session, this branch is your working context:
 
-## 3. Report back
+- **Edit files** at each repo's `worktree_absolute` path from the JSON.
+- **Run commands** with the `exec_command_prefix` verbatim, appending your command with a space:
+  ```
+  <exec_command_prefix> <your command>
+  ```
+  Do **not** invoke `podman compose`, `docker`, `npm`, or build tools directly in the worktree — they miss the injected env and won't see the stack.
+- **Read host logs** at `log_path_absolute`. Null means it's a container repo — use the container runtime's logs (`podman logs <container>` etc.).
+- **Reach HTTP services** at `https://<routed_hostname>` from the service object (add the domain's port suffix if it isn't on :443). Do **not** re-derive hostnames from the branch or repo name; `ws show` already applied the correct sanitization (a dotted `feat/v1.2` collapses to `feat-v1-2`, not the string you'd guess).
+- **Raw-TCP services** (`is_http_routed: false`) are reached at `localhost:<allocated_host_port>` — client-side forwards keep the ports identical to the server.
+- **Lifecycle**: `ws show <branch>` for a fresh snapshot, `ws up <branch>` / `ws down <branch>` to bring the stack up or down. Do **not** auto-run `ws up`. If a repo is `is_running: false`, tell the user and let them decide.
 
-Briefly tell the user what you found: the repos in this worktree, whether each is up
-or down, and the hostname(s) — so it's obvious the resume landed and in what state.
+## 3. Ground on the JSON, do not assume
+
+- If a field is `null`, treat it as unknown. Do not fill it in from the branch or repo name.
+- If a piece of information isn't in the JSON, the answer is "I don't know" — not a derived guess.
+- If a value contradicts something you'd have derived (e.g. a hostname that doesn't match the branch), trust the JSON.
+
+## 4. Report back
+
+Briefly tell the user what you found — the repos in this worktree, whether each is running, and the routed hostname(s) if any — so it's obvious the resume landed and in what state.
