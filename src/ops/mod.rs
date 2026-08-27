@@ -9,6 +9,7 @@ pub mod up;
 pub mod down;
 pub mod rm;
 pub mod list;
+pub mod show;
 pub mod clean;
 pub mod exec;
 pub mod setup;

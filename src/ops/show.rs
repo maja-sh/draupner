@@ -1,0 +1,468 @@
+//! Focused per-worktree endpoint: everything you need to operate one task's
+//! worktree, one call. Narrower than `ws list` (single branch, no siblings),
+//! broader than `ws here` (services, ports, hostnames, exec syntax on top of
+//! paths). Two audiences share the same data — the terminal reader and the
+//! LLM parsing `--json` for a `/ws-resume` skill — so field names are
+//! self-documenting to keep the tooling half honest without a schema
+//! round-trip.
+
+use anyhow::Result;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::config::{self, ServiceConfig, WsConfig};
+use crate::hooks;
+use crate::inject;
+use crate::remote::Site;
+use crate::workspace;
+
+/// Container liveness runs the same `status` hook `ws list` uses; cap it short so a hung stack can't stall the summary.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
+    if describe {
+        print!("{}", SCHEMA_TEXT);
+        return Ok(());
+    }
+
+    let ws = workspace::locate()?;
+    let cfg = config::load(&ws.root)?;
+    let branch = resolve_branch(branch, &ws.root, &cfg)?;
+    let site = Site::resolve(&cfg).ok();
+
+    let data = collect(&cfg, &ws.root, &branch, site.as_ref());
+
+    if data.repos.is_empty() {
+        return Err(super::preflight(format!(
+            "no worktrees for {branch}; run `ws new` first"
+        )));
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+    } else {
+        render_human(&data);
+    }
+    Ok(())
+}
+
+/// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `ws exec`s see the branch the user typed.
+fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<String> {
+    if let Some(b) = branch {
+        return Ok(b.to_string());
+    }
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let worktrees_root = root.join(".worktrees");
+    let worktrees_root = worktrees_root.canonicalize().unwrap_or(worktrees_root);
+    let (task, _) = workspace::task_repo_under(&cwd, &worktrees_root).ok_or_else(|| {
+        super::preflight(
+            "ws show without a branch must be run from inside a worktree; \
+             pass `ws show <branch>` to name one explicitly",
+        )
+    })?;
+    for wt in workspace::worktrees(root, cfg) {
+        if wt.task.as_deref() == Some(&task) {
+            if let Some(b) = wt.branch {
+                return Ok(b);
+            }
+        }
+    }
+    Ok(task)
+}
+
+#[derive(Serialize)]
+struct ShowData {
+    branch: String,
+    workspace_root: PathBuf,
+    remote: Option<RemoteInfo>,
+    repos: Vec<RepoInfo>,
+}
+
+#[derive(Serialize)]
+struct RemoteInfo {
+    connection: String,
+    worktree_base_absolute: String,
+}
+
+#[derive(Serialize)]
+struct RepoInfo {
+    name: String,
+    kind: String,
+    worktree_absolute: PathBuf,
+    is_running: Option<bool>,
+    services: Vec<ServiceInfo>,
+    log_path_absolute: Option<PathBuf>,
+    exec_command_prefix: String,
+}
+
+#[derive(Serialize)]
+struct ServiceInfo {
+    name: String,
+    allocated_host_port: Option<u16>,
+    routed_hostname: Option<String>,
+    is_http_routed: bool,
+}
+
+fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> ShowData {
+    let sanitized = workspace::sanitize_branch(branch);
+
+    let remote = cfg.remote.as_ref().map(|r| RemoteInfo {
+        connection: r.connection.clone(),
+        worktree_base_absolute: match site {
+            Some(s) => s.abs_base(&r.worktree_base(root)),
+            None => r.worktree_base(root),
+        },
+    });
+
+    let mut repos = Vec::new();
+    for entry in &cfg.repos {
+        let name = entry.name();
+        let Some(worktree_absolute) = workspace::worktree_for(root, branch, name) else {
+            continue;
+        };
+
+        let is_host = cfg.is_host_repo(name);
+        let kind = if is_host { "host" } else { "container" };
+
+        let is_running = liveness(cfg, root, &worktree_absolute, branch, &sanitized, name, is_host, site);
+        let services = services_for(cfg, root, &sanitized, name);
+
+        let log_path_absolute = is_host.then(|| host_log_path(branch, name)).flatten();
+        let exec_command_prefix = format!("ws exec --branch {branch} {name} --");
+
+        repos.push(RepoInfo {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            worktree_absolute,
+            is_running,
+            services,
+            log_path_absolute,
+            exec_command_prefix,
+        });
+    }
+
+    ShowData {
+        branch: branch.to_string(),
+        workspace_root: root.to_path_buf(),
+        remote,
+        repos,
+    }
+}
+
+/// Live liveness probe. Host repos ask `supervise::is_active`, one shell call. Container repos run the same `status` hook `ws list` runs, capped at [`STATUS_TIMEOUT`] so a hanging stack doesn't stall the summary. `None` when the site is unreachable — the caller shouldn't guess.
+#[allow(clippy::too_many_arguments)]
+fn liveness(
+    cfg: &WsConfig,
+    root: &Path,
+    worktree: &Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+    is_host: bool,
+    site: Option<&Site>,
+) -> Option<bool> {
+    let site = site?;
+    if is_host {
+        let name = crate::supervise::proc_name(branch, repo);
+        return Some(crate::supervise::is_active(site, &name));
+    }
+    // Never-up short-circuit: an empty port map means `up` never ran here, so no need to shell out for a status probe that will report zero.
+    if crate::ports::load(root, sanitized, repo).is_empty() {
+        return Some(false);
+    }
+    let is_container = cfg.is_container_repo(repo, worktree);
+    let cmd = hooks::resolve(cfg, root, repo, "status", is_container).ok().flatten()?;
+    let extra_env = inject::prepare(
+        cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect,
+    )
+    .ok()?;
+    let out = hooks::capture_command(
+        root, worktree, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
+    )?;
+    Some(out.trim() != "0")
+}
+
+/// Services with their allocated port + routing status, sourced from the `.ws-meta` record last written at `up` (which covers auto-derived compose services), else the `.ws.json`-declared set for a not-yet-up worktree.
+fn services_for(
+    cfg: &WsConfig,
+    root: &Path,
+    sanitized: &str,
+    repo: &str,
+) -> Vec<ServiceInfo> {
+    let port_map = crate::ports::load(root, sanitized, repo);
+    let recorded = crate::ports::services(root, sanitized, repo);
+    let declared: BTreeMap<String, ServiceConfig> = cfg
+        .repo_config(repo)
+        .map(|rc| rc.services.clone())
+        .unwrap_or_default();
+    let services = if recorded.is_empty() { declared } else { recorded };
+    let domain = cfg.domain.as_deref();
+    let routing_on = cfg.routing_active() && domain.is_some();
+    services
+        .into_iter()
+        .map(|(svc_name, svc)| {
+            let sub = svc.subdomain(&svc_name);
+            let is_http_routed = routing_on && sub.is_some();
+            let routed_hostname = sub
+                .filter(|_| is_http_routed)
+                .map(|s| ws_host(sanitized, s, domain.unwrap()));
+            ServiceInfo {
+                name: svc_name.clone(),
+                allocated_host_port: port_map.get(&svc_name).copied(),
+                routed_hostname,
+                is_http_routed,
+            }
+        })
+        .collect()
+}
+
+/// Local mirror of `inject::ws_host` — one dotless DNS label per component so a dotted branch can't be suffix-captured by a sibling's wildcard route.
+fn ws_host(sanitized: &str, subdomain: &str, domain: &str) -> String {
+    format!("{}.{}.{}", dns_label(sanitized), dns_label(subdomain), domain)
+}
+
+fn dns_label(s: &str) -> String {
+    s.replace('.', "-")
+}
+
+fn host_log_path(branch: &str, repo: &str) -> Option<PathBuf> {
+    let name = crate::supervise::proc_name(branch, repo);
+    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+    Some(PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
+}
+
+fn render_human(d: &ShowData) {
+    crate::ui::header("ws-show", &d.branch);
+    println!();
+    println!("  workspace  {}", d.workspace_root.display());
+    match &d.remote {
+        Some(r) => println!("  remote     {}", r.connection),
+        None => println!("  remote     —"),
+    }
+    for repo in &d.repos {
+        let state = match repo.is_running {
+            Some(true) => "running",
+            Some(false) => "stopped",
+            None => "unknown",
+        };
+        println!();
+        println!("  {}  ({}, {})", repo.name, repo.kind, state);
+        // Pad every label in this repo's block to the widest one so the columns line up regardless of service-name length.
+        let label_width = repo
+            .services
+            .iter()
+            .map(|s| s.name.len())
+            .chain(repo.log_path_absolute.iter().map(|_| 3)) // "log"
+            .chain(std::iter::once(4)) // "exec"
+            .max()
+            .unwrap_or(4);
+        for svc in &repo.services {
+            let port = svc
+                .allocated_host_port
+                .map(|p| format!(":{p}"))
+                .unwrap_or_else(|| "(unallocated)".to_string());
+            match &svc.routed_hostname {
+                Some(host) => println!(
+                    "    {:label_width$}  https://{host}  ({port})",
+                    svc.name
+                ),
+                None => println!("    {:label_width$}  {port}", svc.name),
+            }
+        }
+        if let Some(log) = &repo.log_path_absolute {
+            println!("    {:label_width$}  {}", "log", log.display());
+        }
+        println!(
+            "    {:label_width$}  {} <cmd>",
+            "exec", repo.exec_command_prefix
+        );
+    }
+}
+
+/// The `--describe` schema block, kept next to the emitting code so drift is obvious in review. Any change to `ShowData`'s field set MUST update this text in the same commit; the LLM skill leans on it as ground truth.
+const SCHEMA_TEXT: &str = r#"ws show — per-worktree status endpoint.
+
+Human by default. `--json` emits the same data as a structured object:
+
+{
+  "branch":              original branch name (may contain "/"),
+  "workspace_root":      absolute path to the workspace root,
+  "remote":              null (local workspace) or:
+                           { "connection": "<ssh-host>",
+                             "worktree_base_absolute": "<server-side path>" },
+  "repos": [
+    {
+      "name":                  repo name from .ws.json,
+      "kind":                  "host" | "container",
+      "worktree_absolute":     absolute path to this repo's worktree,
+      "is_running":            true | false | null,
+      "services": [
+        {
+          "name":                  service name,
+          "allocated_host_port":   integer or null,
+          "routed_hostname":       HTTP hostname or null,
+          "is_http_routed":        true if reachable via https://<routed_hostname>
+        }
+      ],
+      "log_path_absolute":     absolute path to the host log, null for containers,
+      "exec_command_prefix":   "ws exec --branch <branch> <repo> --" — append your command
+    }
+  ]
+}
+
+Semantics tooling should ground on:
+- `is_running` is a live probe. Host repos use ws's supervise::is_active check;
+  container repos run their `status` hook capped at 3s. `null` means the site
+  is out of reach or ws couldn't decide.
+- `allocated_host_port` is null on a worktree that has never been up; every
+  other state has a port.
+- `routed_hostname` is the correct answer for HTTPS access. Do NOT re-derive
+  it from branch/repo names — ws applied its own sanitization.
+- `exec_command_prefix` ends in ` --`; append a space and your command.
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal workspace on disk that `collect` can read against — a `.ws.json`, the target repo as a bare git dir, a `.worktrees/<task>/<repo>` dir, and an optional `.ws-meta/*.json` port record.
+    fn scaffold_workspace(root: &Path, ws_json: &str, sanitized_task: &str, repo: &str, meta: Option<&str>) {
+        std::fs::write(root.join(".ws.json"), ws_json).expect("write .ws.json");
+        // Bare git repo at <root>/<repo> — worktrees::worktrees() skips repos where is_git_repo is false.
+        let repo_dir = root.join(repo);
+        std::fs::create_dir_all(repo_dir.join(".git")).expect("mkdir repo/.git");
+        std::fs::write(repo_dir.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+        // The worktree dir the caller can see via workspace::worktree_for.
+        std::fs::create_dir_all(root.join(".worktrees").join(sanitized_task).join(repo))
+            .expect("mkdir worktree");
+        if let Some(m) = meta {
+            let meta_dir = root.join(".ws-meta");
+            std::fs::create_dir_all(&meta_dir).expect("mkdir .ws-meta");
+            let fname = crate::ports::override_filename(sanitized_task, repo)
+                .replace(".override.yml", ".json");
+            std::fs::write(meta_dir.join(fname), m).expect("write meta");
+        }
+    }
+
+    #[test]
+    fn declared_services_appear_before_first_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        scaffold_workspace(
+            root,
+            r#"{"domain":"example.test","repos":[{"name":"api","kind":"host","services":{"web":{"http":true,"port":8080}}}]}"#,
+            "feat-x",
+            "api",
+            None,
+        );
+        let cfg = config::load(root).unwrap();
+        let data = collect(&cfg, root, "feat/x", None);
+        assert_eq!(data.branch, "feat/x");
+        assert_eq!(data.repos.len(), 1);
+        let repo = &data.repos[0];
+        assert_eq!(repo.name, "api");
+        assert_eq!(repo.kind, "host");
+        assert_eq!(repo.services.len(), 1);
+        let svc = &repo.services[0];
+        assert_eq!(svc.name, "web");
+        assert!(svc.is_http_routed, "http:true + domain set ⇒ routed");
+        assert_eq!(svc.routed_hostname.as_deref(), Some("feat-x.web.example.test"));
+        assert!(svc.allocated_host_port.is_none(), "no meta yet ⇒ no allocated port");
+    }
+
+    #[test]
+    fn allocated_ports_from_meta_win_over_declared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        scaffold_workspace(
+            root,
+            r#"{"domain":"example.test","repos":[{"name":"api","kind":"host","services":{"web":{"http":true,"port":8080}}}]}"#,
+            "feat-x",
+            "api",
+            Some(r#"{"ports":{"web":20003},"services":{"web":{"http":true,"port":8080}}}"#),
+        );
+        let cfg = config::load(root).unwrap();
+        let data = collect(&cfg, root, "feat/x", None);
+        let svc = &data.repos[0].services[0];
+        assert_eq!(svc.allocated_host_port, Some(20003));
+        assert_eq!(svc.routed_hostname.as_deref(), Some("feat-x.web.example.test"));
+    }
+
+    #[test]
+    fn raw_tcp_service_is_not_http_routed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        scaffold_workspace(
+            root,
+            r#"{"domain":"example.test","repos":[{"name":"agent","kind":"host","services":{"sim_api":{"port":4840},"sim_opc":{"port":5555}}}]}"#,
+            "feat-x",
+            "agent",
+            None,
+        );
+        let cfg = config::load(root).unwrap();
+        let data = collect(&cfg, root, "feat/x", None);
+        let repo = &data.repos[0];
+        for svc in &repo.services {
+            assert!(!svc.is_http_routed, "{}: raw-TCP service must not appear routed", svc.name);
+            assert!(svc.routed_hostname.is_none(), "{}: no hostname for raw-TCP", svc.name);
+        }
+    }
+
+    #[test]
+    fn exec_prefix_and_log_path_are_shaped_for_the_llm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        scaffold_workspace(
+            root,
+            r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}}}]}"#,
+            "feat-x",
+            "api",
+            None,
+        );
+        std::env::set_var("HOME", "/home/test");
+        let cfg = config::load(root).unwrap();
+        let data = collect(&cfg, root, "feat/x", None);
+        let repo = &data.repos[0];
+        assert_eq!(repo.exec_command_prefix, "ws exec --branch feat/x api --");
+        assert_eq!(
+            repo.log_path_absolute.as_deref().and_then(|p| p.to_str()),
+            Some("/home/test/.ws-run/ws-feat-x-api.log"),
+        );
+    }
+
+    #[test]
+    fn a_dotted_branch_gets_labeled_so_wildcards_cannot_capture_it() {
+        assert_eq!(ws_host("feat-1.2", "web", "example.test"), "feat-1-2.web.example.test");
+        assert_eq!(ws_host("feat-x", "a.b", "example.test"), "feat-x.a-b.example.test");
+    }
+
+    #[test]
+    fn describe_prints_and_exits_ok() {
+        run(None, false, true).expect("--describe never fails");
+    }
+
+    #[test]
+    fn schema_text_mentions_every_json_field() {
+        // Best-effort drift alarm: if a field is added to ShowData/RepoInfo/ServiceInfo without a note in SCHEMA_TEXT, this test catches it. Not exhaustive — a rename could still slip past — but the common "added a field, forgot the docs" case is covered.
+        for field in [
+            "branch",
+            "workspace_root",
+            "remote",
+            "repos",
+            "name",
+            "kind",
+            "worktree_absolute",
+            "is_running",
+            "services",
+            "allocated_host_port",
+            "routed_hostname",
+            "is_http_routed",
+            "log_path_absolute",
+            "exec_command_prefix",
+        ] {
+            assert!(SCHEMA_TEXT.contains(field), "SCHEMA_TEXT is missing `{field}` — describe output has drifted from the actual JSON shape");
+        }
+    }
+}

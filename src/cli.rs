@@ -48,6 +48,17 @@ enum Cmd {
     Rm    { branch: String, #[arg(long)] force: bool },
     /// List active task worktrees
     List,
+    /// Show one worktree in detail (services, ports, hostnames, exec syntax)
+    Show {
+        /// Branch to describe; inferred from the cwd when omitted
+        branch: Option<String>,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+        /// Print the JSON schema and exit (no branch needed)
+        #[arg(long)]
+        describe: bool,
+    },
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
     /// Ready this machine for routing (rootless bits directly; privileged bits consented)
@@ -148,6 +159,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
         Cmd::List                    => crate::ops::list::run(),
+        Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
         Cmd::Remote{cmd}             => match cmd {
