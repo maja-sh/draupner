@@ -142,12 +142,12 @@ fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> Sh
         let (port_map, recorded_services) = crate::ports::load_meta(root, &sanitized, name);
 
         let is_running = liveness(
-            cfg, root, &worktree_absolute, branch, &sanitized, name, is_host, site, &port_map,
+            cfg, root, &worktree_absolute, branch, &sanitized, name, is_host, site, &recorded_services,
         );
         let services = services_for(cfg, &sanitized, name, port_map, recorded_services);
 
         let log_path_absolute = is_host
-            .then(|| crate::supervise::log_path(&crate::supervise::proc_name(branch, name)))
+            .then(|| site.and_then(|s| crate::supervise::log_path(s, &crate::supervise::proc_name(branch, name))))
             .flatten();
         let exec_command_prefix = format!("ws exec --branch {branch} {name} --");
 
@@ -170,7 +170,7 @@ fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> Sh
     }
 }
 
-/// Live liveness probe. Host repos ask `supervise::is_active`, one shell call. Container repos run the same `status` hook `ws list` runs, capped at [`STATUS_TIMEOUT`] so a hanging stack doesn't stall the summary. `None` when the site is unreachable — the caller shouldn't guess.
+/// `None` when the site is unreachable — the caller shouldn't guess.
 #[allow(clippy::too_many_arguments)]
 fn liveness(
     cfg: &WsConfig,
@@ -181,26 +181,43 @@ fn liveness(
     repo: &str,
     is_host: bool,
     site: Option<&Site>,
-    port_map: &BTreeMap<String, u16>,
+    recorded_services: &BTreeMap<String, ServiceConfig>,
 ) -> Option<bool> {
     let site = site?;
     if is_host {
         let name = crate::supervise::proc_name(branch, repo);
         return Some(crate::supervise::is_active(site, &name));
     }
-    // Never-up short-circuit: an empty port map means `up` never ran here, so no need to shell out for a status probe that will report zero.
-    if port_map.is_empty() {
+    // Never-up short-circuit — port_map alone would misread an HTTP-only container, which allocates no ports (`inject::prepare` filters on `!is_http`) but still records services once `up` runs. Recorded services is the honest sentinel for "has ever been up".
+    if recorded_services.is_empty() {
         return Some(false);
     }
     let is_container = cfg.is_container_repo(repo, worktree);
-    let cmd = hooks::resolve(cfg, root, repo, "status", is_container).ok().flatten()?;
+    let cmd = match hooks::resolve(cfg, root, repo, "status", is_container) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(e) => {
+            crate::ui::note(&format!("{repo}: {e}"));
+            return None;
+        }
+    };
     let extra_env = inject::prepare(
         cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect,
     )
     .ok()?;
-    let out = hooks::capture_command(
-        root, worktree, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
-    )?;
+    // Remote workspace container status must run on the server, otherwise the local runtime answers a question about the server's containers — the exact mismatch `ws list` avoids at list.rs:47-64.
+    let out = match site {
+        Site::Local => hooks::capture_command(
+            root, worktree, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
+        )?,
+        Site::Remote { connection, .. } => {
+            let r = cfg.remote.as_ref()?;
+            let base = site.abs_base(&r.worktree_base(root));
+            crate::remote::capture_status(
+                connection, &base, sanitized, repo, &extra_env, &cmd, STATUS_TIMEOUT.as_secs(),
+            )?
+        }
+    };
     Some(out.trim() != "0")
 }
 
@@ -222,16 +239,15 @@ fn services_for(
     services
         .into_iter()
         .map(|(svc_name, svc)| {
-            let sub = svc.subdomain(&svc_name);
-            let is_http_routed = routing_on && sub.is_some();
-            let routed_hostname = sub
-                .filter(|_| is_http_routed)
+            let routed_hostname = svc
+                .subdomain(&svc_name)
+                .filter(|_| routing_on)
                 .map(|s| inject::ws_host(sanitized, s, domain.unwrap()));
             ServiceInfo {
-                name: svc_name.clone(),
                 allocated_host_port: port_map.get(&svc_name).copied(),
+                is_http_routed: routed_hostname.is_some(),
+                name: svc_name,
                 routed_hostname,
-                is_http_routed,
             }
         })
         .collect()
@@ -256,16 +272,12 @@ fn render_human(d: &ShowData) {
         // Pad labels to the widest one in the block. "exec" is always present at 4 chars, so it wins over "log" (3) — service names are the only variable.
         let label_width = repo.services.iter().map(|s| s.name.len()).max().unwrap_or(0).max(4);
         for svc in &repo.services {
-            let port = svc
-                .allocated_host_port
-                .map(|p| format!(":{p}"))
-                .unwrap_or_else(|| "(unallocated)".to_string());
-            match &svc.routed_hostname {
-                Some(host) => println!(
-                    "    {:label_width$}  https://{host}  ({port})",
-                    svc.name
-                ),
-                None => println!("    {:label_width$}  {port}", svc.name),
+            let name = &svc.name;
+            match (&svc.routed_hostname, svc.allocated_host_port) {
+                (Some(host), Some(port)) => println!("    {name:label_width$}  https://{host}  (:{port})"),
+                (Some(host), None) => println!("    {name:label_width$}  https://{host}  (unallocated)"),
+                (None, Some(port)) => println!("    {name:label_width$}  :{port}"),
+                (None, None) => println!("    {name:label_width$}  (unallocated)"),
             }
         }
         if let Some(log) = &repo.log_path_absolute {
@@ -409,6 +421,7 @@ mod tests {
 
     #[test]
     fn exec_prefix_and_log_path_are_shaped_for_the_llm() {
+        // Passing site=Some(&Site::Local) exercises the log-path branch without mutating `$HOME` — cargo runs tests in parallel and env::set_var races other tests reading HOME.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         scaffold_workspace(
@@ -418,15 +431,29 @@ mod tests {
             "api",
             None,
         );
-        std::env::set_var("HOME", "/home/test");
         let cfg = config::load(root).unwrap();
-        let data = collect(&cfg, root, "feat/x", None);
+        let data = collect(&cfg, root, "feat/x", Some(&Site::Local));
         let repo = &data.repos[0];
         assert_eq!(repo.exec_command_prefix, "ws exec --branch feat/x api --");
-        assert_eq!(
-            repo.log_path_absolute.as_deref().and_then(|p| p.to_str()),
-            Some("/home/test/.ws-run/ws-feat-x-api.log"),
+        // Whatever HOME points at, the suffix is what the LLM appends to its own log-tail commands.
+        let log = repo
+            .log_path_absolute
+            .as_ref()
+            .and_then(|p| p.to_str())
+            .expect("host repo carries a log path");
+        assert!(
+            log.ends_with("/.ws-run/ws-feat-x-api.log"),
+            "log path should follow the ~/.ws-run/<proc_name>.log convention, got {log}"
         );
+    }
+
+    #[test]
+    fn log_path_for_a_remote_workspace_names_the_server_home_not_ours() {
+        let site = Site::Remote { connection: "srv".into(), home: "/home/server-user".into() };
+        let got = crate::supervise::log_path(&site, "ws-feat-x-api")
+            .and_then(|p| p.to_str().map(str::to_owned))
+            .expect("remote log path");
+        assert_eq!(got, "/home/server-user/.ws-run/ws-feat-x-api.log");
     }
 
     #[test]

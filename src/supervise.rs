@@ -13,10 +13,15 @@ pub fn proc_name(branch: &str, repo: &str) -> String {
     format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
-/// Filesystem path of a supervised process's log — the reader-side counterpart to the shell-quoted `paths` writer, so consumers (`ws show`) don't have to duplicate the `~/.ws-run/<name>.log` convention. `None` when `$HOME` isn't set.
-pub fn log_path(name: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
-    Some(std::path::PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
+/// Absolute log path at the *site* where the process runs — `~/.ws-run/<name>.log` expands against the local `$HOME` for a local site and the remote's captured `$HOME` for a remote one, so a caller printing the path never advertises a client path for a server-side log. `None` when the local `$HOME` isn't set.
+pub fn log_path(site: &Site, name: &str) -> Option<std::path::PathBuf> {
+    match site {
+        Site::Local => {
+            let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
+            Some(std::path::PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
+        }
+        Site::Remote { .. } => site.home_path(&format!(".ws-run/{name}.log")).map(std::path::PathBuf::from),
+    }
 }
 
 const DIED_MARKER: &str = "__WS_HOST_DIED__";
