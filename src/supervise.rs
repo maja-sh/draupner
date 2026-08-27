@@ -30,14 +30,16 @@ fn read_pidfile(pid: &str) -> String {
 
 /// `ws_tree`: print `$1` and every descendant pid, so signalling the wrapper
 /// doesn't orphan the dev server it forked (process-group kill isn't portable).
-/// The trailing `tr` flattens the output because zsh (remote login shell) does
-/// not word-split unquoted expansions the way sh does.
+/// awk emits kids space-separated because bsd awk (macOS default) rejects
+/// newlines in the next iteration's `-v w=`, truncating the BFS at depth 1.
+/// The trailing `tr` flattens `echo`'s newline because zsh (remote login
+/// shell) doesn't word-split unquoted expansions the way sh does.
 fn tree_fn() -> &'static str {
     "ws_tree() {\n\
      \x20 all=$1; frontier=$1\n\
      \x20 while [ -n \"$frontier\" ]; do\n\
      \x20   kids=$(ps -eo pid=,ppid= 2>/dev/null | awk -v w=\"$frontier\" \
-     'BEGIN{n=split(w,a,\" \");for(i=1;i<=n;i++)want[a[i]]=1} want[$2]{print $1}')\n\
+     'BEGIN{n=split(w,a,\" \");for(i=1;i<=n;i++)want[a[i]]=1} want[$2]{printf \"%s \", $1}')\n\
      \x20   [ -n \"$kids\" ] || break\n\
      \x20   all=\"$all $kids\"; frontier=$kids\n\
      \x20 done\n\
@@ -516,6 +518,43 @@ mod tests {
         assert!(!parent_running, "the recorded process must be killed");
         assert!(settled, "the whole tree must be gone once `down` returns");
         assert!(pid_file_gone, "a stopped process's pid file must be removed");
+    }
+
+    #[test]
+    fn tree_reaches_grandchildren_under_an_awk_that_rejects_newline_in_v() {
+        // Regression: `print $1` emitted newline-separated pids that bsd awk
+        // (macOS) then rejected via `-v w=`, truncating the BFS at depth 1.
+        let mut wrapper = std::process::Command::new("sh")
+            .args(["-c", "sh -c 'sleep 30 ; :' ; :"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a depth-2 wrapper");
+        let outer = wrapper.id();
+        let middle = child_of(outer).expect("outer sh should have a child sh");
+        let inner = child_of(middle).expect("inner sh should have a sleep child");
+
+        let tree: Vec<u32> = sh_capture(&format!("{}\nws_tree {}", tree_fn(), outer))
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(outer.to_string())
+            .arg(middle.to_string())
+            .arg(inner.to_string())
+            .status();
+        let _ = wrapper.wait();
+
+        assert!(tree.contains(&outer), "outer {outer} missing from ws_tree: {tree:?}");
+        assert!(tree.contains(&middle), "middle {middle} missing from ws_tree: {tree:?}");
+        assert!(
+            tree.contains(&inner),
+            "grandchild {inner} missing from ws_tree: {tree:?} — awk likely errored on \
+             newline-in-string and truncated the BFS"
+        );
     }
 
     #[test]
