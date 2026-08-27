@@ -11,15 +11,20 @@ fn claude_writes_all_skills() {
     let skills_dir = ws.path().join("claude-skills");
     for name in [
         "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list",
-        "ws-clean", "ws-init",
+        "ws-clean", "ws-show", "ws-exec", "ws-resume",
     ] {
         let p = skills_dir.join(name).join("SKILL.md");
         assert!(p.is_file(), "missing {p:?}");
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(body.starts_with("---\n"), "{name}: no frontmatter");
         assert!(body.contains(&format!("name: {name}")));
-        assert!(body.contains("Invoke via bash"));
     }
+
+    // `ws-init` was retired; a stale install from an older ws should be swept, so it must not appear here.
+    assert!(
+        !skills_dir.join("ws-init").exists(),
+        "retired `ws-init` skill must not be written by `ws claude`"
+    );
 }
 
 #[test]
