@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn schema_text_mentions_every_json_field() {
-        // Best-effort drift alarm: if a field is added to ShowData/RepoInfo/ServiceInfo without a note in SCHEMA_TEXT, this test catches it. Not exhaustive — a rename could still slip past — but the common "added a field, forgot the docs" case is covered.
+        // Drift alarm: anchor on the `"<field>":` JSON key form so short field names ("name", "kind", "remote") don't false-pass against substrings inside longer identifiers ("hostname", "routed_hostname", "worktree_absolute"). Adding a field without documenting it now trips the assertion.
         for field in [
             "branch",
             "workspace_root",
@@ -480,7 +480,11 @@ mod tests {
             "log_path_absolute",
             "exec_command_prefix",
         ] {
-            assert!(SCHEMA_TEXT.contains(field), "SCHEMA_TEXT is missing `{field}` — describe output has drifted from the actual JSON shape");
+            let needle = format!("\"{field}\":");
+            assert!(
+                SCHEMA_TEXT.contains(&needle),
+                "SCHEMA_TEXT is missing `{needle}` — describe output has drifted from the actual JSON shape"
+            );
         }
     }
 }
