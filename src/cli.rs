@@ -45,7 +45,14 @@ enum Cmd {
     /// Stop a task's stack
     Down  { branch: String },
     /// Remove a task's worktrees
-    Rm    { branch: String, #[arg(long)] force: bool },
+    Rm {
+        branch: String,
+        #[arg(long)]
+        force: bool,
+        /// Keep the compose project's built images; the default prunes them alongside its volumes
+        #[arg(long)]
+        no_prune_images: bool,
+    },
     /// List active task worktrees
     List,
     /// Show one worktree in detail (services, ports, hostnames, exec syntax)
@@ -157,7 +164,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::New{repos,branch,up}    => crate::ops::new::run(&repos, &branch, up),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
-        Cmd::Rm{branch,force}        => crate::ops::rm::run(&branch, force),
+        Cmd::Rm{branch,force,no_prune_images} => crate::ops::rm::run(&branch, force, no_prune_images),
         Cmd::List                    => crate::ops::list::run(),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),

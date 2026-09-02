@@ -34,7 +34,7 @@ pub fn run(force: bool) -> Result<()> {
                 crate::ui::clean_verdict(&task_name, true, &reason, !force);
                 if force {
                     // Hook failures surface through the step line; don't abort the whole clean.
-                    let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, worktrees)?;
+                    let _ = super::teardown::remove_task(&ws.root, &cfg, &branch, worktrees, false)?;
                     removed += 1;
                 } else {
                     removable += 1;

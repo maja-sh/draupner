@@ -21,6 +21,7 @@ pub fn remove_task(
     cfg: &WsConfig,
     branch: &str,
     worktrees: &[(String, PathBuf)],
+    keep_images: bool,
 ) -> Result<bool> {
     let sanitized = workspace::sanitize_branch(branch);
     let mut hook_failed = false;
@@ -37,9 +38,9 @@ pub fn remove_task(
         if cfg.is_host_repo(repo) {
             teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
-            teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, &mut hook_failed);
+            teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, keep_images, &mut hook_failed);
         } else {
-            teardown_local(cfg, root, wt, &sanitized, repo, &mut hook_failed);
+            teardown_local(cfg, root, wt, &sanitized, repo, keep_images, &mut hook_failed);
         }
 
         // Drop routes before `ports::forget` wipes the service set they derive from.
@@ -135,6 +136,7 @@ fn teardown_local(
     wt: &Path,
     sanitized: &str,
     repo: &str,
+    keep_images: bool,
     hook_failed: &mut bool,
 ) {
     // Inspect: read the existing allocation, never allocate.
@@ -152,8 +154,9 @@ fn teardown_local(
                 continue;
             }
         };
+        let env = with_keep_images(&extra_env, event, keep_images);
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &extra_env) {
+        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &env) {
             Ok(()) => step.ok(),
             Err(e) => {
                 step.fail(&format!("{e}"));
@@ -174,6 +177,7 @@ fn teardown_remote(
     branch: &str,
     sanitized: &str,
     repo: &str,
+    keep_images: bool,
     hook_failed: &mut bool,
 ) {
     let Some(site @ Site::Remote { .. }) = site else {
@@ -187,8 +191,9 @@ fn teardown_remote(
         let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
             continue;
         };
+        let env = with_keep_images(&extra_env, event, keep_images);
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &extra_env) {
+        match super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &env) {
             Ok(()) => step.ok(),
             Err(e) => {
                 step.fail(&e.to_string());
@@ -196,6 +201,16 @@ fn teardown_remote(
             }
         }
     }
+}
+
+/// Scope `WS_KEEP_IMAGES` to `post-remove` so a user's declared `down` script can't accidentally read it as a signal meant for teardown's later image prune.
+fn with_keep_images(base: &[(String, String)], event: &str, keep_images: bool) -> Vec<(String, String)> {
+    if !keep_images || event != "post-remove" {
+        return base.to_vec();
+    }
+    let mut env = base.to_vec();
+    env.push(("WS_KEEP_IMAGES".to_string(), "1".to_string()));
+    env
 }
 
 fn remove_if_symlink(p: &Path) {

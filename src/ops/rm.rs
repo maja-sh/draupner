@@ -6,7 +6,7 @@ use crate::config;
 use crate::git;
 use crate::workspace;
 
-pub fn run(branch: &str, force: bool) -> Result<()> {
+pub fn run(branch: &str, force: bool, keep_images: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
@@ -75,7 +75,7 @@ pub fn run(branch: &str, force: bool) -> Result<()> {
         )));
     }
 
-    let hook_failed = super::teardown::remove_task(&ws.root, &cfg, branch, &worktrees)?;
+    let hook_failed = super::teardown::remove_task(&ws.root, &cfg, branch, &worktrees, keep_images)?;
 
     if hook_failed {
         return Err(super::op_failure(format!(

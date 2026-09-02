@@ -233,3 +233,30 @@ fn rm_clears_a_registration_whose_directory_is_gone() {
     assert!(err.contains("Removed worktrees"), "expected success summary in:\n{err}");
     assert!(!registered(&f), "the stale registration must be pruned");
 }
+
+#[test]
+fn no_prune_images_flag_toggles_ws_keep_images_on_post_remove() {
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook("api", "post-remove", "echo \"KEEP=${WS_KEEP_IMAGES:-unset}\"");
+
+    f.run_ok(&["new", "api", "feat/prune-default"]);
+    let err = stderr(&f.run_ok(&["rm", "feat/prune-default"]));
+    assert!(err.contains("KEEP=unset"), "default rm must not set WS_KEEP_IMAGES:\n{err}");
+
+    f.run_ok(&["new", "api", "feat/keep"]);
+    let err = stderr(&f.run_ok(&["rm", "feat/keep", "--no-prune-images"]));
+    assert!(err.contains("KEEP=1"), "--no-prune-images must set WS_KEEP_IMAGES=1:\n{err}");
+}
+
+#[test]
+fn no_prune_images_does_not_leak_into_down() {
+    // `WS_KEEP_IMAGES` is scoped to `post-remove` so a user's declared `down`
+    // script can't accidentally read it as a signal meant for the later prune.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook("api", "down", "echo \"DOWN-KEEP=${WS_KEEP_IMAGES:-unset}\"");
+    f.add_hook("api", "post-remove", "echo \"POST-KEEP=${WS_KEEP_IMAGES:-unset}\"");
+    f.run_ok(&["new", "api", "feat/scoped"]);
+    let err = stderr(&f.run_ok(&["rm", "feat/scoped", "--no-prune-images"]));
+    assert!(err.contains("DOWN-KEEP=unset"), "WS_KEEP_IMAGES must not reach down:\n{err}");
+    assert!(err.contains("POST-KEEP=1"), "WS_KEEP_IMAGES must reach post-remove:\n{err}");
+}
