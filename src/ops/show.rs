@@ -221,7 +221,11 @@ fn liveness(
             )?
         }
     };
-    Some(out.trim() != "0")
+    Some(match crate::ui::classify_status(&out) {
+        Some(crate::ui::StatusKind::Healthy | crate::ui::StatusKind::Degraded) => true,
+        Some(crate::ui::StatusKind::Stopped | crate::ui::StatusKind::Crashed) => false,
+        None => out.trim() != "0",
+    })
 }
 
 /// Services with their allocated port + routing status. `recorded` comes from the `.ws-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.ws.json`-declared set for a not-yet-up worktree.
