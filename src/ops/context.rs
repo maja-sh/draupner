@@ -1,4 +1,4 @@
-//! `ws context` — cwd-adaptive JSON wakeup for LLM agents. Runs once per session; the response is meant to be the agent's sole grounding before it touches anything. Superset of `ws show --json`: adds workspace-level facts, cwd-derived `current` block, aggregate task state, and in-band `hints` (agent-oriented do/don'ts + enum vocab) so a fresh agent never has to guess semantics.
+//! Cwd-adaptive JSON wakeup for LLM agents; superset of `ws show --json`.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -62,7 +62,7 @@ struct Task {
     repos: Vec<show::RepoInfo>,
 }
 
-/// Aggregated per-task health. `kind` is a shortcut for humans; every value it can hold is recoverable from the numeric fields, so an agent that doesn't recognize the label can still act correctly on the numbers.
+/// Aggregated per-task health; the label is a shortcut, the numerics are ground truth.
 #[derive(Serialize)]
 struct TaskState {
     kind: &'static str,
@@ -101,7 +101,7 @@ fn build_workspace(cfg: &WsConfig, root: &Path, site: Option<&Site>) -> Workspac
     }
 }
 
-/// cwd → (task, repo) inference plus original-branch recovery from git. Falls back to the sanitized dir name when the git probe can't find a match (a stale/dead worktree entry) so the field is never a lie — sanitized is a legal branch name, just possibly not the one the user typed.
+/// cwd → (task, repo) inference plus original-branch recovery via git.
 fn build_current(cfg: &WsConfig, root: &Path, cwd: &Path) -> Current {
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let worktrees_root = root.join(".worktrees");
@@ -122,7 +122,7 @@ fn build_current(cfg: &WsConfig, root: &Path, cwd: &Path) -> Current {
     Current { cwd: cwd_canon, task: branch, repo: repo_name, task_dir, repo_worktree }
 }
 
-/// Recover the user-typed branch name from a sanitized task-dir name by probing the first repo whose git worktree list matches. A slash-containing branch like `feat/x` gets sanitized to `feat-x` for the dir path, but hooks and downstream `ws exec` want the original.
+/// Recover the user-typed branch from a sanitized task-dir name via git; None when no repo confirms it, since the sanitized name is not a valid substitute for downstream `ws exec`.
 fn recover_branch(cfg: &WsConfig, root: &Path, worktrees_root: &Path, task_dir: &str) -> Option<String> {
     let target = worktrees_root.join(task_dir);
     let target = target.canonicalize().unwrap_or(target);
@@ -136,7 +136,7 @@ fn recover_branch(cfg: &WsConfig, root: &Path, worktrees_root: &Path, task_dir: 
             return probe;
         }
     }
-    Some(task_dir.to_string())
+    None
 }
 
 fn build_task(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> Task {
@@ -150,7 +150,7 @@ fn build_task(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) ->
     }
 }
 
-/// Aggregate rule: worst-of. Any repo with `is_running == Some(false)` in a task where others are healthy → the task is degraded, because "some up" is different information than "none up". A `None` (uncheckable) contributes to `total_repos` but not to `healthy_repos` — the visible ratio tells the truth rather than papering over uncertain states.
+/// Worst-of across repos; unknowns count toward the total but not the numerator.
 fn aggregate_state(repos: &[show::RepoInfo]) -> TaskState {
     let total = repos.len();
     let healthy = repos.iter().filter(|r| r.is_running == Some(true)).count();
@@ -172,7 +172,7 @@ fn aggregate_state(repos: &[show::RepoInfo]) -> TaskState {
     TaskState { kind, healthy_repos: healthy, total_repos: total, any_running }
 }
 
-/// Static rules always emitted; conditional ones added when the response's state warrants them. The agent reads this list once and treats it as authoritative — do not paraphrase or reorder.
+/// Static rules plus conditional ones the current state warrants.
 fn agent_hints(workspace: &Workspace, current: &Current, task: Option<&Task>) -> Vec<&'static str> {
     let mut h = vec![
         "task.state.kind is one of: running (all repos healthy) | degraded (some healthy, some not) | stopped (none running) | unknown (state could not be determined). The numeric fields (healthy_repos, total_repos) are the ground truth if the label is unclear.",
