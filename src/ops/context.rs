@@ -27,7 +27,7 @@ pub fn run(describe: bool) -> Result<()> {
 
 #[derive(Serialize)]
 struct Context {
-    ws_version: &'static str,
+    wsx_version: &'static str,
     workspace: Workspace,
     current: Current,
     /// `null` when the cwd isn't inside a task worktree — the agent has workspace-level facts but no per-task detail.
@@ -77,7 +77,7 @@ fn collect(cfg: &WsConfig, root: &Path, cwd: &Path, site: Option<&Site>) -> Cont
     let workspace = build_workspace(cfg, root, site);
     let hints = agent_hints(&workspace, &current, task.as_ref());
     Context {
-        ws_version: env!("CARGO_PKG_VERSION"),
+        wsx_version: env!("CARGO_PKG_VERSION"),
         workspace,
         current,
         task,
@@ -203,7 +203,7 @@ const SCHEMA_TEXT: &str = r#"ws context — cwd-adaptive JSON wakeup for LLM age
 Always JSON on stdout. Fields:
 
 {
-  "ws_version":  string — ws version producing this payload,
+  "wsx_version": string — wsx version producing this payload,
   "workspace": {
     "root":     absolute path to the workspace root,
     "domain":   private TLD used for routed hostnames, or null,

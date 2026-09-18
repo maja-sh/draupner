@@ -138,7 +138,8 @@ shared Caddy, so any number of branches share one HTTPS port. That split is why
 | `ws up <branch>` | Bring the task's stacks up, install routes, report ports |
 | `ws down <branch>` | Stop the stacks, leave the files |
 | `ws rm <branch>` | Stop and remove the worktrees (`--force` when dirty) |
-| `ws list` | Every task, its repos, and their run state |
+| `ws list` | Every task, its repos, and their run state (`-s` for one line per task) |
+| `ws context` | JSON snapshot of the current task and workspace for LLM agents |
 | `ws clean` | Audit worktrees; preview what's safe to drop, `--force` to act |
 | `ws exec [repo] -- <cmd>` | Run a command where that repo's stack lives (over SSH when offloaded) |
 | `ws setup` | Ready this machine for routing; reports the gaps it can't close itself |
