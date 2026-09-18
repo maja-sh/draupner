@@ -135,7 +135,11 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
         };
 
         let is_host = cfg.is_host_repo(name);
-        let kind = if is_host { "host" } else { "container" };
+        let kind = if cfg.is_container_repo(name, &worktree_absolute) {
+            "container"
+        } else {
+            "host"
+        };
 
         // One `.ws-meta` read serves both liveness (never-up short-circuit) and the service list.
         let (port_map, recorded_services) = crate::ports::load_meta(root, &sanitized, name);
