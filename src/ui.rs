@@ -1,6 +1,6 @@
 //! Op code never calls `println!`/`eprintln!` directly — tty detection, palette, spinners, and non-tty fallback all live here.
 
-use console::{style, Term};
+use console::{style, StyledObject, Term};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -262,18 +262,24 @@ pub fn list_table(groups: &[ListGroup]) {
         .flat_map(|g| g.rows.iter())
         .any(|r| r.status.is_some());
     let dash = if tty() { "—" } else { "-" };
+    let glyph_gutter = tty()
+        && groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .any(|r| r.status.as_deref().and_then(status_glyph).is_some());
 
     eprintln!();
     for group in groups {
         if tty() {
-            let mut header = style(&group.task).bold().to_string();
+            eprintln!("  {}", style(&group.task).bold());
             if !group.path.is_empty() {
-                header.push_str(&format!("  {}", style(&group.path).dim()));
+                eprintln!("  {}", style(tildify(&group.path)).dim());
             }
-            eprintln!("  {header}");
         } else {
-            let sep = if group.path.is_empty() { "" } else { "  " };
-            eprintln!("  {}{sep}{}", group.task, group.path);
+            eprintln!("  {}", group.task);
+            if !group.path.is_empty() {
+                eprintln!("  {}", group.path);
+            }
         }
         for row in &group.rows {
             let repo = format!("{:<width$}", row.repo, width = repo_w);
@@ -284,7 +290,15 @@ pub fn list_table(groups: &[ListGroup]) {
                 } else {
                     style(format!("{dirty_txt:<5}")).green()
                 };
-                let mut line = format!("    {} {}", style(repo).green().bold(), dirty);
+                let prefix = if glyph_gutter {
+                    match row.status.as_deref().and_then(status_glyph) {
+                        Some(g) => format!("{g} "),
+                        None => "  ".to_string(),
+                    }
+                } else {
+                    String::new()
+                };
+                let mut line = format!("    {prefix}{} {}", style(repo).green().bold(), dirty);
                 if any_status {
                     let status = row.status.as_deref().unwrap_or(dash);
                     line.push(' ');
@@ -308,16 +322,56 @@ pub fn list_table(groups: &[ListGroup]) {
             }
             // Widths are per-row so one repo's long service name doesn't push another's ports out.
             let name_w = row.services.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            let service_indent = if glyph_gutter { "        " } else { "      " };
             for (name, port) in &row.services {
                 let name_padded = format!("{name:<name_w$}");
                 if tty() {
-                    eprintln!("      {} {}", style(name_padded).dim(), style(format!(":{port}")).dim());
+                    eprintln!("{service_indent}{} {}", style(name_padded).dim(), style(format!(":{port}")).dim());
                 } else {
                     eprintln!("      {name_padded} :{port}");
                 }
             }
         }
         eprintln!();
+    }
+}
+
+/// Classify a `status` string into a leading dot/x glyph. `None` when the string doesn't match a known state — those rows still render their raw text, they just don't get a glyph in the gutter. Prefix-based so a script that follows the "running N/M"/"stopped"/"crashed" vocabulary lights up without ws having to know its exact wording.
+fn status_glyph(status: &str) -> Option<StyledObject<&'static str>> {
+    let s = status.trim();
+    if let Some(rest) = s.strip_prefix("running") {
+        // Comma → the health probe found a caveat ("running, nothing on :N"); a running/declared ratio below 1 → some containers are down.
+        let degraded = rest.starts_with(',') || has_partial_ratio(rest);
+        Some(if degraded { style("◐").yellow() } else { style("●").green() })
+    } else if s.starts_with("stopped") || s.starts_with("not started") || s == "down" {
+        Some(style("○").dim())
+    } else if s.starts_with("crashed") || s == "dead" {
+        Some(style("✗").red())
+    } else {
+        None
+    }
+}
+
+/// A token matching `N/M` with `N < M` and both numeric — the compose default's "running 5/8" form.
+fn has_partial_ratio(s: &str) -> bool {
+    s.split_whitespace().any(|w| {
+        let (n, m) = match w.split_once('/') {
+            Some(p) => p,
+            None => return false,
+        };
+        matches!((n.parse::<u32>(), m.parse::<u32>()), (Ok(n), Ok(m)) if n < m)
+    })
+}
+
+/// Replace a `$HOME` prefix with `~`; leaves the rest of the path untouched.
+fn tildify(path: &str) -> String {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return path.to_string(),
+    };
+    match path.strip_prefix(&home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
     }
 }
 
@@ -550,5 +604,41 @@ mod tests {
         assert_eq!(pad_tag("cfg"), "cfg   ");
         assert_eq!(pad_tag("skills"), "skills");
         assert_eq!(pad_tag("post-create"), "post-create");
+    }
+
+    #[test]
+    fn status_glyph_maps_the_health_vocabulary() {
+        // Compare on the plain text — StyledObject wraps ANSI which is noisy to match.
+        let g = |s: &str| status_glyph(s).map(|st| format!("{st}"));
+        assert!(g("running :20032").unwrap().contains('●'), "healthy host process");
+        assert!(g("running 8/8").unwrap().contains('●'), "all containers up");
+        assert!(g("running").unwrap().contains('●'), "bare 'running' (no port attribution)");
+        assert!(g("running 5/8").unwrap().contains('◐'), "container ratio below 1 must degrade");
+        assert!(g("running, nothing on :20030").unwrap().contains('◐'), "Silent health degrades");
+        assert!(g("running, :20031 held by another process").unwrap().contains('◐'), "Squatted health degrades");
+        assert!(g("stopped").unwrap().contains('○'), "'stopped' is the compose default's down word");
+        assert!(g("not started").unwrap().contains('○'), "Health::NotStarted's label");
+        assert!(g("crashed").unwrap().contains('✗'), "Health::Crashed's label");
+        assert_eq!(g("hook file not migrated"), None, "an unrecognized status keeps its raw text and no glyph");
+    }
+
+    #[test]
+    fn has_partial_ratio_only_fires_on_a_true_n_over_m() {
+        assert!(has_partial_ratio(" 5/8"));
+        assert!(has_partial_ratio(" 0/1"));
+        assert!(!has_partial_ratio(" 8/8"), "full ratio is not partial");
+        assert!(!has_partial_ratio(" 9/8"), "over-ratio can't come from this default; treat as full");
+        assert!(!has_partial_ratio(" :20032"), "a port ':20032' must not read as a ratio");
+        assert!(!has_partial_ratio(" nothing on :20030"), "no slash, no ratio");
+    }
+
+    #[test]
+    fn tildify_replaces_home_prefix_only_at_a_segment_boundary() {
+        std::env::set_var("HOME", "/home/alice");
+        assert_eq!(tildify("/home/alice/work/proj"), "~/work/proj");
+        assert_eq!(tildify("/home/alice"), "~");
+        // A sibling home dir mustn't be tildified — `/home/alice-old/...` starts with the string but isn't under $HOME.
+        assert_eq!(tildify("/home/alice-old/x"), "/home/alice-old/x");
+        assert_eq!(tildify("/opt/data"), "/opt/data");
     }
 }

