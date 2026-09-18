@@ -70,6 +70,12 @@ enum Cmd {
         #[arg(long)]
         describe: bool,
     },
+    /// Cwd-adaptive JSON wakeup for LLM agents (workspace, current, task, hints)
+    Context {
+        /// Print the JSON schema and exit
+        #[arg(long)]
+        describe: bool,
+    },
     /// Audit worktrees; remove safe-to-drop ones (preview unless --force)
     Clean { #[arg(long, short)] force: bool },
     /// Ready this machine for routing (rootless bits directly; privileged bits consented)
@@ -171,6 +177,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Rm{branch,force,no_prune_images} => crate::ops::rm::run(&branch, force, no_prune_images),
         Cmd::List{short}             => crate::ops::list::run(short),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
+        Cmd::Context{describe}       => crate::ops::context::run(describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
         Cmd::Remote{cmd}             => match cmd {

@@ -11,7 +11,7 @@ fn claude_writes_all_skills() {
     let skills_dir = ws.path().join("claude-skills");
     for name in [
         "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list",
-        "ws-clean", "ws-show", "ws-exec", "ws-resume",
+        "ws-clean", "ws-exec", "ws-context",
     ] {
         let p = skills_dir.join(name).join("SKILL.md");
         assert!(p.is_file(), "missing {p:?}");
@@ -20,11 +20,13 @@ fn claude_writes_all_skills() {
         assert!(body.contains(&format!("name: {name}")));
     }
 
-    // `ws-init` was retired; a stale install from an older ws should be swept, so it must not appear here.
-    assert!(
-        !skills_dir.join("ws-init").exists(),
-        "retired `ws-init` skill must not be written by `ws claude`"
-    );
+    // Retired skills — a stale install from an older ws must be swept.
+    for name in ["ws-init", "ws-show", "ws-resume"] {
+        assert!(
+            !skills_dir.join(name).exists(),
+            "retired `{name}` skill must not be written by `ws claude`"
+        );
+    }
 }
 
 #[test]

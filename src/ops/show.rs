@@ -1,10 +1,9 @@
 //! Focused per-worktree endpoint: everything you need to operate one task's
 //! worktree, one call. Narrower than `ws list` (single branch, no siblings),
 //! broader than `ws here` (services, ports, hostnames, exec syntax on top of
-//! paths). Two audiences share the same data — the terminal reader and the
-//! LLM parsing `--json` for a `/ws-resume` skill — so field names are
-//! self-documenting to keep the tooling half honest without a schema
-//! round-trip.
+//! paths). The `--json` shape doubles as the `task.repos[]` payload of
+//! `ws context`, which is why field names are self-documenting — the LLM
+//! endpoint leans on names in place of a schema round-trip.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -85,39 +84,39 @@ fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<S
 }
 
 #[derive(Serialize)]
-struct ShowData {
-    branch: String,
-    workspace_root: PathBuf,
-    remote: Option<RemoteInfo>,
-    repos: Vec<RepoInfo>,
+pub(crate) struct ShowData {
+    pub branch: String,
+    pub workspace_root: PathBuf,
+    pub remote: Option<RemoteInfo>,
+    pub repos: Vec<RepoInfo>,
 }
 
 #[derive(Serialize)]
-struct RemoteInfo {
-    connection: String,
-    worktree_base_absolute: String,
+pub(crate) struct RemoteInfo {
+    pub connection: String,
+    pub worktree_base_absolute: String,
 }
 
 #[derive(Serialize)]
-struct RepoInfo {
-    name: String,
-    kind: String,
-    worktree_absolute: PathBuf,
-    is_running: Option<bool>,
-    services: Vec<ServiceInfo>,
-    log_path_absolute: Option<PathBuf>,
-    exec_command_prefix: String,
+pub(crate) struct RepoInfo {
+    pub name: String,
+    pub kind: String,
+    pub worktree_absolute: PathBuf,
+    pub is_running: Option<bool>,
+    pub services: Vec<ServiceInfo>,
+    pub log_path_absolute: Option<PathBuf>,
+    pub exec_command_prefix: String,
 }
 
 #[derive(Serialize)]
-struct ServiceInfo {
-    name: String,
-    allocated_host_port: Option<u16>,
-    routed_hostname: Option<String>,
-    is_http_routed: bool,
+pub(crate) struct ServiceInfo {
+    pub name: String,
+    pub allocated_host_port: Option<u16>,
+    pub routed_hostname: Option<String>,
+    pub is_http_routed: bool,
 }
 
-fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> ShowData {
+pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> ShowData {
     let sanitized = workspace::sanitize_branch(branch);
 
     let remote = cfg.remote.as_ref().map(|r| RemoteInfo {

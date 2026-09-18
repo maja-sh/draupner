@@ -9,13 +9,12 @@ const SKILLS: &[(&str, &str)] = &[
     ("ws-rm",       include_str!("../skills/ws-rm/SKILL.md")),
     ("ws-list",     include_str!("../skills/ws-list/SKILL.md")),
     ("ws-clean",    include_str!("../skills/ws-clean/SKILL.md")),
-    ("ws-show",     include_str!("../skills/ws-show/SKILL.md")),
     ("ws-exec",     include_str!("../skills/ws-exec/SKILL.md")),
-    ("ws-resume",   include_str!("../skills/ws-resume/SKILL.md")),
+    ("ws-context",  include_str!("../skills/ws-context/SKILL.md")),
 ];
 
 /// Skills that used to ship and were removed. `write_all` sweeps them from the target so a re-run of `ws claude` cleans up any prior install. Keep entries here for at least one release cycle after retirement so users who upgrade catch the removal; then drop them.
-const DEPRECATED_SKILLS: &[&str] = &["ws-init"];
+const DEPRECATED_SKILLS: &[&str] = &["ws-init", "ws-show", "ws-resume"];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(target_root)
@@ -62,12 +61,7 @@ mod tests {
 
     #[test]
     fn command_wrapper_skills_carry_an_invoke_line() {
-        // Most skills just map `/ws-<x>` to `ws <x>`; a few (ws-resume) are
-        // procedures with no single command, so the invoke line is not universal.
         for (name, body) in SKILLS {
-            if *name == "ws-resume" {
-                continue;
-            }
             assert!(body.contains("Invoke via bash"), "{name}: missing invoke line");
         }
     }
