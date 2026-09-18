@@ -7,7 +7,7 @@ use crate::config;
 use crate::git;
 use crate::hooks;
 use crate::inject;
-use crate::ui::{ListGroup, ListRow};
+use crate::ui::{classify_status, ListGroup, ListRow, ListShortRow, StatusKind};
 use crate::workspace;
 
 /// Slower `status` hooks are reported as "status unknown".
@@ -21,7 +21,7 @@ struct RowJob {
     notes: Vec<String>,
 }
 
-pub fn run() -> Result<()> {
+pub fn run(short: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
     // `None` = unreachable remote; the listing still renders, just without status.
@@ -54,6 +54,17 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
+    if short {
+        // `(unmanaged)` never has status by definition — hide it from the triage view.
+        let rows: Vec<ListShortRow> = tasks
+            .iter()
+            .filter(|(key, _)| key.as_str() != "(unmanaged)")
+            .map(|(key, rows)| aggregate_short_row(key, rows))
+            .collect();
+        crate::ui::list_short(&rows);
+        return Ok(());
+    }
+
     let groups: Vec<ListGroup> = tasks
         .into_iter()
         .map(|(key, rows)| {
@@ -69,6 +80,33 @@ pub fn run() -> Result<()> {
 
     crate::ui::list_table(&groups);
     Ok(())
+}
+
+/// Roll a task's repo rows up to `(worst-of glyph, running/total label)`. Any crashed repo dominates; a mix of healthy and stopped reads as degraded, not stopped, because "some up" is different from "none up". A row whose status ws couldn't classify counts against the numerator but not for the glyph — the visible ratio tells the truth about what ws knows.
+fn aggregate_short_row(key: &str, rows: &[(ListRow, Option<String>)]) -> ListShortRow {
+    let kinds: Vec<Option<StatusKind>> = rows
+        .iter()
+        .map(|(r, _)| r.status.as_deref().and_then(classify_status))
+        .collect();
+    let total = kinds.len();
+    let healthy = kinds.iter().filter(|k| **k == Some(StatusKind::Healthy)).count();
+    let crashed = kinds.iter().any(|k| *k == Some(StatusKind::Crashed));
+    let stopped = kinds.iter().all(|k| *k == Some(StatusKind::Stopped));
+    let all_healthy = kinds.iter().all(|k| *k == Some(StatusKind::Healthy));
+
+    let (kind, label) = if crashed {
+        (Some(StatusKind::Crashed), "crashed".to_string())
+    } else if all_healthy {
+        (Some(StatusKind::Healthy), format!("running {healthy}/{total}"))
+    } else if stopped {
+        (Some(StatusKind::Stopped), "stopped".to_string())
+    } else if kinds.iter().any(|k| k.is_some()) {
+        (Some(StatusKind::Degraded), format!("running {healthy}/{total}"))
+    } else {
+        (None, "unknown".to_string())
+    };
+
+    ListShortRow { task: group_label(key, rows), kind, label }
 }
 
 /// Extracted so `thread::scope` can fan out one thread per worktree; the original inline loop body verbatim, minus the direct `ui::note` call (deferred through `RowJob::notes` so parallel workers can't interleave into the listing).
@@ -225,5 +263,69 @@ mod tests {
             "only the current service set's ports may be probed — :20001 belongs to a \
              service that no longer exists"
         );
+    }
+
+    fn row(repo: &str, status: Option<&str>) -> (ListRow, Option<String>) {
+        (
+            ListRow {
+                repo: repo.to_string(),
+                dirty: false,
+                status: status.map(|s| s.to_string()),
+                note: None,
+                services: Vec::new(),
+            },
+            Some("feat/x".to_string()),
+        )
+    }
+
+    #[test]
+    fn aggregate_reports_running_ratio_when_every_repo_is_healthy() {
+        let rows = vec![row("api", Some("running 8/8")), row("app", Some("running :20032"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, Some(StatusKind::Healthy));
+        assert_eq!(out.label, "running 2/2");
+    }
+
+    #[test]
+    fn aggregate_calls_a_crashed_repo_the_whole_tasks_state() {
+        // Even one dead repo overshadows healthy peers: the triage view's job is to name the fire.
+        let rows = vec![row("api", Some("running 8/8")), row("app", Some("crashed"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, Some(StatusKind::Crashed));
+        assert_eq!(out.label, "crashed");
+    }
+
+    #[test]
+    fn aggregate_reads_all_stopped_as_stopped_not_partial() {
+        let rows = vec![row("api", Some("stopped")), row("app", Some("stopped"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, Some(StatusKind::Stopped));
+        assert_eq!(out.label, "stopped");
+    }
+
+    #[test]
+    fn aggregate_reads_mixed_healthy_and_stopped_as_degraded() {
+        // "some up" and "none up" are different situations — a mixed task can't collapse to "stopped".
+        let rows = vec![row("api", Some("running 8/8")), row("app", Some("stopped"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, Some(StatusKind::Degraded));
+        assert_eq!(out.label, "running 1/2");
+    }
+
+    #[test]
+    fn aggregate_treats_a_container_partial_as_degraded() {
+        let rows = vec![row("api", Some("running 5/8"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, Some(StatusKind::Degraded));
+        // The repo isn't `Healthy`, so it doesn't count toward the numerator.
+        assert_eq!(out.label, "running 0/1");
+    }
+
+    #[test]
+    fn aggregate_falls_to_none_when_no_repo_reported_a_known_state() {
+        let rows = vec![row("api", None), row("app", Some("hook file not migrated"))];
+        let out = aggregate_short_row("feat/x", &rows);
+        assert_eq!(out.kind, None, "no known state means no glyph");
+        assert_eq!(out.label, "unknown");
     }
 }

@@ -240,6 +240,13 @@ pub struct ListGroup {
     pub rows: Vec<ListRow>,
 }
 
+/// One row of the `--short` view: an aggregate of a task's repos into a single glyph + label. `kind: None` means no row classified — render as dim, no glyph.
+pub struct ListShortRow {
+    pub task: String,
+    pub kind: Option<StatusKind>,
+    pub label: String,
+}
+
 pub fn list_empty() {
     if tty() {
         eprintln!("\n{}", style("no worktrees").dim());
@@ -336,20 +343,71 @@ pub fn list_table(groups: &[ListGroup]) {
     }
 }
 
-/// Classify a `status` string into a leading dot/x glyph. `None` when the string doesn't match a known state — those rows still render their raw text, they just don't get a glyph in the gutter. Prefix-based so a script that follows the "running N/M"/"stopped"/"crashed" vocabulary lights up without ws having to know its exact wording.
-fn status_glyph(status: &str) -> Option<StyledObject<&'static str>> {
+pub fn list_short(rows: &[ListShortRow]) {
+    if rows.is_empty() {
+        list_empty();
+        return;
+    }
+    let task_w = rows.iter().map(|r| r.task.len()).max().unwrap_or(0);
+    eprintln!();
+    for row in rows {
+        let task = format!("{:<w$}", row.task, w = task_w);
+        if tty() {
+            let glyph = match row.kind {
+                Some(k) => format!("{}", kind_glyph(k)),
+                None => style("·").dim().to_string(),
+            };
+            eprintln!("  {glyph} {}  {}", style(task).green().bold(), style(&row.label).dim());
+        } else {
+            let glyph = match row.kind {
+                Some(StatusKind::Healthy) => "*",
+                Some(StatusKind::Degraded) => "~",
+                Some(StatusKind::Stopped) => "-",
+                Some(StatusKind::Crashed) => "!",
+                None => "?",
+            };
+            eprintln!("  {glyph} {task}  {}", row.label);
+        }
+    }
+    eprintln!();
+}
+
+/// Vocabulary the status column classifies into, shared by the full listing (per-row glyph) and the `--short` view (per-task aggregate glyph) so a health color means the same thing in both.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum StatusKind {
+    Healthy,
+    Degraded,
+    Stopped,
+    Crashed,
+}
+
+/// Prefix-based so a script following the "running [N/M]"/"stopped"/"crashed" vocabulary lights up without ws having to know its exact wording. `None` when the string doesn't match a known state — the row still renders its raw text, just without a glyph.
+pub fn classify_status(status: &str) -> Option<StatusKind> {
     let s = status.trim();
     if let Some(rest) = s.strip_prefix("running") {
         // Comma → the health probe found a caveat ("running, nothing on :N"); a running/declared ratio below 1 → some containers are down.
         let degraded = rest.starts_with(',') || has_partial_ratio(rest);
-        Some(if degraded { style("◐").yellow() } else { style("●").green() })
+        Some(if degraded { StatusKind::Degraded } else { StatusKind::Healthy })
     } else if s.starts_with("stopped") || s.starts_with("not started") || s == "down" {
-        Some(style("○").dim())
+        Some(StatusKind::Stopped)
     } else if s.starts_with("crashed") || s == "dead" {
-        Some(style("✗").red())
+        Some(StatusKind::Crashed)
     } else {
         None
     }
+}
+
+pub fn kind_glyph(kind: StatusKind) -> StyledObject<&'static str> {
+    match kind {
+        StatusKind::Healthy => style("●").green(),
+        StatusKind::Degraded => style("◐").yellow(),
+        StatusKind::Stopped => style("○").dim(),
+        StatusKind::Crashed => style("✗").red(),
+    }
+}
+
+fn status_glyph(status: &str) -> Option<StyledObject<&'static str>> {
+    classify_status(status).map(kind_glyph)
 }
 
 /// A token matching `N/M` with `N < M` and both numeric — the compose default's "running 5/8" form.

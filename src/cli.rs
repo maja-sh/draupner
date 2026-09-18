@@ -54,7 +54,11 @@ enum Cmd {
         no_prune_images: bool,
     },
     /// List active task worktrees
-    List,
+    List {
+        /// One line per task: aggregate glyph + `running N/M`/`stopped`/`crashed`, no per-repo detail
+        #[arg(short, long)]
+        short: bool,
+    },
     /// Show one worktree in detail (services, ports, hostnames, exec syntax)
     Show {
         /// Branch to describe; inferred from the cwd when omitted
@@ -165,7 +169,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force,no_prune_images} => crate::ops::rm::run(&branch, force, no_prune_images),
-        Cmd::List                    => crate::ops::list::run(),
+        Cmd::List{short}             => crate::ops::list::run(short),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
