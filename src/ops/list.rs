@@ -124,63 +124,14 @@ fn compute_row(
     let sanitized = workspace::sanitize_branch(branch.as_deref().unwrap_or(""));
     let mut notes: Vec<String> = Vec::new();
 
-    // Only ws can report a crashed host process; a `status` script assumes the server is running.
-    let host_health = (managed && cfg.is_host_repo(repo))
-        .then(|| {
-            let site = site?;
-            let name = crate::supervise::proc_name(branch.as_deref().unwrap_or(""), repo);
-            let ports = host_probe_ports(cfg, site, ws_root, &wt_path, &sanitized, repo);
-            crate::supervise::health(site, &name, &ports)
-        })
-        .flatten();
-
-    // Lazy — skipped when ws already has bad news about a host process.
-    let mut declared = || if !managed {
-        None
-    } else if let Some(r) = cfg.remote.as_ref() {
-        // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
-        match site {
-            Some(s @ crate::remote::Site::Remote { .. }) => {
-                cfg.command_for(repo, "status", cfg.is_container_repo(repo, &wt_path)).and_then(|cmd| {
-                    let extra_env = inject::prepare(
-                        cfg, s, ws_root, &wt_path, &sanitized, repo, inject::Phase::Inspect,
-                    )
-                    .unwrap_or_default();
-                    let base = s.abs_base(&r.worktree_base(ws_root));
-                    crate::remote::capture_status(
-                        &r.connection, &base, &sanitized, repo, &extra_env, &cmd,
-                        STATUS_TIMEOUT.as_secs(),
-                    )
-                })
-            }
-            _ => None,
-        }
+    let status = if managed {
+        let (s, mut extra) = probe_status(
+            cfg, site, ws_root, &wt_path, branch.as_deref().unwrap_or(""), &sanitized, repo,
+        );
+        notes.append(&mut extra);
+        s
     } else {
-        // Local status; Inspect phase — no allocation or derivation from a status probe. `ws list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
-        let cmd = match hooks::resolve(
-            cfg, ws_root, repo, "status", cfg.is_container_repo(repo, &wt_path),
-        ) {
-            Ok(cmd) => cmd?,
-            Err(e) => {
-                notes.push(format!("{repo}: {e}"));
-                return Some("hook file not migrated".to_string());
-            }
-        };
-        let extra_env = inject::prepare(
-            cfg, &crate::remote::Site::Local, ws_root, &wt_path, &sanitized, repo,
-            inject::Phase::Inspect,
-        )
-        .unwrap_or_default();
-        hooks::capture_command(
-            ws_root, &wt_path, repo, &sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
-        )
-    };
-
-    // ws's crash beats the script; a healthy process defers to the script for detail.
-    let status = match host_health {
-        Some(h) if !h.is_ok() => Some(h.label()),
-        Some(h) => declared().or_else(|| Some(h.label())),
-        None => declared(),
+        None
     };
 
     let note = if managed {
@@ -201,6 +152,84 @@ fn compute_row(
 
     let row = ListRow { repo: repo.to_string(), dirty, status, note, services };
     RowJob { task_key, row, branch, notes }
+}
+
+/// Classify a managed worktree's stack: host-supervised health first (ws alone
+/// can report a crashed process), otherwise the declared `status` script (locally,
+/// or over SSH for a remote workspace). Diagnostic notes are returned separately
+/// so a parallel caller can serialize them without interleaving into the listing.
+pub(super) fn probe_status(
+    cfg: &config::WsConfig,
+    site: Option<&crate::remote::Site>,
+    ws_root: &std::path::Path,
+    wt_path: &std::path::Path,
+    branch: &str,
+    sanitized: &str,
+    repo: &str,
+) -> (Option<String>, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+
+    // Only ws can report a crashed host process; a `status` script assumes the server is running.
+    let host_health = cfg
+        .is_host_repo(repo)
+        .then(|| {
+            let site = site?;
+            let name = crate::supervise::proc_name(branch, repo);
+            let ports = host_probe_ports(cfg, site, ws_root, wt_path, sanitized, repo);
+            crate::supervise::health(site, &name, &ports)
+        })
+        .flatten();
+
+    // Lazy — skipped when ws already has bad news about a host process.
+    let declared = |notes: &mut Vec<String>| -> Option<String> {
+        if let Some(r) = cfg.remote.as_ref() {
+            // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
+            match site {
+                Some(s @ crate::remote::Site::Remote { .. }) => cfg
+                    .command_for(repo, "status", cfg.is_container_repo(repo, wt_path))
+                    .and_then(|cmd| {
+                        let extra_env = inject::prepare(
+                            cfg, s, ws_root, wt_path, sanitized, repo, inject::Phase::Inspect,
+                        )
+                        .unwrap_or_default();
+                        let base = s.abs_base(&r.worktree_base(ws_root));
+                        crate::remote::capture_status(
+                            &r.connection, &base, sanitized, repo, &extra_env, &cmd,
+                            STATUS_TIMEOUT.as_secs(),
+                        )
+                    }),
+                _ => None,
+            }
+        } else {
+            // Local status; Inspect phase — no allocation or derivation from a status probe. `ws list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
+            let cmd = match hooks::resolve(
+                cfg, ws_root, repo, "status", cfg.is_container_repo(repo, wt_path),
+            ) {
+                Ok(cmd) => cmd?,
+                Err(e) => {
+                    notes.push(format!("{repo}: {e}"));
+                    return Some("hook file not migrated".to_string());
+                }
+            };
+            let extra_env = inject::prepare(
+                cfg, &crate::remote::Site::Local, ws_root, wt_path, sanitized, repo,
+                inject::Phase::Inspect,
+            )
+            .unwrap_or_default();
+            hooks::capture_command(
+                ws_root, wt_path, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
+            )
+        }
+    };
+
+    // ws's crash beats the script; a healthy process defers to the script for detail.
+    let status = match host_health {
+        Some(h) if !h.is_ok() => Some(h.label()),
+        Some(h) => declared(&mut notes).or_else(|| Some(h.label())),
+        None => declared(&mut notes),
+    };
+
+    (status, notes)
 }
 
 /// Not the raw `.ws-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.ws.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.

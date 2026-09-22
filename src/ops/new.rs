@@ -62,9 +62,39 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     std::fs::create_dir_all(&task_dir)
         .with_context(|| format!("create {}", task_dir.display()))?;
 
+    if let Err(e) = add_repos(&ws.root, &cfg, &site, branch, &sanitized, &requested) {
+        // Remove the task dir if the rollback emptied it; a sibling task's
+        // dir (impossible for a fresh `ws new` but cheap to defend against)
+        // would keep `remove_dir` from succeeding, and that's fine.
+        let _ = std::fs::remove_dir(&task_dir);
+        return Err(e);
+    }
+
+    // Delegates to the same op `ws up` runs so the two can't drift.
+    if up {
+        return super::up::run(branch);
+    }
+    crate::ui::nudge(&format!("ws up {branch}"));
+
+    Ok(())
+}
+
+/// Extend a task with worktrees for `requested`: each repo's create → sync → post-create
+/// pipeline, rolled back per-repo (and up to previously-completed repos in this call) on
+/// failure. Task-level preflights — sanitize, ws-net, conflict, legacy hook migration,
+/// task-dir creation — are the caller's; this function assumes `task_dir` exists.
+pub(super) fn add_repos(
+    ws_root: &Path,
+    cfg: &config::WsConfig,
+    site: &remote::Site,
+    branch: &str,
+    sanitized: &str,
+    requested: &[String],
+) -> Result<()> {
+    let task_dir = workspace::task_dir(ws_root, branch);
     let mut completed: Vec<CompletedRepo> = Vec::new();
 
-    for repo_name in &requested {
+    for repo_name in requested {
         // Deliberately outside the IIFE below: SIGINT is the user asking to
         // stop, not an error to unwind — completed repos stay put so a Ctrl-C
         // between repos preserves the work already done. Step failures inside
@@ -72,7 +102,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         super::bail_if_interrupted()?;
 
         let repo_entry = cfg.repos.iter().find(|r| r.name() == repo_name).unwrap();
-        let repo_path = ws.root.join(repo_name);
+        let repo_path = ws_root.join(repo_name);
         let wt_path = task_dir.join(repo_name);
         // Captured before `create_worktree` since that's what would create it —
         // rollback needs to know whether to also delete the branch.
@@ -144,7 +174,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
             if let Some(r) = &cfg.remote {
                 let step = crate::ui::step(repo_name, "Sync created");
                 let session = mutagen::session_name(branch, repo_name);
-                let remote_path = remote::worktree_path(&r.worktree_base(&ws.root), &sanitized, repo_name);
+                let remote_path = remote::worktree_path(&r.worktree_base(ws_root), sanitized, repo_name);
                 let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
                 let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
                     // Settle the initial push before we derive/render against the server.
@@ -164,24 +194,20 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
             // Render templates before post-create so one-time setup sees the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
             let extra_env = inject::prepare(
-                &cfg, &site, &ws.root, &wt_path, &sanitized, repo_name, inject::Phase::Activate,
+                cfg, site, ws_root, &wt_path, sanitized, repo_name, inject::Phase::Activate,
             )?;
 
-            run_post_create(&cfg, &site, &ws.root, &wt_path, branch, &sanitized, repo_name, &extra_env)?;
+            run_post_create(cfg, site, ws_root, &wt_path, branch, sanitized, repo_name, &extra_env)?;
             Ok(())
         })();
 
         if let Err(e) = created {
             if wt_path.exists() {
-                rollback_repo(&cfg, &ws.root, branch, &sanitized, repo_name, &wt_path, branch_was_new);
+                rollback_repo(cfg, ws_root, branch, sanitized, repo_name, &wt_path, branch_was_new);
             }
             for done in completed.iter().rev() {
-                rollback_repo(&cfg, &ws.root, branch, &sanitized, &done.name, &done.wt_path, done.branch_was_new);
+                rollback_repo(cfg, ws_root, branch, sanitized, &done.name, &done.wt_path, done.branch_was_new);
             }
-            // Remove the task dir if the rollback emptied it; a sibling task's
-            // dir (impossible for a fresh `ws new` but cheap to defend against)
-            // would keep `remove_dir` from succeeding, and that's fine.
-            let _ = std::fs::remove_dir(&task_dir);
             return Err(e);
         }
         completed.push(CompletedRepo {
@@ -196,12 +222,6 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         .map(|c| format!("{}: {}", c.name, c.wt_path.display()))
         .collect();
     crate::ui::summary_ok(&summary);
-
-    // Delegates to the same op `ws up` runs so the two can't drift.
-    if up {
-        return super::up::run(branch);
-    }
-    crate::ui::nudge(&format!("ws up {branch}"));
 
     Ok(())
 }
@@ -245,7 +265,7 @@ fn run_post_create(
     }
 }
 
-fn parse_repos(s: &str) -> Vec<String> {
+pub(super) fn parse_repos(s: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     s.split(',')
         .map(str::trim)
@@ -255,7 +275,7 @@ fn parse_repos(s: &str) -> Vec<String> {
         .collect()
 }
 
-fn validate_repos(requested: &[String], known: &[&str]) -> Result<()> {
+pub(super) fn validate_repos(requested: &[String], known: &[&str]) -> Result<()> {
     let unknown: Vec<&str> = requested
         .iter()
         .filter(|r| !known.contains(&r.as_str()))
