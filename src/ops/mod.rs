@@ -3,6 +3,7 @@ pub mod claude;
 pub mod config;
 pub mod remote_set;
 pub mod new;
+pub mod add;
 pub mod hooksweep;
 pub mod teardown;
 pub mod up;

@@ -40,6 +40,14 @@ enum Cmd {
         #[arg(long)]
         up: bool,
     },
+    /// Add repo(s) to an existing task (stack must be down)
+    Add   {
+        repos: String,
+        branch: String,
+        /// Bring the task's stack up after adding
+        #[arg(long)]
+        up: bool,
+    },
     /// Bring a task's stack up
     Up    { branch: String },
     /// Stop a task's stack
@@ -175,6 +183,7 @@ pub fn run() -> anyhow::Result<()> {
             crate::ops::init::run(refresh_schema, remote, remote_path, domain, runtime, no_verify),
         Cmd::Claude                  => crate::ops::claude::run(),
         Cmd::New{repos,branch,up}    => crate::ops::new::run(&repos, &branch, up),
+        Cmd::Add{repos,branch,up}    => crate::ops::add::run(&repos, &branch, up),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force,keep_images,keep_volumes} => crate::ops::rm::run(&branch, force, keep_images, keep_volumes),

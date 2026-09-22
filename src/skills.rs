@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const SKILLS: &[(&str, &str)] = &[
     ("ws-new",      include_str!("../skills/ws-new/SKILL.md")),
+    ("ws-add",      include_str!("../skills/ws-add/SKILL.md")),
     ("ws-up",       include_str!("../skills/ws-up/SKILL.md")),
     ("ws-down",     include_str!("../skills/ws-down/SKILL.md")),
     ("ws-rm",       include_str!("../skills/ws-rm/SKILL.md")),
