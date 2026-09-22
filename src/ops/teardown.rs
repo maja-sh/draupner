@@ -5,12 +5,13 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::compose;
 use crate::config::WsConfig;
 use crate::hooks;
 use crate::inject;
 use crate::mutagen;
 use crate::ports;
-use crate::remote::Site;
+use crate::remote::{self, Site};
 use crate::workspace;
 
 /// Tear down every worktree of a task. `Ok(true)` signals a hook exited
@@ -22,6 +23,7 @@ pub fn remove_task(
     branch: &str,
     worktrees: &[(String, PathBuf)],
     keep_images: bool,
+    keep_volumes: bool,
 ) -> Result<bool> {
     let sanitized = workspace::sanitize_branch(branch);
     let mut hook_failed = false;
@@ -38,9 +40,25 @@ pub fn remove_task(
         if cfg.is_host_repo(repo) {
             teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
-            teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, keep_images, &mut hook_failed);
+            teardown_remote(cfg, site.as_ref(), root, wt, branch, &sanitized, repo, keep_images, keep_volumes, &mut hook_failed);
         } else {
-            teardown_local(cfg, root, wt, &sanitized, repo, keep_images, &mut hook_failed);
+            teardown_local(cfg, root, wt, &sanitized, repo, keep_images, keep_volumes, &mut hook_failed);
+        }
+
+        // Runs after the hooks so a custom `down` without a matching `post-remove` (or a crashed prior run) can't leak the compose project's volumes/containers indefinitely.
+        if !cfg.is_host_repo(repo) && cfg.is_container_repo(repo, wt) {
+            if let Some(s) = site.as_ref() {
+                let project = compose::project_name(&sanitized, repo);
+                let step = crate::ui::step(repo, "compose sweep");
+                match sweep_compose(s, cfg.runtime(), &project, keep_volumes) {
+                    Ok(rep) if rep.is_empty() => step.ok(),
+                    Ok(rep) => step.ok_with(&format!("({rep})")),
+                    Err(e) => {
+                        step.fail(&e.to_string());
+                        hook_failed = true;
+                    }
+                }
+            }
         }
 
         // Drop routes before `ports::forget` wipes the service set they derive from.
@@ -130,6 +148,7 @@ fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mu
 }
 
 /// Run a local workspace's `down` + `post-remove` hooks; best-effort — a failing hook is reported but doesn't stop removal.
+#[allow(clippy::too_many_arguments)]
 fn teardown_local(
     cfg: &WsConfig,
     root: &Path,
@@ -137,6 +156,7 @@ fn teardown_local(
     sanitized: &str,
     repo: &str,
     keep_images: bool,
+    keep_volumes: bool,
     hook_failed: &mut bool,
 ) {
     // Inspect: read the existing allocation, never allocate.
@@ -154,7 +174,7 @@ fn teardown_local(
                 continue;
             }
         };
-        let env = with_keep_images(&extra_env, event, keep_images);
+        let env = post_remove_env(&extra_env, event, keep_images, keep_volumes);
         let step = crate::ui::step(repo, &format!("{event} hook"));
         match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &env) {
             Ok(()) => step.ok(),
@@ -178,6 +198,7 @@ fn teardown_remote(
     sanitized: &str,
     repo: &str,
     keep_images: bool,
+    keep_volumes: bool,
     hook_failed: &mut bool,
 ) {
     let Some(site @ Site::Remote { .. }) = site else {
@@ -191,7 +212,7 @@ fn teardown_remote(
         let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
             continue;
         };
-        let env = with_keep_images(&extra_env, event, keep_images);
+        let env = post_remove_env(&extra_env, event, keep_images, keep_volumes);
         let step = crate::ui::step(repo, &format!("{event} hook"));
         match super::run_remote_event(site, r, root, branch, sanitized, repo, event, &cmd, &env) {
             Ok(()) => step.ok(),
@@ -203,14 +224,106 @@ fn teardown_remote(
     }
 }
 
-/// Scope `WS_KEEP_IMAGES` to `post-remove` so a user's declared `down` script can't accidentally read it as a signal meant for teardown's later image prune.
-fn with_keep_images(base: &[(String, String)], event: &str, keep_images: bool) -> Vec<(String, String)> {
-    if !keep_images || event != "post-remove" {
+/// Scope `WS_KEEP_IMAGES` / `WS_KEEP_VOLUMES` to `post-remove` so a user's declared `down` script can't accidentally read them as signals meant for teardown's later prune phase.
+fn post_remove_env(
+    base: &[(String, String)],
+    event: &str,
+    keep_images: bool,
+    keep_volumes: bool,
+) -> Vec<(String, String)> {
+    if event != "post-remove" || (!keep_images && !keep_volumes) {
         return base.to_vec();
     }
     let mut env = base.to_vec();
-    env.push(("WS_KEEP_IMAGES".to_string(), "1".to_string()));
+    if keep_images {
+        env.push(("WS_KEEP_IMAGES".to_string(), "1".to_string()));
+    }
+    if keep_volumes {
+        env.push(("WS_KEEP_VOLUMES".to_string(), "1".to_string()));
+    }
     env
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SweepReport {
+    containers: usize,
+    volumes: usize,
+    networks: usize,
+}
+
+impl SweepReport {
+    fn is_empty(&self) -> bool {
+        self.containers == 0 && self.volumes == 0 && self.networks == 0
+    }
+}
+
+impl std::fmt::Display for SweepReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts: Vec<String> = Vec::new();
+        let push = |parts: &mut Vec<String>, n: usize, one: &str, many: &str| {
+            if n > 0 {
+                parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+            }
+        };
+        push(&mut parts, self.containers, "container", "containers");
+        push(&mut parts, self.volumes, "volume", "volumes");
+        push(&mut parts, self.networks, "network", "networks");
+        f.write_str(&parts.join(", "))
+    }
+}
+
+/// `keep_volumes` gates volumes only — a leaked container pins its image and a leaked network collides with the next `ws new` on this branch, so those go regardless.
+fn sweep_compose(
+    site: &Site,
+    runtime: &str,
+    project: &str,
+    keep_volumes: bool,
+) -> Result<SweepReport> {
+    let rt = remote::shell_quote(runtime);
+    let proj = remote::shell_quote(project);
+    let label = format!("com.docker.compose.project={proj}");
+    let vol_block = if keep_volumes {
+        "vn=0; ".to_string()
+    } else {
+        format!(
+            "v=$({rt} volume ls -q --filter label={label} 2>/dev/null); \
+             set -- $v; vn=$#; \
+             [ $vn -gt 0 ] && {rt} volume rm -f $v >/dev/null 2>&1; :; "
+        )
+    };
+    // Trailing `:` after each `&&` chain keeps the sub-expression exit non-fatal
+    // (no `set -e`, but keeps `$?` clean for the final printf).
+    let script = format!(
+        "c=$({rt} container ls -aq --filter label={label} 2>/dev/null); \
+         set -- $c; cn=$#; \
+         [ $cn -gt 0 ] && {rt} container rm -f $c >/dev/null 2>&1; :; \
+         {vol_block}\
+         n=$({rt} network ls -q --filter label={label} 2>/dev/null); \
+         set -- $n; nn=$#; \
+         [ $nn -gt 0 ] && {rt} network rm $n >/dev/null 2>&1; :; \
+         printf '%s %s %s' \"$cn\" \"$vn\" \"$nn\""
+    );
+    let out = site
+        .shell(&script)
+        .output()
+        .map_err(|e| anyhow::anyhow!("run {runtime} sweep: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{runtime} sweep exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        );
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace();
+    let parse = |it: &mut std::str::SplitWhitespace| {
+        it.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0)
+    };
+    Ok(SweepReport {
+        containers: parse(&mut it),
+        volumes: parse(&mut it),
+        networks: parse(&mut it),
+    })
 }
 
 fn remove_if_symlink(p: &Path) {

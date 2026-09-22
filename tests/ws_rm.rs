@@ -235,7 +235,7 @@ fn rm_clears_a_registration_whose_directory_is_gone() {
 }
 
 #[test]
-fn no_prune_images_flag_toggles_ws_keep_images_on_post_remove() {
+fn keep_images_flag_toggles_ws_keep_images_on_post_remove() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "post-remove", "echo \"KEEP=${WS_KEEP_IMAGES:-unset}\"");
 
@@ -244,19 +244,44 @@ fn no_prune_images_flag_toggles_ws_keep_images_on_post_remove() {
     assert!(err.contains("KEEP=unset"), "default rm must not set WS_KEEP_IMAGES:\n{err}");
 
     f.run_ok(&["new", "api", "feat/keep"]);
-    let err = stderr(&f.run_ok(&["rm", "feat/keep", "--no-prune-images"]));
-    assert!(err.contains("KEEP=1"), "--no-prune-images must set WS_KEEP_IMAGES=1:\n{err}");
+    let err = stderr(&f.run_ok(&["rm", "feat/keep", "--keep-images"]));
+    assert!(err.contains("KEEP=1"), "--keep-images must set WS_KEEP_IMAGES=1:\n{err}");
 }
 
 #[test]
-fn no_prune_images_does_not_leak_into_down() {
-    // `WS_KEEP_IMAGES` is scoped to `post-remove` so a user's declared `down`
-    // script can't accidentally read it as a signal meant for the later prune.
+fn keep_volumes_flag_toggles_ws_keep_volumes_on_post_remove() {
     let f = WorkspaceFixture::with_repos(&["api"]);
-    f.add_hook("api", "down", "echo \"DOWN-KEEP=${WS_KEEP_IMAGES:-unset}\"");
-    f.add_hook("api", "post-remove", "echo \"POST-KEEP=${WS_KEEP_IMAGES:-unset}\"");
+    f.add_hook("api", "post-remove", "echo \"KEEP=${WS_KEEP_VOLUMES:-unset}\"");
+
+    f.run_ok(&["new", "api", "feat/vol-default"]);
+    let err = stderr(&f.run_ok(&["rm", "feat/vol-default"]));
+    assert!(err.contains("KEEP=unset"), "default rm must not set WS_KEEP_VOLUMES:\n{err}");
+
+    f.run_ok(&["new", "api", "feat/vol-keep"]);
+    let err = stderr(&f.run_ok(&["rm", "feat/vol-keep", "--keep-volumes"]));
+    assert!(err.contains("KEEP=1"), "--keep-volumes must set WS_KEEP_VOLUMES=1:\n{err}");
+}
+
+#[test]
+fn keep_flags_do_not_leak_into_down() {
+    // `WS_KEEP_IMAGES` / `WS_KEEP_VOLUMES` are scoped to `post-remove` so a user's
+    // declared `down` script can't accidentally read them as signals meant for the
+    // later prune.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.add_hook(
+        "api",
+        "down",
+        "echo \"DOWN-KI=${WS_KEEP_IMAGES:-unset}\"; echo \"DOWN-KV=${WS_KEEP_VOLUMES:-unset}\"",
+    );
+    f.add_hook(
+        "api",
+        "post-remove",
+        "echo \"POST-KI=${WS_KEEP_IMAGES:-unset}\"; echo \"POST-KV=${WS_KEEP_VOLUMES:-unset}\"",
+    );
     f.run_ok(&["new", "api", "feat/scoped"]);
-    let err = stderr(&f.run_ok(&["rm", "feat/scoped", "--no-prune-images"]));
-    assert!(err.contains("DOWN-KEEP=unset"), "WS_KEEP_IMAGES must not reach down:\n{err}");
-    assert!(err.contains("POST-KEEP=1"), "WS_KEEP_IMAGES must reach post-remove:\n{err}");
+    let err = stderr(&f.run_ok(&["rm", "feat/scoped", "--keep-images", "--keep-volumes"]));
+    assert!(err.contains("DOWN-KI=unset"), "WS_KEEP_IMAGES must not reach down:\n{err}");
+    assert!(err.contains("DOWN-KV=unset"), "WS_KEEP_VOLUMES must not reach down:\n{err}");
+    assert!(err.contains("POST-KI=1"), "WS_KEEP_IMAGES must reach post-remove:\n{err}");
+    assert!(err.contains("POST-KV=1"), "WS_KEEP_VOLUMES must reach post-remove:\n{err}");
 }

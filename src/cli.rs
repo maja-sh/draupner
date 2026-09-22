@@ -51,7 +51,10 @@ enum Cmd {
         force: bool,
         /// Keep the compose project's built images; the default prunes them alongside its volumes
         #[arg(long)]
-        no_prune_images: bool,
+        keep_images: bool,
+        /// Keep the compose project's named volumes; the default drops them so recreating the branch starts clean
+        #[arg(long)]
+        keep_volumes: bool,
     },
     /// List active task worktrees
     List {
@@ -174,7 +177,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::New{repos,branch,up}    => crate::ops::new::run(&repos, &branch, up),
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
-        Cmd::Rm{branch,force,no_prune_images} => crate::ops::rm::run(&branch, force, no_prune_images),
+        Cmd::Rm{branch,force,keep_images,keep_volumes} => crate::ops::rm::run(&branch, force, keep_images, keep_volumes),
         Cmd::List{short}             => crate::ops::list::run(short),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Context{describe}       => crate::ops::context::run(describe),
