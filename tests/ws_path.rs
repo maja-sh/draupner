@@ -8,7 +8,10 @@ fn prints_task_dir_when_only_branch_given() {
     f.run_ok(&["new", "api,app", "feat/x"]);
 
     let out = f.run_ok(&["path", "feat/x"]);
-    let expected = f.path().join(".worktrees/feat-x");
+    // ws prints paths through the workspace's canonical root — on macOS
+    // `TMPDIR` is a symlink into `/private/var/…`, so f.path() (the raw
+    // tempdir) differs from what getcwd resolves to inside the child.
+    let expected = f.path().canonicalize().unwrap().join(".worktrees/feat-x");
     assert_eq!(stdout(&out).trim_end(), expected.display().to_string());
 }
 
@@ -18,7 +21,7 @@ fn prints_repo_worktree_when_repo_given() {
     f.run_ok(&["new", "api,app", "feat/x"]);
 
     let out = f.run_ok(&["path", "feat/x", "-r", "api"]);
-    let expected = f.path().join(".worktrees/feat-x/api");
+    let expected = f.path().canonicalize().unwrap().join(".worktrees/feat-x/api");
     assert_eq!(stdout(&out).trim_end(), expected.display().to_string());
 }
 
