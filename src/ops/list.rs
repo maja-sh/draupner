@@ -154,10 +154,17 @@ fn compute_row(
     RowJob { task_key, row, branch, notes }
 }
 
-/// Classify a managed worktree's stack: host-supervised health first (ws alone
-/// can report a crashed process), otherwise the declared `status` script (locally,
-/// or over SSH for a remote workspace). Diagnostic notes are returned separately
-/// so a parallel caller can serialize them without interleaving into the listing.
+/// Classify a task-managed worktree's stack: host-supervised health first (ws
+/// alone can report a crashed process), otherwise the declared `status` script
+/// (locally, or over SSH for a remote workspace). Diagnostic notes are returned
+/// separately so a parallel caller can serialize them without interleaving into
+/// the listing.
+///
+/// **Precondition:** `wt_path` names a task-managed worktree (`.worktrees/<task>/<repo>`)
+/// on this workspace's `branch`. Unmanaged worktrees and out-of-tree checkouts
+/// have no ws lifecycle — the supervise/inject probes would run against paths
+/// they were never meant to know about. `compute_row` and `add::require_task_stopped`
+/// both filter to managed worktrees before calling this; new callers must too.
 pub(super) fn probe_status(
     cfg: &config::WsConfig,
     site: Option<&crate::remote::Site>,

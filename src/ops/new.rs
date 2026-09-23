@@ -16,7 +16,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // Resolves the server `$HOME` up front so an unreachable remote fails here, not part-way through creating worktrees.
     let site = remote::Site::resolve(&cfg)?;
 
-    let requested = parse_repos(repos_arg);
+    let requested = parse_repos(repos_arg).map_err(super::preflight)?;
     let known: Vec<&str> = cfg.repos.iter().map(|r| r.name()).collect();
     validate_repos(&requested, &known)?;
 
@@ -253,14 +253,22 @@ fn run_post_create(
     }
 }
 
-pub(super) fn parse_repos(s: &str) -> Vec<String> {
+/// Parse a comma-separated repo list, trimming whitespace and deduping.
+/// Rejects an all-empty input so the caller can't silently create a task
+/// with zero repos.
+pub(super) fn parse_repos(s: &str) -> std::result::Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
-    s.split(',')
+    let repos: Vec<String> = s
+        .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter(|s| seen.insert(s.to_string()))
         .map(String::from)
-        .collect()
+        .collect();
+    if repos.is_empty() {
+        return Err("no repos specified".to_string());
+    }
+    Ok(repos)
 }
 
 pub(super) fn validate_repos(requested: &[String], known: &[&str]) -> Result<()> {

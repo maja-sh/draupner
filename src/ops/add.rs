@@ -11,10 +11,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // Resolves the server `$HOME` up front — an unreachable remote can't back a new sync.
     let site = remote::Site::resolve(&cfg)?;
 
-    let requested = super::new::parse_repos(repos_arg);
-    if requested.is_empty() {
-        return Err(super::preflight("no repos specified"));
-    }
+    let requested = super::new::parse_repos(repos_arg).map_err(super::preflight)?;
     let known: Vec<&str> = cfg.repos.iter().map(|r| r.name()).collect();
     super::new::validate_repos(&requested, &known)?;
 
@@ -45,9 +42,6 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     crate::hooks::preflight_legacy_hook_files(&cfg, &ws.root, &requested, &["post-create"])
         .map_err(|e| super::preflight(e.to_string()))?;
 
-    // Same as `ws new`: a container repo's post-create may write an override that joins ws-net.
-    super::ensure_ws_net_if_active(&cfg, &site);
-
     // An orphan under this task_dir (a `.worktrees/<task>/<repo>/` git doesn't
     // know) means the task is already in a broken state that adding a repo
     // would only compound.
@@ -69,6 +63,11 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // (`.ws-meta` ports, overrides, forwards, live containers) that would
     // race a new repo's post-create.
     require_task_stopped(&cfg, &site, &ws.root, branch, &sanitized)?;
+
+    // Fire the network side-effect only once every preflight has passed —
+    // otherwise a refused op still leaves ws-net created for a stack it
+    // never brought up.
+    super::ensure_ws_net_if_active(&cfg, &site);
 
     super::new::add_repos(&ws.root, &cfg, &site, branch, &sanitized, &requested)?;
 

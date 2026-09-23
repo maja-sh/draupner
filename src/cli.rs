@@ -40,7 +40,7 @@ enum Cmd {
         #[arg(long)]
         up: bool,
     },
-    /// Add repo(s) to an existing task (stack must be down)
+    /// Add repo(s) to an existing task (bring the stack down first if it's up)
     Add   {
         repos: String,
         branch: String,
@@ -70,7 +70,7 @@ enum Cmd {
         #[arg(short, long)]
         short: bool,
     },
-    /// Print a worktree path (composable with `$(...)`, e.g. `zed $(ws path feat/x -r api)`)
+    /// Print a worktree path (composable with `$(...)`, e.g. `$EDITOR $(ws path feat/x -r api)`)
     Path {
         /// Branch of the task to look up
         branch: String,

@@ -27,8 +27,8 @@ pub fn sanitize_branch(b: &str) -> String {
 }
 
 /// Sanitize `branch` and reject inputs that can't name a real task: empty
-/// after sanitize, or all dots. Returns the sanitized form for reuse, so
-/// callers don't need a paired `sanitize_branch(branch)` after this.
+/// after sanitize, or all dots. Returns the sanitized form; callers that
+/// pass sanitized names downstream can use it, others can discard.
 pub fn validate_branch(branch: &str) -> std::result::Result<String, String> {
     let sanitized = sanitize_branch(branch);
     if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {

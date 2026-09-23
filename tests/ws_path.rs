@@ -24,8 +24,8 @@ fn prints_repo_worktree_when_repo_given() {
 
 #[test]
 fn success_stdout_is_only_the_path() {
-    // The whole point of the command is `zed $(ws path …)` — anything on
-    // stderr or extra stdout would break the substitution silently.
+    // The whole point of the command is `$EDITOR $(ws path …)` — anything
+    // on stderr or extra stdout would break the substitution silently.
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/x"]);
 
