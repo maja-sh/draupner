@@ -1,6 +1,6 @@
 //! Focused per-worktree endpoint: everything you need to operate one task's
 //! worktree, one call. Narrower than `ws list` (single branch, no siblings),
-//! broader than `ws here` (services, ports, hostnames, exec syntax on top of
+//! richer than `ws path` (services, ports, hostnames, exec syntax on top of
 //! paths). The `--json` shape doubles as the `task.repos[]` payload of
 //! `ws context`, which is why field names are self-documenting — the LLM
 //! endpoint leans on names in place of a schema round-trip.
