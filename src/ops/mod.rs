@@ -10,6 +10,7 @@ pub mod up;
 pub mod down;
 pub mod rm;
 pub mod list;
+pub mod path;
 pub mod show;
 pub mod context;
 pub mod clean;

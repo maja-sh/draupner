@@ -70,6 +70,14 @@ enum Cmd {
         #[arg(short, long)]
         short: bool,
     },
+    /// Print a worktree path (composable with `$(...)`, e.g. `zed $(ws path feat/x -r api)`)
+    Path {
+        /// Branch of the task to look up
+        branch: String,
+        /// Narrow to one repo's worktree; without it, prints the task dir
+        #[arg(short = 'r', long)]
+        repo: Option<String>,
+    },
     /// Show one worktree in detail (services, ports, hostnames, exec syntax)
     Show {
         /// Branch to describe; inferred from the cwd when omitted
@@ -188,6 +196,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force,keep_images,keep_volumes} => crate::ops::rm::run(&branch, force, keep_images, keep_volumes),
         Cmd::List{short}             => crate::ops::list::run(short),
+        Cmd::Path{branch,repo}       => crate::ops::path::run(&branch, repo.as_deref()),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Context{describe}       => crate::ops::context::run(describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
