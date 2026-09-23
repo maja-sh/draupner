@@ -7,26 +7,20 @@ pub fn run(branch: &str, repo: Option<&str>) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    let sanitized = workspace::sanitize_branch(branch);
-    if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
-        return Err(super::preflight(format!("invalid branch name: {branch}")));
-    }
+    workspace::validate_branch(branch).map_err(super::preflight)?;
 
     let task_dir = workspace::task_dir(&ws.root, branch);
     if !task_dir.is_dir() {
-        return Err(super::preflight(format!("no task worktree for `{branch}`")));
+        return Err(super::preflight(format!(
+            "no worktrees for {branch}; run `ws new` first"
+        )));
     }
 
     let path = match repo {
         None => task_dir,
         Some(r) => {
             let known: Vec<&str> = cfg.repos.iter().map(|e| e.name()).collect();
-            if !known.contains(&r) {
-                return Err(super::preflight(format!(
-                    "unknown repo `{r}`. Known repos: {}",
-                    known.join(", "),
-                )));
-            }
+            super::new::validate_repos(&[r.to_string()], &known)?;
             workspace::worktree_for(&ws.root, branch, r).ok_or_else(|| {
                 super::preflight(format!(
                     "task `{branch}` has no worktree for repo `{r}`",

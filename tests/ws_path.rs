@@ -42,8 +42,8 @@ fn refuses_when_task_missing() {
     let out = f.run(&["path", "feat/nope"]);
     assert_eq!(out.status.code(), Some(2), "missing task is a preflight failure");
     assert!(
-        stderr(&out).contains("no task worktree"),
-        "expected 'no task worktree' in:\n{}",
+        stderr(&out).contains("no worktrees for"),
+        "expected 'no worktrees for' in:\n{}",
         stderr(&out)
     );
     assert!(stdout(&out).is_empty(), "no path on stdout when the task is missing");

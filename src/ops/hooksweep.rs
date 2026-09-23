@@ -48,14 +48,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     let cfg = config::load(&ws.root)?;
     let sanitized = workspace::sanitize_branch(branch);
 
-    let targets: Vec<(String, std::path::PathBuf)> = cfg
-        .repos
-        .iter()
-        .map(|r| r.name())
-        .filter_map(|name| {
-            workspace::worktree_for(&ws.root, branch, name).map(|wt| (name.to_string(), wt))
-        })
-        .collect();
+    let targets = workspace::task_worktrees(&ws.root, &cfg, branch);
 
     if targets.is_empty() {
         return Err(super::preflight(format!(

@@ -30,7 +30,7 @@ fn refuses_when_the_task_does_not_exist() {
     assert_eq!(out.status.code(), Some(2), "missing task is a preflight failure");
 
     let err = stderr(&out);
-    assert!(err.contains("no task worktree"), "expected 'no task worktree' in:\n{err}");
+    assert!(err.contains("no worktrees for"), "expected 'no worktrees for' in:\n{err}");
     assert!(err.contains("ws new"), "expected 'ws new' nudge in:\n{err}");
 }
 

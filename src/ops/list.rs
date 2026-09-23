@@ -181,7 +181,7 @@ pub(super) fn probe_status(
         .flatten();
 
     // Lazy — skipped when ws already has bad news about a host process.
-    let declared = |notes: &mut Vec<String>| -> Option<String> {
+    let mut declared = || -> Option<String> {
         if let Some(r) = cfg.remote.as_ref() {
             // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
             match site {
@@ -225,8 +225,8 @@ pub(super) fn probe_status(
     // ws's crash beats the script; a healthy process defers to the script for detail.
     let status = match host_health {
         Some(h) if !h.is_ok() => Some(h.label()),
-        Some(h) => declared(&mut notes).or_else(|| Some(h.label())),
-        None => declared(&mut notes),
+        Some(h) => declared().or_else(|| Some(h.label())),
+        None => declared(),
     };
 
     (status, notes)

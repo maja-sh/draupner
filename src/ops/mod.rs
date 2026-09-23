@@ -136,3 +136,17 @@ pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Best-effort `ws-net` creation when routing is on — a failure notes rather
+/// than fails so a broken infra doesn't block worktree creation for a
+/// stack that doesn't need routing.
+pub(crate) fn ensure_ws_net_if_active(
+    cfg: &crate::config::WsConfig,
+    site: &crate::remote::Site,
+) {
+    if cfg.routing_active() {
+        if let Err(e) = crate::caddy::ensure_net(site, cfg.runtime()) {
+            crate::ui::note(&format!("ws-net: {e}"));
+        }
+    }
+}

@@ -26,6 +26,17 @@ pub fn sanitize_branch(b: &str) -> String {
     b.replace('/', "-")
 }
 
+/// Sanitize `branch` and reject inputs that can't name a real task: empty
+/// after sanitize, or all dots. Returns the sanitized form for reuse, so
+/// callers don't need a paired `sanitize_branch(branch)` after this.
+pub fn validate_branch(branch: &str) -> std::result::Result<String, String> {
+    let sanitized = sanitize_branch(branch);
+    if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
+        return Err(format!("invalid branch name: {branch}"));
+    }
+    Ok(sanitized)
+}
+
 /// `<root>/.worktrees/<sanitized-branch>/`
 pub fn task_dir(root: &Path, branch: &str) -> PathBuf {
     root.join(".worktrees").join(sanitize_branch(branch))
@@ -35,6 +46,31 @@ pub fn task_dir(root: &Path, branch: &str) -> PathBuf {
 pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
     let p = task_dir(root, branch).join(repo);
     p.is_dir().then_some(p)
+}
+
+/// Every configured repo whose worktree exists on disk for this task — the
+/// shared shape hooksweep, add's stopped-check, and future callers all want.
+pub fn task_worktrees(
+    root: &Path,
+    cfg: &crate::config::WsConfig,
+    branch: &str,
+) -> Vec<(String, PathBuf)> {
+    cfg.repos
+        .iter()
+        .map(|r| r.name())
+        .filter_map(|name| worktree_for(root, branch, name).map(|wt| (name.to_string(), wt)))
+        .collect()
+}
+
+/// Which of `requested` already have a subdir under this task's dir — the
+/// conflict-check predicate `ws new` and `ws add` both need. Returns
+/// references into `requested` so callers format their own error message.
+pub fn existing_repos_in_task<'a>(task_dir: &Path, requested: &'a [String]) -> Vec<&'a str> {
+    requested
+        .iter()
+        .filter(|r| task_dir.join(r.as_str()).exists())
+        .map(String::as_str)
+        .collect()
 }
 
 /// Filesystem view of a branch's repo dirs, kept because a directory git doesn't know may still hold teardown resources.

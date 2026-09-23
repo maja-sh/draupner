@@ -20,28 +20,16 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let known: Vec<&str> = cfg.repos.iter().map(|r| r.name()).collect();
     validate_repos(&requested, &known)?;
 
-    let sanitized = workspace::sanitize_branch(branch);
-    if sanitized.is_empty() || sanitized.chars().all(|c| c == '.') {
-        return Err(super::preflight(format!("invalid branch name: {branch}")));
-    }
+    let sanitized = workspace::validate_branch(branch).map_err(super::preflight)?;
 
     crate::ui::header("ws-new", &format!("{repos_arg} {branch}"));
 
     // Create `ws-net` first: a container repo's post-create writes an override that joins it, and any compose invoked there would fail on a missing network.
-    if cfg.routing_active() {
-        if let Err(e) = crate::caddy::ensure_net(&site, cfg.runtime()) {
-            crate::ui::note(&format!("ws-net: {e}"));
-        }
-    }
+    super::ensure_ws_net_if_active(&cfg, &site);
 
     let task_dir = workspace::task_dir(&ws.root, branch);
 
-    let mut conflicts = Vec::new();
-    for repo_name in &requested {
-        if task_dir.join(repo_name).exists() {
-            conflicts.push(repo_name.as_str());
-        }
-    }
+    let conflicts = workspace::existing_repos_in_task(&task_dir, &requested);
     if !conflicts.is_empty() {
         return Err(super::op_failure(format!(
             "worktree(s) already exist for: {}; use `ws rm {}` first",
