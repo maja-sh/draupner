@@ -212,7 +212,8 @@ pub(super) fn probe_status(
             let cmd = match hooks::resolve(
                 cfg, ws_root, repo, "status", cfg.is_container_repo(repo, wt_path),
             ) {
-                Ok(cmd) => cmd?,
+                // `status` can never be interactive (refused at config load); .cmd only.
+                Ok(script) => script?.cmd,
                 Err(e) => {
                     notes.push(format!("{repo}: {e}"));
                     return Some("hook file not migrated".to_string());

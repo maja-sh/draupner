@@ -124,6 +124,82 @@ command doesn't need to know where it landed.
 
 ---
 
+## Interactive hooks (sudo prompts, confirmations)
+
+A hook that needs human input mid-run — a `sudo` password, a `read -p` yes/no,
+an MFA code paste — can opt into **interactive mode**. ws runs it with
+inherited stdio so the prompt reaches the terminal, and refuses to run it at
+all when there's no human to prompt (Claude Code / CI / `nohup`), so you don't
+get a mysteriously-stuck hook with its password prompt swallowed by the
+output pipeline.
+
+Declare it in the object form of a `scripts` entry:
+
+```json
+"scripts": {
+  "up": { "cmd": "sudo gcloud auth login", "interactive": true }
+}
+```
+
+The object form takes a single `cmd` (chain with `&&` for multi-step) and the
+`interactive` flag. Omitting `interactive` is the same as writing `false`,
+same as the plain string / list forms.
+
+### Who can prompt, who can't
+
+| Invoker | Controlling terminal? | Behavior |
+|---|---|---|
+| You in a shell | yes | hook runs with inherited stdio, sudo prompts, you type |
+| Claude Code / CI / `nohup` | no | ws refuses the hook, exits **3**, names what to re-run from your shell |
+
+Exit **3** is distinct from the generic hook-failure exit **1** so an
+automation wrapper (Claude's shell, a CI job) can tell "needs human attention"
+apart from "actually broken" and surface the right next step.
+
+Mixed cases — some repos refuse, others crash outright — exit **1**, because
+a Claude wrapper watching for 3-vs-1 would otherwise retry assuming nothing
+else is broken.
+
+### What ws uses to detect
+
+Opens `/dev/tty` with `O_RDWR`. Matches sudo's own test, catches both "no tty"
+and "backgrounded" cases that `isatty(0)` would miss (e.g. `ws up < some-file`
+redirects stdin but leaves /dev/tty available).
+
+### Overriding from the shell
+
+`WS_NON_INTERACTIVE=1` forces the refusal path even when a terminal is
+available — useful for CI that happens to run under a pty, scripted
+automation, or debugging the refusal UX from a real shell.
+
+### Branching inside a hook
+
+ws exports `WS_INTERACTIVE=1` to every hook iff the current invocation can
+prompt. A hook that wants to handle non-interactive invocation itself
+(custom message, custom exit) can branch:
+
+```bash
+#!/usr/bin/env bash
+if [ -z "${WS_INTERACTIVE:-}" ]; then
+  echo "needs interactive terminal; run from your shell" >&2
+  exit 1
+fi
+sudo gcloud auth login
+```
+
+Not required — ws's own refusal (exit 3 with the message) is enough — but
+the escape hatch is there if you want to customize.
+
+### What's not supported (yet)
+
+- **Interactive on `status`** — refused at `.ws.json` load. `status` fans
+  out in parallel from `ws list`, and an interactive status probe would
+  collide with every other repo's probe for the one terminal.
+- **Interactive hooks on a remote workspace** — refused at load. There's no
+  pty allocated over SSH, so the prompt can't actually reach you.
+
+---
+
 ## Host processes
 
 A `kind: host` repo's `up` script is started **detached**: `ws` launches it, notes

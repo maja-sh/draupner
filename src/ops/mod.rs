@@ -42,6 +42,14 @@ pub(crate) fn op_failure(msg: impl Into<String>) -> anyhow::Error {
     ExitError { code: 1, msg: msg.into(), silent: false }.into()
 }
 
+/// `interactive: true` hook refused for lack of a controlling terminal, and no
+/// other kind of failure happened — the right escalation is "re-run this from
+/// your shell," not "something's broken." Dedicated exit code so a Claude /
+/// CI wrapper can switch on it (3) vs a generic hook failure (1).
+pub(crate) fn interactive_required(msg: impl Into<String>) -> anyhow::Error {
+    ExitError { code: 3, msg: msg.into(), silent: false }.into()
+}
+
 /// Machine-wide default remote host completing the precedence flag > env > global config; a malformed global config is noted, not fatal, so the caller's "needs a host" error isn't masked.
 pub(crate) fn default_remote_host() -> Option<String> {
     if let Some(h) = std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {

@@ -15,6 +15,16 @@ use crate::ui;
 /// the excess is discarded up to the next newline.
 const MAX_LINE: usize = 8 * 1024;
 
+/// Resolved shell command for an event, plus any per-script flags that the
+/// runner needs (today just `interactive`). Container defaults are never
+/// interactive — the only interactive path is a user-declared script that
+/// opts in.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResolvedScript {
+    pub cmd: String,
+    pub interactive: bool,
+}
+
 /// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `.ws-hooks/…` anchoring and `Many`-join happen in `cfg.script_command` so `capture_command` can't drift from `run_command`.
 pub fn resolve(
     cfg: &WsConfig,
@@ -22,17 +32,52 @@ pub fn resolve(
     repo: &str,
     event: &str,
     is_container: bool,
-) -> Result<Option<String>> {
-    if let Some(cmd) = cfg.script_command(repo, event) {
-        return Ok(Some(cmd));
+) -> Result<Option<ResolvedScript>> {
+    if let Some(script) = cfg.script(repo, event) {
+        return Ok(Some(ResolvedScript {
+            cmd: script.joined(),
+            interactive: script.is_interactive(),
+        }));
     }
     refuse_legacy_hook_file(workspace_root, repo, event)?;
-    Ok(is_container.then(|| crate::config::default_script(cfg.runtime(), event)).flatten())
+    Ok(is_container
+        .then(|| crate::config::default_script(cfg.runtime(), event))
+        .flatten()
+        .map(|cmd| ResolvedScript { cmd, interactive: false }))
+}
+
+/// Marker for an interactive hook refused because no controlling terminal is
+/// available. Separate from the generic hook-failed error so callers can
+/// distinguish "needs human" from "actually broken" and surface the right
+/// exit code (3 vs 1) at the op boundary.
+pub const INTERACTIVE_REFUSED_PREFIX: &str = "interactive hook refused: ";
+
+/// `true` iff there is a controlling terminal reachable AND the user hasn't
+/// forced non-interactive mode via `WS_NON_INTERACTIVE`. Matches sudo's own
+/// check — opens `/dev/tty` with `O_RDWR`; closed on scope exit.
+pub fn can_prompt_user() -> bool {
+    if std::env::var("WS_NON_INTERACTIVE")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_ok()
 }
 
 /// Base `WS_*` env every hook/script receives, returned as owned pairs so both
 /// the `Command` runner and the detached supervisor (`supervise::up`, which
 /// never touches a `Command`) apply the identical set.
+///
+/// `WS_INTERACTIVE=1` is set iff ws is being invoked with a controlling
+/// terminal reachable (and the user hasn't forced `WS_NON_INTERACTIVE`), so a
+/// hook can branch its own behavior: `[ -n "$WS_INTERACTIVE" ] || { echo
+/// 'needs human'; exit 1; }`. The variable is absent (not `0`) when the hook
+/// can't prompt, so `[ -n "$WS_INTERACTIVE" ]` reads straightforwardly.
 pub fn base_env(
     workspace_root: &Path,
     worktree: &str,
@@ -40,13 +85,17 @@ pub fn base_env(
     branch_sanitized: &str,
     event: &str,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
         ("WS_WORKSPACE_ROOT".to_string(), workspace_root.to_string_lossy().into_owned()),
         ("WS_WORKTREE".to_string(), worktree.to_string()),
         ("WS_REPO".to_string(), repo.to_string()),
         ("WS_BRANCH_SANITIZED".to_string(), branch_sanitized.to_string()),
         ("WS_HOOK_NAME".to_string(), event.to_string()),
-    ]
+    ];
+    if can_prompt_user() {
+        env.push(("WS_INTERACTIVE".to_string(), "1".to_string()));
+    }
+    env
 }
 
 fn apply_env(
@@ -82,6 +131,12 @@ fn script_command(
 }
 
 /// Run one already-joined shell command in the worktree, streaming its output as a hook. Shared by a declared `scripts` entry and the synthesized container default; a `Many` arrives fail-fast-joined so `cd`/env carry across commands.
+///
+/// `interactive: true` → spawn with inherited stdio (sudo prompts reach the
+/// user, keystrokes reach sudo via /dev/tty), suspend the step spinner for
+/// the hook's lifetime, and refuse up-front if no controlling terminal is
+/// reachable. The refusal error begins with [`INTERACTIVE_REFUSED_PREFIX`]
+/// so callers can distinguish "needs human" from a generic hook failure.
 #[allow(clippy::too_many_arguments)]
 pub fn run_command(
     workspace_root: &Path,
@@ -91,10 +146,30 @@ pub fn run_command(
     event: &str,
     cmd: &str,
     extra_env: &[(String, String)],
+    interactive: bool,
 ) -> Result<()> {
+    if interactive && !can_prompt_user() {
+        bail!(
+            "{INTERACTIVE_REFUSED_PREFIX}{event} needs a controlling terminal \
+             (invoked under Claude Code / CI / nohup?) — re-run from your shell"
+        );
+    }
     let mut c = script_command(
         workspace_root, worktree_path, repo, branch_sanitized, event, cmd, extra_env,
     );
+    if interactive {
+        c.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        return ui::around_spinner(|| {
+            let status = c
+                .spawn()
+                .with_context(|| format!("spawn `sh -c` for {event} script"))?
+                .wait()?;
+            if !status.success() {
+                bail!("{event} script exited {}", status.code().unwrap_or(-1));
+            }
+            Ok(())
+        });
+    }
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = c.spawn().with_context(|| format!("spawn `sh -c` for {event} script"))?;
     let status = stream_and_wait(child, &format!("{repo}-{event}"))?;
@@ -318,10 +393,11 @@ mod tests {
             r#"{"repos":[{"name":"api","scripts":{"status":[".ws-hooks/status.sh","echo ok"]}}]}"#,
         )
         .expect("parse config");
-        let cmd = resolve(&cfg, Path::new("/ws"), "api", "status", false)
+        let script = resolve(&cfg, Path::new("/ws"), "api", "status", false)
             .expect("resolve")
             .expect("a declared script must resolve to a command");
-        assert_eq!(cmd, "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/status.sh && echo ok");
+        assert_eq!(script.cmd, "\"$WS_WORKSPACE_ROOT\"/.ws-hooks/status.sh && echo ok");
+        assert!(!script.interactive, "a plain declared script defaults to non-interactive");
     }
 
     #[test]
@@ -329,10 +405,11 @@ mod tests {
         // `runtime` pinned so the assertion doesn't depend on which of docker/podman lives on this box's PATH.
         let cfg: WsConfig =
             serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#).expect("parse config");
-        let cmd = resolve(&cfg, Path::new("/ws"), "api", "up", true)
+        let script = resolve(&cfg, Path::new("/ws"), "api", "up", true)
             .expect("resolve")
             .expect("a container repo must fall back to the compose default");
-        assert_eq!(cmd, "podman compose up -d");
+        assert_eq!(script.cmd, "podman compose up -d");
+        assert!(!script.interactive, "the container default is never interactive");
         assert!(resolve(&cfg, Path::new("/ws"), "api", "up", false).unwrap().is_none());
         assert!(resolve(&cfg, Path::new("/ws"), "api", "post-create", true).unwrap().is_none());
     }
@@ -353,8 +430,10 @@ mod tests {
 
         // Not executable: already inert before removal, so a container repo still gets its default.
         assert_eq!(
-            resolve(&cfg, dir.path(), "api", "up", true).expect("resolve").as_deref(),
-            Some("podman compose up -d")
+            resolve(&cfg, dir.path(), "api", "up", true)
+                .expect("resolve")
+                .map(|s| s.cmd),
+            Some("podman compose up -d".to_string())
         );
 
         #[cfg(unix)]
@@ -375,8 +454,10 @@ mod tests {
         )
         .expect("parse config");
         assert_eq!(
-            resolve(&migrated, dir.path(), "api", "up", true).expect("resolve").as_deref(),
-            Some("\"$WS_WORKSPACE_ROOT\"/.ws-hooks/api/up")
+            resolve(&migrated, dir.path(), "api", "up", true)
+                .expect("resolve")
+                .map(|s| s.cmd),
+            Some("\"$WS_WORKSPACE_ROOT\"/.ws-hooks/api/up".to_string())
         );
     }
 }

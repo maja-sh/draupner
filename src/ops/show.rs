@@ -197,7 +197,8 @@ fn liveness(
     }
     let is_container = cfg.is_container_repo(repo, worktree);
     let cmd = match hooks::resolve(cfg, root, repo, "status", is_container) {
-        Ok(Some(c)) => c,
+        // `status` can never be interactive (refused at config load); .cmd only.
+        Ok(Some(s)) => s.cmd,
         Ok(None) => return None,
         Err(e) => {
             crate::ui::note(&format!("{repo}: {e}"));

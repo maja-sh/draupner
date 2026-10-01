@@ -21,6 +21,15 @@ fn set_active_spinner(pb: Option<ProgressBar>) {
 }
 
 fn emit_around_spinner(f: impl FnOnce()) {
+    around_spinner(f)
+}
+
+/// Run `f` while any active step-spinner is suspended, so output (streamed
+/// hook lines, interactive hook stdio) lands cleanly without the steady-tick
+/// redraw stepping on it. Public so `hooks::run_command`'s interactive path
+/// can wrap child-process execution the same way `hook_line` wraps a single
+/// line of streamed output.
+pub fn around_spinner<T>(f: impl FnOnce() -> T) -> T {
     // Drop the mutex before suspending so a reentrant print can't deadlock on it.
     let pb = ACTIVE_SPINNER.lock().unwrap().clone();
     match pb {

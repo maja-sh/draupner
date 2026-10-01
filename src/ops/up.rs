@@ -6,9 +6,16 @@ pub fn run(branch: &str) -> Result<()> {
     let r = hooksweep::sweep(branch, "up", "ws-up")?;
 
     if !r.failed.is_empty() {
-        return Err(super::op_failure(format!(
-            "up hook failed for: {}",
-            r.failed.join(", ")
+        let mut msg = format!("up hook failed for: {}", r.failed.join(", "));
+        if !r.needs_human.is_empty() {
+            msg.push_str(&format!("; needs human for: {}", r.needs_human.join(", ")));
+        }
+        return Err(super::op_failure(msg));
+    }
+    if !r.needs_human.is_empty() {
+        return Err(super::interactive_required(format!(
+            "up needs an interactive terminal for: {}; re-run `ws up {branch}` from your shell",
+            r.needs_human.join(", ")
         )));
     }
 

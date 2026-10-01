@@ -162,6 +162,23 @@ pub enum HttpDecl {
 pub enum Script {
     One(String),
     Many(Vec<String>),
+    /// Object form carrying per-script flags; `cmd` is a single string
+    /// (chain with `&&` for multi-step) because the use case for the
+    /// object form today — `interactive: true` — doesn't compose with
+    /// an array of commands and we don't want to encode an implicit
+    /// "which step is the interactive one" ambiguity.
+    Rich(RichScript),
+}
+
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RichScript {
+    pub cmd: String,
+    /// `true` → ws runs this hook with inherited stdio so a `sudo` prompt
+    /// (or any other `read -p`-style interaction) reaches the user. Under a
+    /// non-TTY invoker (Claude Code / CI / `nohup`) ws refuses to run the
+    /// hook with exit code 3; see docs/hooks.md.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interactive: bool,
 }
 
 impl Script {
@@ -169,12 +186,17 @@ impl Script {
         match self {
             Script::One(s) => std::slice::from_ref(s),
             Script::Many(v) => v,
+            Script::Rich(r) => std::slice::from_ref(&r.cmd),
         }
     }
 
     /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.ws-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
     pub fn joined(&self) -> String {
         self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        matches!(self, Script::Rich(RichScript { interactive: true, .. }))
     }
 }
 
@@ -263,9 +285,16 @@ impl WsConfig {
         }
     }
 
+    /// Repo's raw `scripts[event]` entry — callers that need per-script
+    /// flags (`interactive`) go through this; the `script_command` wrapper
+    /// handles the common "I only want the joined command line" case.
+    pub fn script(&self, repo: &str, event: &str) -> Option<&Script> {
+        self.repo_config(repo).and_then(|rc| rc.scripts.get(event))
+    }
+
     /// Repo's `scripts[event]` joined fail-fast (`cmd1 && cmd2`); the single owner shared by the host-repo launch path and every remote-dispatch caller.
     pub fn script_command(&self, repo: &str, event: &str) -> Option<String> {
-        self.repo_config(repo).and_then(|rc| rc.scripts.get(event)).map(Script::joined)
+        self.script(repo, event).map(Script::joined)
     }
 
     /// Declared `scripts` entry, else the container default when `is_container` — the bare-string counterpart to [`crate::hooks::resolve`] for the paths that never ran a hook file.
@@ -425,7 +454,41 @@ pub fn load(root: &Path) -> Result<WsConfig> {
             );
         }
     }
+    refuse_misplaced_interactive(&cfg)?;
     Ok(cfg)
+}
+
+/// `interactive: true` only makes sense for lifecycle events that may need
+/// human input, and only on local workspaces for now. Refuse the two
+/// combinations that can't ever work so the user hits a clear error at
+/// load-time instead of a mysterious hang or no-op later.
+fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
+    for entry in &cfg.repos {
+        let Some(rc) = entry.config() else { continue };
+        for (event, script) in &rc.scripts {
+            if !script.is_interactive() {
+                continue;
+            }
+            if event == "status" {
+                anyhow::bail!(
+                    "`{}`.scripts.{event} is `interactive: true` — `status` runs in \
+                     parallel from `ws list`, so an interactive status probe would \
+                     collide across repos. `status` must never prompt.",
+                    rc.name,
+                );
+            }
+            if cfg.remote.is_some() {
+                anyhow::bail!(
+                    "`{}`.scripts.{event} is `interactive: true` but this workspace \
+                     has a remote block — interactive hooks aren't supported on remote \
+                     workspaces yet (there's no pty over SSH). Run this stack locally, \
+                     or drop the `interactive` flag.",
+                    rc.name,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 // Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. `RepoConfig.hooks`
@@ -724,7 +787,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn script_rich_form_round_trips_and_defaults_interactive_to_false() {
+        use super::WsConfig;
+        // Rich form with interactive: true
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","scripts":{"up":{"cmd":"sudo gcloud auth","interactive":true}}}]}"#,
+        )
+        .expect("rich form parses");
+        let s = cfg.script("api", "up").expect("script present");
+        assert_eq!(s.joined(), "sudo gcloud auth");
+        assert!(s.is_interactive(), "`interactive: true` must round-trip");
+
+        // Rich form without interactive — defaults to false, no-op compared to a plain string
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","scripts":{"up":{"cmd":"echo hi"}}}]}"#,
+        )
+        .expect("rich form with no interactive parses");
+        assert!(!cfg.script("api", "up").unwrap().is_interactive());
+
+        // Plain string + plain list still parse as before and are never interactive
+        let cfg: WsConfig = serde_json::from_str(
+            r#"{"repos":[{"name":"api","scripts":{"up":"echo hi","down":["a","b"]}}]}"#,
+        )
+        .expect("legacy forms still parse");
+        assert!(!cfg.script("api", "up").unwrap().is_interactive());
+        assert!(!cfg.script("api", "down").unwrap().is_interactive());
+    }
+
     use super::*;
+
+    #[test]
+    fn load_refuses_interactive_on_status() {
+        // Status probes fan out in parallel from `ws list`; an interactive status
+        // would collide with every other repo's probe. Refuse at load time.
+        let dir = tempfile::tempdir().unwrap();
+        write_cfg(
+            dir.path(),
+            r#"{"repos":[{"name":"api","scripts":{"status":{"cmd":"echo running","interactive":true}}}]}"#,
+        );
+        let err = match load(dir.path()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected `interactive: true` on status to be refused"),
+        };
+        assert!(err.contains("status"), "{err}");
+        assert!(err.contains("interactive"), "{err}");
+    }
+
+    #[test]
+    fn load_refuses_interactive_with_remote_configured() {
+        // Remote workspaces don't allocate a pty over SSH, so interactive hooks
+        // can't actually prompt. Refuse at load so this doesn't fail mysteriously
+        // later with a non-TTY sudo error from the server.
+        let dir = tempfile::tempdir().unwrap();
+        write_cfg(
+            dir.path(),
+            r#"{
+                "remote": {"connection": "srv", "workspace_path": "workspace"},
+                "repos": [{"name":"api","scripts":{"up":{"cmd":"sudo gcloud","interactive":true}}}]
+            }"#,
+        );
+        let err = match load(dir.path()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected interactive + remote to be refused"),
+        };
+        assert!(err.contains("remote"), "{err}");
+        assert!(err.contains("interactive"), "{err}");
+    }
+
+    #[test]
+    fn load_accepts_interactive_on_lifecycle_events() {
+        // Every event except `status` can be interactive; `prepare` is included
+        // because asking for a passphrase to decrypt a vault file is reasonable.
+        for event in ["up", "down", "post-create", "post-remove", "prepare"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_cfg(
+                dir.path(),
+                &format!(
+                    r#"{{"repos":[{{"name":"api","scripts":{{"{event}":{{"cmd":"sudo x","interactive":true}}}}}}]}}"#
+                ),
+            );
+            load(dir.path()).unwrap_or_else(|e| panic!("expected `{event}` to accept interactive, got: {e}"));
+        }
+    }
 
     fn write_cfg(dir: &Path, json: &str) {
         std::fs::write(dir.join(".ws.json"), json).unwrap();

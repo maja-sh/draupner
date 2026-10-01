@@ -165,8 +165,8 @@ fn teardown_local(
             .unwrap_or_default();
 
     for event in ["down", "post-remove"] {
-        let cmd = match hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
-            Ok(Some(cmd)) => cmd,
+        let script = match hooks::resolve(cfg, root, repo, event, cfg.is_container_repo(repo, wt)) {
+            Ok(Some(s)) => s,
             Ok(None) => continue,
             Err(e) => {
                 crate::ui::step(repo, &format!("{event} hook")).fail(&format!("{e}"));
@@ -176,7 +176,9 @@ fn teardown_local(
         };
         let env = post_remove_env(&extra_env, event, keep_images, keep_volumes);
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        match hooks::run_command(root, wt, repo, sanitized, event, &cmd, &env) {
+        match hooks::run_command(
+            root, wt, repo, sanitized, event, &script.cmd, &env, script.interactive,
+        ) {
             Ok(()) => step.ok(),
             Err(e) => {
                 step.fail(&format!("{e}"));

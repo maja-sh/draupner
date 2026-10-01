@@ -17,6 +17,10 @@ pub struct SweepResult {
     pub skipped: Vec<String>,
     /// Non-empty ⇒ the op should exit 1.
     pub failed: Vec<String>,
+    /// Interactive hooks refused for lack of a controlling terminal — distinct
+    /// from `failed` so the caller can surface the "re-run from your shell"
+    /// nudge and exit with the dedicated code 3.
+    pub needs_human: Vec<String>,
 }
 
 impl SweepResult {
@@ -28,9 +32,20 @@ impl SweepResult {
             }
             Err(e) => {
                 step.fail(&format!("{e}"));
-                self.failed.push(repo.to_string());
+                self.file_failure(repo, &e);
             }
         }
+    }
+
+    /// Route a hook error to `needs_human` iff it carries the interactive-refused
+    /// marker, else `failed`. Shared between `record` and the `prepare` path.
+    fn file_failure(&mut self, repo: &str, err: &anyhow::Error) {
+        let bucket = if format!("{err}").contains(hooks::INTERACTIVE_REFUSED_PREFIX) {
+            &mut self.needs_human
+        } else {
+            &mut self.failed
+        };
+        bucket.push(repo.to_string());
     }
 
     /// Move `repo` from `ran` to `failed` — the hook succeeded but a follow-up (Caddy route) left the stack unreachable, since the host publish is `!reset` away.
@@ -71,7 +86,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                 "{conn}: server unreachable ({e:#}); tearing down local forwards only, \
                  server-side stacks and routes are left as-is"
             ));
-            let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
+            let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new(), needs_human: Vec::new() };
             for (repo, _wt) in &targets {
                 for (_, port) in crate::ports::load(&ws.root, &sanitized, repo) {
                     let _ = crate::mutagen::forward_terminate(
@@ -87,7 +102,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
     crate::ui::header(op, branch);
 
-    let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new() };
+    let mut result = SweepResult { ran: Vec::new(), skipped: Vec::new(), failed: Vec::new(), needs_human: Vec::new() };
 
     // `up` allocates; `down` only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
@@ -156,9 +171,9 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        let cmd = match hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt))
+        let script = match hooks::resolve(&cfg, &ws.root, repo, event, cfg.is_container_repo(repo, wt))
         {
-            Ok(Some(cmd)) => cmd,
+            Ok(Some(s)) => s,
             Ok(None) => {
                 crate::ui::skip(repo, &format!("no {event} hook"));
                 result.skipped.push(repo.clone());
@@ -182,7 +197,9 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         };
 
         let step = crate::ui::step(repo, &format!("{event} hook"));
-        let res = hooks::run_command(&ws.root, wt, repo, &sanitized, event, &cmd, &extra_env);
+        let res = hooks::run_command(
+            &ws.root, wt, repo, &sanitized, event, &script.cmd, &extra_env, script.interactive,
+        );
         let up_ok = res.is_ok();
         result.record(repo, step, res);
 
@@ -207,8 +224,8 @@ fn run_prepare(
     repo: &str,
     result: &mut SweepResult,
 ) -> bool {
-    let cmd = match hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt)) {
-        Ok(Some(cmd)) => cmd,
+    let script = match hooks::resolve(cfg, root, repo, "prepare", cfg.is_container_repo(repo, wt)) {
+        Ok(Some(s)) => s,
         Ok(None) => return true,
         Err(e) => {
             crate::ui::step(repo, "prepare hook").fail(&format!("{e}"));
@@ -220,14 +237,16 @@ fn run_prepare(
         inject::prepare(cfg, &Site::Local, root, wt, sanitized, repo, inject::Phase::Inspect)
             .unwrap_or_default();
     let step = crate::ui::step(repo, "prepare hook");
-    match hooks::run_command(root, wt, repo, sanitized, "prepare", &cmd, &extra_env) {
+    match hooks::run_command(
+        root, wt, repo, sanitized, "prepare", &script.cmd, &extra_env, script.interactive,
+    ) {
         Ok(()) => {
             step.ok();
             true
         }
         Err(e) => {
             step.fail(&format!("{e}"));
-            result.failed.push(repo.to_string());
+            result.file_failure(repo, &e);
             false
         }
     }
