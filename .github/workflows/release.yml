@@ -90,11 +90,13 @@ jobs:
               --repo "${{ github.repository }}" \
               --title "${{ github.ref_name }}" \
               --notes-file release-notes.md \
+              --prerelease="${{ contains(github.ref_name, '-') }}" \
               dist/*
           else
             gh release create "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" \
               --title "${{ github.ref_name }}" \
               --generate-notes \
+              --prerelease="${{ contains(github.ref_name, '-') }}" \
               dist/*
           fi
