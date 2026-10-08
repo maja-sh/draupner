@@ -41,6 +41,16 @@ wsx share feat/checkout --address 192.168.1.20
 
 The pin is remembered for later shares, until nothing is shared any more.
 
+If your address changes while a task is shared, the listener is still bound to
+the old one until something re-binds it. `wsx share --refresh` does exactly that:
+it re-derives the address and recreates Caddy if it moved, and it's a quiet
+no-op otherwise. Run it from the workspace on a timer, next to whatever keeps
+your DNS record current:
+
+```sh
+cd ~/work/myapp && wsx share --refresh
+```
+
 `wsx share` is for local workspaces. An offloaded workspace's Caddy already
 publishes on the server's interfaces. See `remote.publish_address` in
 [offload.md](offload.md).

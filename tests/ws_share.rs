@@ -85,3 +85,17 @@ fn rm_forgets_the_share() {
     f.run_ok(&["rm", "feat/x", "--force"]);
     assert!(!f.path().join(".wsx-meta/shared/feat-x").exists());
 }
+
+#[test]
+fn refresh_with_nothing_shared_is_a_quiet_no_op() {
+    let f = routed_fixture();
+    let out = f.run_ok(&["share", "--refresh"]);
+    assert!(stderr(&out).trim().is_empty(), "{}", stderr(&out));
+}
+
+#[test]
+fn refresh_takes_no_branch() {
+    let f = routed_fixture();
+    let out = f.run(&["share", "feat/x", "--refresh"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

@@ -128,6 +128,10 @@ pub fn want_share(pin: Option<&str>) -> Result<()> {
         .context("persist share")
 }
 
+pub fn share_wanted() -> bool {
+    share_file().is_ok_and(|p| p.exists())
+}
+
 pub fn drop_share() {
     if let Ok(p) = share_file() {
         let _ = std::fs::remove_file(p);

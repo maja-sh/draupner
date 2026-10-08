@@ -201,6 +201,27 @@ fn report_coverage(cert: Option<&Path>, domain: &str, hosts: &[String]) {
     }
 }
 
+/// Exits 0 whenever there's nothing to do, so a timer calling it every few minutes stays quiet.
+pub fn refresh() -> Result<()> {
+    let ws = workspace::locate()?;
+    let cfg = config::load(&ws.root)?;
+    let site = Site::Local;
+    if cfg.remote.is_some() || crate::caddy::externally_managed() || !crate::caddy::share_wanted() {
+        return Ok(());
+    }
+    if !crate::caddy::is_running(&site, cfg.runtime()) {
+        return Ok(());
+    }
+    // Offline, unpublishing would only make the next network come back unshared.
+    let Some(addr) = crate::caddy::share_address(&site) else {
+        crate::ui::note("no network address right now — leaving the share listener as it is");
+        return Ok(());
+    };
+    crate::caddy::ensure_running(&site, cfg.runtime(), LOCAL_PUBLISH)?;
+    crate::ui::value(&addr);
+    Ok(())
+}
+
 pub fn unshare(branch: &str) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;

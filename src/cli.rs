@@ -111,10 +111,14 @@ enum Cmd {
     },
     /// Make a task's routed services reachable from other machines on your network
     Share {
-        branch: String,
+        #[arg(required_unless_present = "refresh")]
+        branch: Option<String>,
         /// Address to publish on (default: this machine's default-route address); remembered
         #[arg(long, value_name = "IP")]
         address: Option<String>,
+        /// Re-bind the share listener if this machine's address changed (for a timer or network hook)
+        #[arg(long, conflicts_with_all = ["branch", "address"])]
+        refresh: bool,
     },
     /// Stop sharing a task
     Unshare { branch: String },
@@ -210,7 +214,9 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Context{describe}       => crate::ops::context::run(describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
-        Cmd::Share{branch,address}   => crate::ops::share::share(&branch, address.as_deref()),
+        Cmd::Share{refresh: true, ..} => crate::ops::share::refresh(),
+        Cmd::Share{branch,address,..} =>
+            crate::ops::share::share(&branch.unwrap_or_default(), address.as_deref()),
         Cmd::Unshare{branch}         => crate::ops::share::unshare(&branch),
         Cmd::Remote{cmd}             => match cmd {
             RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
