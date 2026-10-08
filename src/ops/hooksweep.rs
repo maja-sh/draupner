@@ -113,6 +113,12 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             // `ensure_routing` probes DNS; reuse its verdict for the auto-offer below rather than resolving twice.
             let configured = cfg.remote.as_ref().and_then(|r| r.publish_address.as_deref());
             let publish = crate::caddy::publish_address(&site, configured);
+            // Before `ensure_routing`, so a shared task's listener is published in the same Caddy start.
+            if !site.is_remote() && super::share::is_shared(&ws.root, &sanitized) {
+                if let Err(e) = crate::caddy::want_share(None) {
+                    crate::ui::note(&format!("share listener: {e:#}"));
+                }
+            }
             // On a public interface the wildcard bind exposes every worktree to the internet — nothing else here would say so.
             if site.is_remote() && configured.is_none() {
                 crate::ui::note(
@@ -122,6 +128,9 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             }
             let dns = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
                 Ok(state) => {
+                    if let Err(e) = crate::certs::sync(&site, domain) {
+                        crate::ui::note(&format!("certificate: {e:#}"));
+                    }
                     if let Some(h) = crate::caddy::resolve_hint(&site, domain, &state) {
                         crate::ui::note(&h);
                     }
@@ -336,12 +345,26 @@ fn sync_routes(
             let suffix = crate::caddy::port_suffix(crate::caddy::https_port());
             let with_port: Vec<String> = hosts.iter().map(|h| format!("{h}{suffix}")).collect();
             step.ok_with(&with_port.join(", "));
+            if !site.is_remote() && super::share::is_shared(root, sanitized) {
+                share_routes(site, repo, &routes);
+            }
             true
         }
         Some(e) => {
             step.fail(&e);
             false
         }
+    }
+}
+
+/// A failed share route leaves the task working locally, so it's reported, never demoted.
+fn share_routes(site: &Site, repo: &str, routes: &[crate::caddy::RouteSpec]) {
+    let step = crate::ui::step(repo, "shared");
+    let res = crate::caddy::ensure_share_server(site)
+        .and_then(|()| routes.iter().try_for_each(|r| crate::caddy::share_route_up(site, r)));
+    match res {
+        Ok(()) => step.ok(),
+        Err(e) => step.fail(&format!("{e:#}")),
     }
 }
 

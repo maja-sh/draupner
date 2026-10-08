@@ -28,6 +28,11 @@ const DATA_VOLUME: &str = "ws-caddy-data";
 const CONFIG_VOLUME: &str = "ws-caddy-config";
 /// Distinct from any `route_id` so worktree route CRUD never touches it.
 const STOPPED_STACK_ID: &str = "ws-stopped-stack";
+/// Second listener carrying only shared tasks' routes; its host publish is the LAN-facing one.
+const SHARE_SERVER: &str = "wsx-share";
+const UNSHARED_ID: &str = "ws-share-unshared";
+/// Route ids all start `ws-`, so this prefix can't collide with one.
+const SHARE_ID_PREFIX: &str = "share-";
 pub const HOST_ALIAS: &str = "host.containers.internal";
 
 fn admin_args(_site: &Site, path: &str) -> Vec<String> {
@@ -66,6 +71,12 @@ pub fn port_suffix(port: u16) -> String {
     }
 }
 
+/// Container-side only: the host publishes it on the same port number as the private listener, so a URL is identical from either side.
+fn share_inner_port() -> u16 {
+    let p = https_port();
+    if p == u16::MAX { p - 1 } else { p + 1 }
+}
+
 pub fn publish_address(site: &Site, configured: Option<&str>) -> String {
     match site {
         Site::Local => "127.0.0.1".to_string(),
@@ -78,10 +89,10 @@ pub fn publish_address(site: &Site, configured: Option<&str>) -> String {
 }
 
 /// IPv6 hosts must be bracketed or the runtime rejects `-p` outright.
-fn publish_spec(addr: &str, port: u16) -> String {
+fn publish_spec(addr: &str, host_port: u16, container_port: u16) -> String {
     match addr.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V6(a)) => format!("[{a}]:{port}:{port}"),
-        _ => format!("{addr}:{port}:{port}"),
+        Ok(std::net::IpAddr::V6(a)) => format!("[{a}]:{host_port}:{container_port}"),
+        _ => format!("{addr}:{host_port}:{container_port}"),
     }
 }
 
@@ -98,6 +109,77 @@ fn published_host(site: &Site, runtime: &str, port: u16) -> Option<String> {
     // Split at the last colon to keep IPv6 (`[::1]:8443`) intact.
     let host = line.rsplit_once(':')?.0.to_string();
     (!host.is_empty()).then(|| host.trim_matches(['[', ']']).to_string())
+}
+
+/// Present ⇒ publish the share listener; non-empty contents pin its address.
+fn share_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("share"))
+}
+
+pub fn want_share(pin: Option<&str>) -> Result<()> {
+    let path = share_file()?;
+    // Re-sharing without `--address` keeps an earlier pin.
+    if pin.is_none() && path.exists() {
+        return Ok(());
+    }
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::config::write_atomic(&path, format!("{}\n", pin.unwrap_or("")).as_bytes())
+        .context("persist share")
+}
+
+pub fn drop_share() {
+    if let Ok(p) = share_file() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Only a local Caddy shares: an offloaded one already publishes on the server's interfaces.
+pub fn share_address(site: &Site) -> Option<String> {
+    if site.is_remote() {
+        return None;
+    }
+    let pinned = std::fs::read_to_string(share_file().ok()?).ok()?;
+    match pinned.trim() {
+        "" => lan_address(),
+        a => Some(a.to_string()),
+    }
+}
+
+fn lan_address() -> Option<String> {
+    // A route lookup only; nothing is sent to 1.1.1.1.
+    if let Some(a) = stdout_of(&["ip", "-4", "route", "get", "1.1.1.1"]).and_then(|o| parse_ip_route_src(&o)) {
+        return Some(a);
+    }
+    let iface = stdout_of(&["route", "-n", "get", "default"]).and_then(|o| parse_route_interface(&o))?;
+    stdout_of(&["ipconfig", "getifaddr", &iface])
+        .map(|o| o.trim().to_string())
+        .filter(|a| a.parse::<std::net::IpAddr>().is_ok())
+}
+
+fn stdout_of(argv: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Linux `ip route get`: `1.1.1.1 via 192.168.8.1 dev enp1s0 src 192.168.8.114 uid 1000`.
+fn parse_ip_route_src(out: &str) -> Option<String> {
+    let mut words = out.split_whitespace();
+    words.find(|w| *w == "src")?;
+    words.next().filter(|a| a.parse::<std::net::IpAddr>().is_ok()).map(str::to_string)
+}
+
+/// macOS `route -n get default`: an `interface: en0` line.
+fn parse_route_interface(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("interface:"))
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 pub fn set_https_port(port: u16) -> Result<()> {
@@ -189,21 +271,21 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         return Ok(());
     }
     runtime_available(site, runtime)?;
+    let share = share_address(site);
     if container_running(site, runtime, CADDY_CONTAINER) {
         // Left alone unless port or address moved; a `-p` binding is invisible
         // to Caddy so address changes can't be inferred from its config.
         match served_port(site) {
             Some(p) if p == https_port() => {
-                match published_host(site, runtime, p) {
-                    Some(h) if h != publish_addr => {
+                match publish_drift(site, runtime, p, publish_addr, share.as_deref()) {
+                    Some(why) => {
                         crate::ui::note(&format!(
-                            "re-creating {CADDY_CONTAINER} to publish on {publish_addr} \
-                             (currently {h}) — routes are preserved"
+                            "re-creating {CADDY_CONTAINER} to {why} — routes are preserved"
                         ));
                         // Cheaper than `reseed`: `--resume` reloads routes from the retained volume.
                         let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
                     }
-                    _ => return Ok(()),
+                    None => return Ok(()),
                 }
             }
             // Predates the TCP-admin switch or wedged; `--resume` would restore the old admin.
@@ -231,14 +313,15 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
     preflight_ports(site)?;
 
     let dir = write_boot_config(site)?;
-    if run_caddy(site, runtime, &dir, publish_addr).is_none() {
+    let share = share.as_deref();
+    if run_caddy(site, runtime, &dir, publish_addr, share).is_none() {
         return wait_admin_ready(site);
     }
     if container_running(site, runtime, CADDY_CONTAINER) {
         return wait_admin_ready(site);
     }
     let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
-    let reason = run_caddy(site, runtime, &dir, publish_addr);
+    let reason = run_caddy(site, runtime, &dir, publish_addr, share);
     if reason.is_none() || container_running(site, runtime, CADDY_CONTAINER) {
         return wait_admin_ready(site);
     }
@@ -247,6 +330,24 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
         "could not start the {CADDY_CONTAINER} container: {}",
         reason.unwrap_or_else(|| "unknown error".to_string())
     )
+}
+
+fn publish_drift(
+    site: &Site,
+    runtime: &str,
+    port: u16,
+    publish_addr: &str,
+    share: Option<&str>,
+) -> Option<String> {
+    if let Some(h) = published_host(site, runtime, port).filter(|h| h != publish_addr) {
+        return Some(format!("publish on {publish_addr} (currently {h})"));
+    }
+    match (share, published_host(site, runtime, share_inner_port()).as_deref()) {
+        (Some(want), Some(have)) if want == have => None,
+        (Some(want), _) => Some(format!("share on {want}")),
+        (None, Some(have)) => Some(format!("stop sharing on {have}")),
+        (None, None) => None,
+    }
 }
 
 fn preflight_ports(site: &Site) -> Result<()> {
@@ -368,9 +469,16 @@ fn host_alias_args(runtime: &str) -> Vec<&'static str> {
     vec!["--add-host", ALIAS_TO_GATEWAY]
 }
 
-fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Option<String> {
+fn run_caddy(
+    site: &Site,
+    runtime: &str,
+    dir: &str,
+    publish_addr: &str,
+    share: Option<&str>,
+) -> Option<String> {
     let port = https_port();
-    let publish = publish_spec(publish_addr, port);
+    let publish = publish_spec(publish_addr, port, port);
+    let share_publish = share.map(|a| publish_spec(a, port, share_inner_port()));
     let admin = admin_port();
     // Loopback-only publish; container listens on 2019 inside.
     let admin_publish = format!("127.0.0.1:{admin}:{DEFAULT_ADMIN_PORT}");
@@ -382,8 +490,11 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
         runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WSX_NET, "--restart", "always",
     ];
     args.extend(host_alias_args(runtime));
+    args.extend(["-p", &publish]);
+    if let Some(s) = share_publish.as_deref() {
+        args.extend(["-p", s]);
+    }
     args.extend([
-        "-p", &publish,
         "-p", &admin_publish,
         "-v", &sock_mount,
         "-v", &data_vol,
@@ -544,7 +655,8 @@ fn boot_config() -> serde_json::Value {
             "http": {
                 "https_port": port,
                 "servers": {
-                    SERVER: { "listen": [format!(":{port}")], "routes": [ stopped_stack_route() ] }
+                    SERVER: { "listen": [format!(":{port}")], "routes": [ stopped_stack_route() ] },
+                    SHARE_SERVER: share_server()
                 }
             },
             "tls": { "automation": {
@@ -573,6 +685,43 @@ fn stopped_stack_route() -> serde_json::Value {
     })
 }
 
+fn share_server() -> serde_json::Value {
+    serde_json::json!({
+        "listen": [format!(":{}", share_inner_port())],
+        // Off `https_port`, Caddy only enables TLS for host-matched routes, so with none shared it would answer plain HTTP.
+        "tls_connection_policies": [ {} ],
+        "routes": [ {
+            "@id": UNSHARED_ID,
+            "handle": [ {
+                "handler": "static_response",
+                "status_code": 503,
+                "headers": { "Content-Type": [ "text/plain; charset=utf-8" ] },
+                "body": "Nothing is shared at this address right now.\n"
+            } ]
+        } ]
+    })
+}
+
+/// A Caddy seeded before sharing existed resumes without the share server.
+pub fn ensure_share_server(site: &Site) -> Result<()> {
+    let path = format!("/config/apps/http/servers/{SHARE_SERVER}");
+    let out = curl(site, &admin_args(site, &path))?;
+    if out.body.trim() != "null" {
+        return Ok(());
+    }
+    let mut args = vec![
+        "-X".to_string(), "PUT".to_string(),
+        "-H".to_string(), "Content-Type: application/json".to_string(),
+        "-d".to_string(), share_server().to_string(),
+    ];
+    args.extend(admin_args(site, &path));
+    check(&curl(site, &args)?, || format!("add the {SHARE_SERVER} server"))
+}
+
+fn share_id(id: &str) -> String {
+    format!("{SHARE_ID_PREFIX}{id}")
+}
+
 fn route(id: &str, hostname: &str, upstream: &str, wildcard: bool) -> serde_json::Value {
     // `*.foo` matches one label, NOT bare `foo` — a wildcard service lists both.
     let hosts = if wildcard {
@@ -590,22 +739,92 @@ fn route(id: &str, hostname: &str, upstream: &str, wildcard: bool) -> serde_json
     })
 }
 
-/// Prepends at index 0 — ahead of the catch-all which must stay last. Scoped ops, never `/load`.
 pub fn route_up(site: &Site, spec: &RouteSpec) -> Result<()> {
-    delete_id(site, &spec.id);
-    let body = route(&spec.id, &spec.hostname, &spec.upstream, spec.wildcard).to_string();
+    put_route(site, SERVER, &spec.id, spec)
+}
+
+pub fn share_route_up(site: &Site, spec: &RouteSpec) -> Result<()> {
+    put_route(site, SHARE_SERVER, &share_id(&spec.id), spec)
+}
+
+/// Prepends at index 0 — ahead of the catch-all which must stay last. Scoped ops, never `/load`.
+fn put_route(site: &Site, server: &str, id: &str, spec: &RouteSpec) -> Result<()> {
+    delete_id(site, id);
+    let body = route(id, &spec.hostname, &spec.upstream, spec.wildcard).to_string();
     let mut args = vec![
         "-X".to_string(), "PUT".to_string(),
         "-H".to_string(), "Content-Type: application/json".to_string(),
         "-d".to_string(), body,
     ];
-    args.extend(admin_args(site, &format!("/config/apps/http/servers/{SERVER}/routes/0")));
-    check(&curl(site, &args)?, || format!("add route {}", spec.id))
+    args.extend(admin_args(site, &format!("/config/apps/http/servers/{server}/routes/0")));
+    check(&curl(site, &args)?, || format!("add route {id}"))
 }
 
 /// Best-effort — teardown is infallible by design.
 pub fn route_down(site: &Site, id: &str) {
     delete_id(site, id);
+    delete_id(site, &share_id(id));
+}
+
+pub fn share_route_down(site: &Site, id: &str) {
+    delete_id(site, &share_id(id));
+}
+
+/// Whether the private route is installed, i.e. the task is up and reachable here.
+pub fn route_live(site: &Site, id: &str) -> bool {
+    curl(site, &admin_args(site, &format!("/id/{id}/")))
+        .map(|o| o.ok && (200..300).contains(&o.code))
+        .unwrap_or(false)
+}
+
+/// Across every workspace on this machine, since they share the one Caddy; `None` = can't tell.
+pub fn shared_route_count(site: &Site) -> Option<usize> {
+    let out = curl(site, &admin_args(site, &format!("/config/apps/http/servers/{SHARE_SERVER}/routes"))).ok()?;
+    if !out.ok || !(200..300).contains(&out.code) {
+        return None;
+    }
+    count_shared(&out.body)
+}
+
+fn count_shared(body: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v.is_null() {
+        return Some(0);
+    }
+    Some(
+        v.as_array()?
+            .iter()
+            .filter(|r| r["@id"].as_str().is_some_and(|id| id.starts_with(SHARE_ID_PREFIX)))
+            .count(),
+    )
+}
+
+fn cert_id(domain: &str) -> String {
+    format!("ws-cert-{}", id_part(domain))
+}
+
+/// Replaces any copy loaded earlier, so renewed files take effect on the next push.
+pub fn load_cert(site: &Site, domain: &str, cert_pem: &str, key_pem: &str) -> Result<()> {
+    let id = cert_id(domain);
+    delete_id(site, &id);
+    let pair = serde_json::json!({ "@id": id, "certificate": cert_pem, "key": key_pem });
+    let path = "/config/apps/tls/certificates/load_pem";
+    // POST appends to an existing array; only PUT creates the missing parents.
+    let existing = curl(site, &admin_args(site, path))?;
+    let appendable = existing.ok
+        && serde_json::from_str::<serde_json::Value>(&existing.body).is_ok_and(|v| v.is_array());
+    let (method, body) = if appendable { ("POST", pair) } else { ("PUT", serde_json::json!([pair])) };
+    let mut args = vec![
+        "-X".to_string(), method.to_string(),
+        "-H".to_string(), "Content-Type: application/json".to_string(),
+        "--data-binary".to_string(), "@-".to_string(),
+    ];
+    args.extend(admin_args(site, path));
+    check(&curl_with_stdin(site, &args, Some(&body.to_string()))?, || format!("load the certificate for {domain}"))
+}
+
+pub fn unload_cert(site: &Site, domain: &str) {
+    delete_id(site, &cert_id(domain));
 }
 
 fn delete_id(site: &Site, id: &str) {
@@ -616,14 +835,29 @@ fn delete_id(site: &Site, id: &str) {
 
 /// Under `WSX_CADDY_ADMIN` the request always runs locally regardless of `site` — that URL is a host endpoint, not the server's admin port.
 fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
+    curl_with_stdin(site, args, None)
+}
+
+/// A private key travels on stdin, never argv, where any local user's `ps` would see it.
+fn curl_with_stdin(site: &Site, args: &[String], stdin: Option<&str>) -> Result<CurlOut> {
+    use std::io::Write;
+    use std::process::Stdio;
+
     let local = Site::Local;
     let effective = if externally_managed() { &local } else { site };
     let mut argv: Vec<&str> = vec!["curl", "-sS", "-m", "10", "-w", "\n%{http_code}"];
     argv.extend(args.iter().map(String::as_str));
-    let out = effective
+    let mut child = effective
         .command(&argv)
-        .output()
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("spawn curl for Caddy admin API")?;
+    if let Some(body) = stdin {
+        child.stdin.take().expect("piped stdin").write_all(body.as_bytes()).context("stream to curl")?;
+    }
+    let out = child.wait_with_output().context("wait for curl")?;
     let text = String::from_utf8_lossy(&out.stdout);
     let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
     Ok(CurlOut {
@@ -694,10 +928,10 @@ mod tests {
 
     #[test]
     fn publish_spec_brackets_ipv6_only() {
-        assert_eq!(publish_spec("127.0.0.1", 8443), "127.0.0.1:8443:8443");
-        assert_eq!(publish_spec("0.0.0.0", 8443), "0.0.0.0:8443:8443");
-        assert_eq!(publish_spec("::1", 8443), "[::1]:8443:8443");
-        assert_eq!(publish_spec("fd7a:115c::1", 443), "[fd7a:115c::1]:443:443");
+        assert_eq!(publish_spec("127.0.0.1", 8443, 8443), "127.0.0.1:8443:8443");
+        assert_eq!(publish_spec("0.0.0.0", 8443, 8443), "0.0.0.0:8443:8443");
+        assert_eq!(publish_spec("::1", 8443, 8443), "[::1]:8443:8443");
+        assert_eq!(publish_spec("fd7a:115c::1", 443, 444), "[fd7a:115c::1]:443:444");
     }
 
     #[test]
@@ -774,6 +1008,68 @@ mod tests {
         let routes = c["apps"]["http"]["servers"][SERVER]["routes"].as_array().unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["@id"], STOPPED_STACK_ID);
+    }
+
+    #[test]
+    fn boot_config_seeds_a_share_server_on_its_own_port() {
+        let _g = env_guard();
+        let c = boot_config();
+        let share = &c["apps"]["http"]["servers"][SHARE_SERVER];
+        assert_eq!(share["listen"][0], format!(":{}", share_inner_port()));
+        assert_ne!(share_inner_port(), https_port());
+        assert_eq!(share["tls_connection_policies"], serde_json::json!([{}]));
+        assert_eq!(share["routes"][0]["@id"], UNSHARED_ID);
+        assert!(share["routes"][0].get("match").is_none(), "catch-all must not filter by host");
+    }
+
+    #[test]
+    fn share_ids_never_collide_with_route_ids() {
+        let id = route_id("feat-foo", "api", "web");
+        assert!(id.starts_with("ws-"), "{id}");
+        assert_ne!(share_id(&id), id);
+        assert!(!share_id(&id).starts_with("ws-"));
+    }
+
+    #[test]
+    fn count_shared_counts_only_share_routes() {
+        let body = serde_json::json!([
+            { "@id": share_id("ws-8_feat-foo-3_api-3_web") },
+            { "@id": share_id("ws-3_bar-3_api-3_web") },
+            { "@id": UNSHARED_ID },
+        ])
+        .to_string();
+        assert_eq!(count_shared(&body), Some(2));
+        assert_eq!(count_shared("null"), Some(0));
+        assert_eq!(count_shared(""), None);
+    }
+
+    #[test]
+    fn share_address_follows_the_flag_file() {
+        let _g = env_guard();
+        assert_eq!(share_address(&Site::Local), None, "no flag ⇒ not shared");
+        want_share(Some("192.168.1.20")).unwrap();
+        assert_eq!(share_address(&Site::Local).as_deref(), Some("192.168.1.20"));
+        want_share(None).unwrap();
+        assert_eq!(share_address(&Site::Local).as_deref(), Some("192.168.1.20"), "a re-share keeps the pin");
+        assert_eq!(share_address(&remote_site()), None);
+        drop_share();
+        assert_eq!(share_address(&Site::Local), None);
+    }
+
+    #[test]
+    fn parses_the_default_route_source_address() {
+        let linux = "1.1.1.1 via 192.168.8.1 dev enp1s0 src 192.168.8.114 uid 1000 \n    cache \n";
+        assert_eq!(parse_ip_route_src(linux).as_deref(), Some("192.168.8.114"));
+        assert_eq!(parse_ip_route_src("1.1.1.1 dev wg0 table 51820"), None);
+        let mac = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.1.1\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>\n";
+        assert_eq!(parse_route_interface(mac).as_deref(), Some("en0"));
+        assert_eq!(parse_route_interface("interface: en0; rm -rf /"), None);
+    }
+
+    #[test]
+    fn cert_id_stays_one_path_segment() {
+        let id = cert_id("../../config");
+        assert!(!id.contains('/') && !id.contains(".."), "{id}");
     }
 
     #[test]

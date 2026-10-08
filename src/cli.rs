@@ -109,6 +109,15 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Make a task's routed services reachable from other machines on your network
+    Share {
+        branch: String,
+        /// Address to publish on (default: this machine's default-route address); remembered
+        #[arg(long, value_name = "IP")]
+        address: Option<String>,
+    },
+    /// Stop sharing a task
+    Unshare { branch: String },
     /// Configure or verify this workspace's remote offload
     Remote {
         #[command(subcommand)]
@@ -201,6 +210,8 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Context{describe}       => crate::ops::context::run(describe),
         Cmd::Clean{force}            => crate::ops::clean::run(force),
         Cmd::Setup{port,admin_port,yes} => crate::ops::setup::run(yes, port, admin_port),
+        Cmd::Share{branch,address}   => crate::ops::share::share(&branch, address.as_deref()),
+        Cmd::Unshare{branch}         => crate::ops::share::unshare(&branch),
         Cmd::Remote{cmd}             => match cmd {
             RemoteCmd::Check{host,verbose} => crate::ops::remote_check::run(host.as_deref(), verbose),
             RemoteCmd::Set{connection,path,domain,no_verify,force} =>

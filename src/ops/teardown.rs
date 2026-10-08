@@ -125,6 +125,13 @@ pub fn remove_task(
         ports::forget(root, &sanitized, repo);
     }
 
+    if super::share::is_shared(root, &sanitized) {
+        super::share::unmark(root, &sanitized);
+        if let Some(s) = site.as_ref() {
+            super::share::retire_if_idle(s, cfg.runtime());
+        }
+    }
+
     let _ = std::fs::remove_dir(workspace::task_dir(root, branch));
 
     Ok(hook_failed)

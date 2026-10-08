@@ -164,6 +164,7 @@ space this fills.
 | `wsx context` | JSON snapshot of the current task and workspace for LLM agents |
 | `wsx clean` | Audit worktrees; preview what's safe to drop, `--force` to act |
 | `wsx exec [repo] -- <cmd>` | Run a command where that repo's stack lives (over SSH when offloaded) |
+| `wsx share/unshare <branch>` | Make a task reachable from other machines on your network, or stop |
 | `wsx setup` | Ready this machine for routing; reports the gaps it can't close itself |
 | `wsx remote check` | Read-only health check of the offload server (or of local routing) |
 | `wsx remote set/unset` | Move this workspace to a server, or bring it back; refuses while a stack is running |
@@ -183,6 +184,8 @@ Every command takes `--help`.
   and the full `WSX_*` environment contract your scripts receive.
 - **[docs/offload.md](docs/offload.md)** — running the stacks on a server while
   you edit locally.
+- **[docs/sharing.md](docs/sharing.md)** — showing a task to someone else on your
+  network, with a certificate their browser trusts.
 - **[server-setup/](server-setup/)** — the one-time privileged host setup.
 
 ---

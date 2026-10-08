@@ -6,6 +6,7 @@
 //! usage; module-level docs describe internals.
 
 mod caddy;
+mod certs;
 mod cli;
 mod compat;
 mod compose;
