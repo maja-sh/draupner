@@ -1,7 +1,21 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
+
+# os
 .DS_Store
+Thumbs.db
+
+# editors
+/.zed/
+.idea/
+.vscode/
+*.swp
+*~
+
+# nix / direnv
+.direnv/
+result/
 
 # personal notes
 /specs/
