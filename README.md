@@ -27,14 +27,20 @@ Several tasks can run at once. Nothing is shared between them unless you say so.
 
 ## Install
 
-Each release attaches a prebuilt binary for `aarch64-apple-darwin` (Apple Silicon):
+From crates.io (Rust stable):
+
+```sh
+cargo install wsx
+```
+
+Or grab the prebuilt `aarch64-apple-darwin` (Apple Silicon) binary from the latest release:
 
 ```sh
 gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O wsx
 chmod +x wsx && mv wsx ~/.local/bin/wsx
 ```
 
-Or from source (Rust stable):
+Or build from a clone:
 
 ```sh
 cargo build --release   # → target/release/wsx
