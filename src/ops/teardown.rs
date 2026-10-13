@@ -1,4 +1,4 @@
-//! Shared teardown for `ws rm` and `ws clean` — the gating differs, but from
+//! Shared teardown for `wsx rm` and `wsx clean` — the gating differs, but from
 //! hooks through branch-delete the sequence is identical.
 
 use anyhow::Result;
@@ -29,14 +29,14 @@ pub fn remove_task(
     let mut hook_failed = false;
 
     // `None` ⇒ remote server unreachable; still drop the local worktrees so
-    // `ws rm` isn't blocked when the server is down.
+    // `wsx rm` isn't blocked when the server is down.
     let site = Site::resolve(cfg).ok();
 
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
         // Host processes are ws-owned units — stop them at their site instead of
-        // running hooks (same exclusive split as `ws down`).
+        // running hooks (same exclusive split as `wsx down`).
         if cfg.is_host_repo(repo) {
             teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
@@ -130,7 +130,7 @@ pub fn remove_task(
     Ok(hook_failed)
 }
 
-/// Stop a `kind: host` repo's supervised process at its site (best-effort); a `None` site is a remote server that's unreachable, so `ws rm` still drops the local worktree.
+/// Stop a `kind: host` repo's supervised process at its site (best-effort); a `None` site is a remote server that's unreachable, so `wsx rm` still drops the local worktree.
 fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mut bool) {
     match site {
         Some(s) => {
@@ -274,7 +274,7 @@ impl std::fmt::Display for SweepReport {
     }
 }
 
-/// `keep_volumes` gates volumes only — a leaked container pins its image and a leaked network collides with the next `ws new` on this branch, so those go regardless.
+/// `keep_volumes` gates volumes only — a leaked container pins its image and a leaked network collides with the next `wsx new` on this branch, so those go regardless.
 fn sweep_compose(
     site: &Site,
     runtime: &str,

@@ -1,8 +1,8 @@
 //! Focused per-worktree endpoint: everything you need to operate one task's
-//! worktree, one call. Narrower than `ws list` (single branch, no siblings),
+//! worktree, one call. Narrower than `wsx list` (single branch, no siblings),
 //! richer than `ws path` (services, ports, hostnames, exec syntax on top of
 //! paths). The `--json` shape doubles as the `task.repos[]` payload of
-//! `ws context`, which is why field names are self-documenting — the LLM
+//! `wsx context`, which is why field names are self-documenting — the LLM
 //! endpoint leans on names in place of a schema round-trip.
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
-/// Container liveness runs the same `status` hook `ws list` uses; cap it short so a hung stack can't stall the summary.
+/// Container liveness runs the same `status` hook `wsx list` uses; cap it short so a hung stack can't stall the summary.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
@@ -35,7 +35,7 @@ pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
 
     if data.repos.is_empty() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `ws new` first"
+            "no worktrees for {branch}; run `wsx new` first"
         )));
     }
 
@@ -47,7 +47,7 @@ pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
     Ok(())
 }
 
-/// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `ws exec`s see the branch the user typed.
+/// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `wsx exec`s see the branch the user typed.
 fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<String> {
     if let Some(b) = branch {
         return Ok(b.to_string());
@@ -152,7 +152,7 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
         let log_path_absolute = is_host
             .then(|| site.and_then(|s| crate::supervise::log_path(s, &crate::supervise::proc_name(branch, name))))
             .flatten();
-        let exec_command_prefix = format!("ws exec --branch {branch} {name} --");
+        let exec_command_prefix = format!("wsx exec --branch {branch} {name} --");
 
         repos.push(RepoInfo {
             name: name.to_string(),
@@ -209,7 +209,7 @@ fn liveness(
         cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect,
     )
     .ok()?;
-    // Remote workspace container status must run on the server, otherwise the local runtime answers a question about the server's containers — the exact mismatch `ws list` avoids at list.rs:47-64.
+    // Remote workspace container status must run on the server, otherwise the local runtime answers a question about the server's containers — the exact mismatch `wsx list` avoids at list.rs:47-64.
     let out = match site {
         Site::Local => hooks::capture_command(
             root, worktree, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
@@ -324,7 +324,7 @@ Human by default. `--json` emits the same data as a structured object:
         }
       ],
       "log_path_absolute":     absolute path to the host log, null for containers,
-      "exec_command_prefix":   "ws exec --branch <branch> <repo> --" — append your command
+      "exec_command_prefix":   "wsx exec --branch <branch> <repo> --" — append your command
     }
   ]
 }
@@ -442,7 +442,7 @@ mod tests {
         let cfg = config::load(root).unwrap();
         let data = collect(&cfg, root, "feat/x", Some(&Site::Local));
         let repo = &data.repos[0];
-        assert_eq!(repo.exec_command_prefix, "ws exec --branch feat/x api --");
+        assert_eq!(repo.exec_command_prefix, "wsx exec --branch feat/x api --");
         // Whatever HOME points at, the suffix is what the LLM appends to its own log-tail commands.
         let log = repo
             .log_path_absolute

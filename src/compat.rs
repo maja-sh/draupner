@@ -16,7 +16,7 @@ pub fn check() {
 
     if below_floor(min, running) {
         eprintln!(
-            "warning: ws is qualified for macOS {min} and newer; running {running} \
+            "warning: wsx is qualified for macOS {min} and newer; running {running} \
              may hit untested APFS/signal behavior."
         );
     }

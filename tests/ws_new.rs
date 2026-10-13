@@ -57,7 +57,7 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
             ("WS_SSH", ssh.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx new failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("mutagen was invoked");
     assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
@@ -110,7 +110,7 @@ fn a_dangling_origin_head_falls_back_to_the_default_branch_ladder() {
     // Regression: upstream renamed its default branch, so a pruning fetch deleted
     // `refs/remotes/origin/master` but left `origin/HEAD` pointing at it.
     // `git symbolic-ref` doesn't dereference, so it keeps reporting the dead
-    // branch — taking it as the start point aborted `ws new` with "not a valid
+    // branch — taking it as the start point aborted `wsx new` with "not a valid
     // object name: 'origin/master'" even though `origin/main` resolves fine.
     let f = WorkspaceFixture::empty();
     f.add_repo_with_origin("api"); // pushes + tracks `main`, so origin/main exists
@@ -123,7 +123,7 @@ fn a_dangling_origin_head_falls_back_to_the_default_branch_ladder() {
     let out = f.run(&["new", "api", "feat/dangling"]);
     assert!(
         out.status.success(),
-        "ws new must fall through to the main/master ladder:\n{}",
+        "wsx new must fall through to the main/master ladder:\n{}",
         stderr(&out)
     );
 
@@ -168,7 +168,7 @@ fn happy_path_two_repos() {
     assert!(err.contains("api:"), "expected 'api:' in summary:\n{err}");
     assert!(err.contains("app:"), "expected 'app:' in summary:\n{err}");
 
-    assert!(err.contains("ws up feat/login"), "expected nudge in:\n{err}");
+    assert!(err.contains("wsx up feat/login"), "expected nudge in:\n{err}");
 }
 
 #[test]
@@ -193,15 +193,15 @@ fn error_existing_worktree() {
     assert_eq!(out.status.code(), Some(1), "expected exit 1 for existing worktree");
 
     let err = stderr(&out);
-    assert!(err.contains("ws rm"), "expected 'ws rm' suggestion in error:\n{err}");
+    assert!(err.contains("wsx rm"), "expected 'wsx rm' suggestion in error:\n{err}");
 }
 
 #[test]
 fn hook_exits_nonzero_rolls_back_the_worktree() {
-    // `ws new` is atomic across every fallible step past `create_worktree`: a
+    // `wsx new` is atomic across every fallible step past `create_worktree`: a
     // post-create hook that exits non-zero unwinds the worktree so a rerun
     // isn't blocked by half-created state (previously the worktree stayed and
-    // the user had to `ws rm` before retrying).
+    // the user had to `wsx rm` before retrying).
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "post-create", "echo 'failing'; exit 1");
 
@@ -221,7 +221,7 @@ fn hook_exits_nonzero_rolls_back_the_worktree() {
 fn second_repo_hook_failure_rolls_back_the_first_repo_too() {
     // The scenario the pre-oss review flagged: two repos, second fails, first
     // was fully created (worktree + branch). Without cross-repo rollback the
-    // first repo's worktree lingered and the only path forward was `ws rm`
+    // first repo's worktree lingered and the only path forward was `wsx rm`
     // (which then wiped the sibling too), so the user paid the same cost for
     // a partial success. Both must unwind so a retry is clean.
     let f = WorkspaceFixture::with_repos(&["api", "web"]);
@@ -509,17 +509,17 @@ fn new_with_up_brings_the_stack_up_in_one_command() {
     let f = up_marker_fixture();
 
     let out = f.run_ok(&["new", "api", "feat/foo", "--up"]);
-    assert!(out.status.success(), "ws new --up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx new --up failed:\n{}", stderr(&out));
 
     let err = stderr(&out);
-    assert!(err.contains("ws-new"), "should still do the create:\n{err}");
-    assert!(err.contains("ws-up"), "should chain into up:\n{err}");
+    assert!(err.contains("wsx-new"), "should still do the create:\n{err}");
+    assert!(err.contains("wsx-up"), "should chain into up:\n{err}");
     assert!(
         wait_for(&f.path().join(".worktrees/feat-foo/api/up-ran")),
         "up script should have run:\n{err}"
     );
-    // The "next: ws up" nudge is pointless once we've already brought it up.
-    assert!(!err.contains("next: ws up"), "nudge should be suppressed:\n{err}");
+    // The "next: wsx up" nudge is pointless once we've already brought it up.
+    assert!(!err.contains("next: wsx up"), "nudge should be suppressed:\n{err}");
 
     let _ = f.run(&["rm", "feat/foo", "--force"]);
 }
@@ -534,5 +534,5 @@ fn new_without_up_only_creates_and_nudges() {
         !f.path().join(".worktrees/feat-foo/api/up-ran").exists(),
         "up must not run without --up:\n{err}"
     );
-    assert!(err.contains("ws up feat/foo"), "should nudge:\n{err}");
+    assert!(err.contains("wsx up feat/foo"), "should nudge:\n{err}");
 }

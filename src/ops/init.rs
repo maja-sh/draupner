@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
 use crate::compose;
 
-/// The lifecycle events `ws` dispatches, in the order they happen. `ws init`
+/// The lifecycle events `wsx` dispatches, in the order they happen. `wsx init`
 /// scaffolds one starter script per repo per event; declaring one under a repo's
 /// `scripts` is what turns it on.
 const HOOK_EVENTS: &[&str] =
@@ -26,7 +26,7 @@ pub fn run(
         let root = crate::workspace::locate()
             .map(|ws| ws.root)
             .map_err(|_| super::preflight(format!(
-                "no `.ws.json` in {} or any parent — `ws init --refresh-schema` \
+                "no `.ws.json` in {} or any parent — `wsx init --refresh-schema` \
                  only runs inside an initialized workspace.",
                 cwd.display()
             )))?;
@@ -48,8 +48,8 @@ fn build_remote(
         .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`ws init --remote` needs a host: pass `--remote <host>`, set $WS_REMOTE_HOST, \
-                 or `ws config set remote.host <host>`",
+                "`wsx init --remote` needs a host: pass `--remote <host>`, set $WS_REMOTE_HOST, \
+                 or `wsx config set remote.host <host>`",
             )
         })?;
     // Fresh user input: reject an option-shaped host here, not only when a stored config later loads.
@@ -74,16 +74,16 @@ fn init_local(
     let effective =
         runtime.clone().unwrap_or_else(|| crate::config::detect_runtime().unwrap_or("podman").to_string());
 
-    // Blocks *creating* a nested root (not running `ws` from a subdir), because an outer `ws clean`/`rm` would tear an inner workspace down.
+    // Blocks *creating* a nested root (not running `wsx` from a subdir), because an outer `wsx clean`/`rm` would tear an inner workspace down.
     if let Some(outer) = enclosing_workspace(root) {
         let detail = if root.starts_with(outer.join(".worktrees")) {
-            " — inside its `.worktrees/` tree, where an outer `ws clean`/`rm` would tear this down"
+            " — inside its `.worktrees/` tree, where an outer `wsx clean`/`rm` would tear this down"
         } else {
             ""
         };
         return Err(super::preflight(format!(
             "refusing to initialize: already inside the workspace at {}{}. \
-             Nested workspaces aren't supported — run `ws init` outside it.",
+             Nested workspaces aren't supported — run `wsx init` outside it.",
             outer.display(),
             detail,
         )));
@@ -141,9 +141,9 @@ fn init_local(
     summary.push(".ws-hooks/".to_string());
     crate::ui::summary_ok(&summary);
     if remote_note.is_some() {
-        crate::ui::nudge("run `ws remote check` once the server's set up for full validation");
+        crate::ui::nudge("run `wsx remote check` once the server's set up for full validation");
     } else {
-        crate::ui::nudge("edit .ws.json / .ws-hooks/, then `ws claude`");
+        crate::ui::nudge("edit .ws.json / .ws-hooks/, then `wsx claude`");
     }
     Ok(())
 }
@@ -167,7 +167,7 @@ fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.ws.json`; `ws up` re-derives live regardless.
+/// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.ws.json`; `wsx up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
     // No server exists yet — the workspace is being created — so derivation runs on the local site.
@@ -210,7 +210,7 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
 
 /// Scaffold a starter shell script per repo per event under `.ws-hooks/`, as
 /// `<repo>-<event>.sh`. They're inert until a repo's `scripts` block names one —
-/// `ws` runs only what `.ws.json` declares — so the template body says how.
+/// `wsx` runs only what `.ws.json` declares — so the template body says how.
 /// Written executable, because a `scripts` entry invokes the file directly.
 fn write_hook_templates(dir: &Path, repos: &[String]) -> Result<()> {
     fs::create_dir_all(dir)?;

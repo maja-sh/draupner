@@ -65,7 +65,7 @@ pub(crate) fn default_remote_host() -> Option<String> {
     }
 }
 
-/// Client-side readiness (mutagen local, SSH reachable) run at remote-config time so failure surfaces before the first `ws new`; `no_verify` escapes it for bootstrap. Server half is `ws remote check`.
+/// Client-side readiness (mutagen local, SSH reachable) run at remote-config time so failure surfaces before the first `wsx new`; `no_verify` escapes it for bootstrap. Server half is `wsx remote check`.
 pub(crate) fn verify_remote_client(
     r: &crate::config::RemoteConfig,
     no_verify: bool,
@@ -87,7 +87,7 @@ pub(crate) fn verify_remote_client(
 }
 
 fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
-    // Reuse the probes `ws remote check` runs so there's one source of truth for reachability.
+    // Reuse the probes `wsx remote check` runs so there's one source of truth for reachability.
     if !crate::probe::mutagen_local().ok {
         return Err(preflight(
             "mutagen isn't installed — a remote workspace needs it locally to sync. \
@@ -132,7 +132,7 @@ pub(crate) fn run_remote_event(
     }
 }
 
-/// Exit with `code` and no failure banner, for cases where `ws` merely relays an outcome already reported.
+/// Exit with `code` and no failure banner, for cases where `wsx` merely relays an outcome already reported.
 pub(crate) fn passthrough_exit(code: i32) -> anyhow::Error {
     ExitError { code, msg: String::new(), silent: true }.into()
 }

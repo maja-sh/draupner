@@ -196,7 +196,7 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     Ok(status)
 }
 
-/// Run a `status`-style command and capture its first non-empty stdout line, giving up after `timeout`; used by `ws list`.
+/// Run a `status`-style command and capture its first non-empty stdout line, giving up after `timeout`; used by `wsx list`.
 #[allow(clippy::too_many_arguments)]
 pub fn capture_command(
     workspace_root: &Path,
@@ -288,7 +288,7 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
 /// dispatch, **before** it does anything. The check is purely static — config
 /// plus one `stat` — so there is no reason for it to surface halfway through.
 ///
-/// It surfaced through `resolve` inside `ws new`'s per-repo loop, which meant a
+/// It surfaced through `resolve` inside `wsx new`'s per-repo loop, which meant a
 /// leftover hook file aborted the op after `git worktree add`, seeding and
 /// mutagen session creation had already happened for that repo and any repo
 /// before it. Worse, the message asks the user to edit `.ws.json` and re-run,

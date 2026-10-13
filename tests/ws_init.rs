@@ -14,7 +14,7 @@ fn init_local_writes_config_and_hook_templates() {
     assert!(err.contains(".ws.json"));
     assert!(err.contains(".ws.schema.json"));
     // The success nudge must point at the current op name, not the renamed one.
-    assert!(err.contains("ws claude"), "success nudge should mention `ws claude`, got: {err}");
+    assert!(err.contains("wsx claude"), "success nudge should mention `wsx claude`, got: {err}");
     assert!(!err.contains("ws register"), "success nudge must not mention the old `ws register` name");
 
     assert!(ws.path().join(".ws.json").is_file());
@@ -25,7 +25,7 @@ fn init_local_writes_config_and_hook_templates() {
     assert!(cfg.contains("$schema"));
 
     // Starter scripts, one per repo per lifecycle event, named so a `scripts`
-    // entry can point at them. Each body says which entry turns it on — `ws`
+    // entry can point at them. Each body says which entry turns it on — `wsx`
     // runs only what `.ws.json` declares.
     for repo in ["api", "app"] {
         for event in ["prepare", "post-create", "up", "down", "post-remove", "status"] {
@@ -57,7 +57,7 @@ fn init_remote_writes_the_remote_block() {
             ("WS_MUTAGEN", ok.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws init --remote failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx init --remote failed:\n{}", stderr(&out));
 
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
@@ -146,7 +146,7 @@ fn init_pins_an_explicit_runtime() {
     assert!(err.contains("pinned"), "the summary should say it was pinned:\n{err}");
 }
 
-/// Only the runtimes `ws` can drive are accepted — a typo used to reach `.ws.json` and only surface as a failed spawn much later.
+/// Only the runtimes `wsx` can drive are accepted — a typo used to reach `.ws.json` and only surface as a failed spawn much later.
 #[test]
 fn init_rejects_an_unknown_runtime() {
     let ws = WorkspaceFixture::empty();

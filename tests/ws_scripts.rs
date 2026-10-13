@@ -144,10 +144,10 @@ fn script_runs_in_the_worktree_dir() {
 #[test]
 fn a_legacy_post_create_file_is_refused_before_any_worktree_is_created() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    // The refusal used to reach `ws new` through the per-repo creation loop, so
+    // The refusal used to reach `wsx new` through the per-repo creation loop, so
     // it landed after `git worktree add` and the sync session for `api` — and the
     // migration it asks for then couldn't be retried, because the half-created
-    // task blocked `ws new` for the same branch.
+    // task blocked `wsx new` for the same branch.
     write_legacy_hook_file(&f, "app", "post-create");
 
     let out = f.run(&["new", "api,app", "feat/legacy-pc"]);

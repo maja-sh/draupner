@@ -1,5 +1,5 @@
 //! `copy`: untracked dev files (certs/keys/env) named in `.ws.json` are seeded
-//! from the main checkout into each new worktree at `ws new`.
+//! from the main checkout into each new worktree at `wsx new`.
 
 mod common;
 
@@ -23,7 +23,7 @@ fn ws_new_seeds_copy_entries_into_the_worktree() {
     );
 
     let out = f.run_ok(&["new", "api", "feat/foo"]);
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx new failed:\n{}", stderr(&out));
 
     let wt = f.path().join(".worktrees/feat-foo/api");
     assert_eq!(fs::read_to_string(wt.join(".env")).unwrap(), "SECRET=1");
@@ -39,7 +39,7 @@ fn copied_files_do_not_leave_the_worktree_dirty() {
     let repo = f.add_repo("api");
 
     // A seeded file the repo does NOT gitignore — without an exclude entry this
-    // shows up as untracked (`??`) and every `ws list` reads the worktree dirty.
+    // shows up as untracked (`??`) and every `wsx list` reads the worktree dirty.
     fs::write(repo.join("dev-secrets.txt"), "s").unwrap();
     fs::create_dir_all(repo.join("build-dev/cert")).unwrap();
     fs::write(repo.join("build-dev/cert/dev.pem"), "cert").unwrap();
@@ -49,7 +49,7 @@ fn copied_files_do_not_leave_the_worktree_dirty() {
     );
 
     let out = f.run_ok(&["new", "api", "feat/foo"]);
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx new failed:\n{}", stderr(&out));
 
     let wt = f.path().join(".worktrees/feat-foo/api");
     assert!(wt.join("dev-secrets.txt").is_file(), "file was seeded");

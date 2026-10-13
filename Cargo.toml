@@ -11,7 +11,7 @@ keywords     = ["git-worktree", "workspace", "orchestration", "containers", "mul
 categories   = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "ws"
+name = "wsx"
 path = "src/main.rs"
 
 [dependencies]

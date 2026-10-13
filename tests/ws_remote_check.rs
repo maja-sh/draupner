@@ -2,7 +2,7 @@ mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-/// Fake `ssh` answering both `ws remote check` invocations: the reachability probe (last arg `true` exits 0) and the server-probe script printing `<key>:<ok|fail>` lines.
+/// Fake `ssh` answering both `wsx remote check` invocations: the reachability probe (last arg `true` exits 0) and the server-probe script printing `<key>:<ok|fail>` lines.
 fn ssh_stub(f: &WorkspaceFixture, results: &str) -> std::path::PathBuf {
     f.stub(
         "ssh-fake",
@@ -146,7 +146,7 @@ fn remote_check_local_mode_reports_gaps() {
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "local gaps must exit 1:\n{err}");
     assert!(err.contains("wildcard DNS"), "expected the local DNS status line:\n{err}");
-    assert!(err.contains("ws setup"), "expected the `ws setup` nudge:\n{err}");
+    assert!(err.contains("wsx setup"), "expected the `wsx setup` nudge:\n{err}");
 }
 
 // Argument-injection guard: an option-shaped `--host` (leading dash) is refused before any ssh runs.

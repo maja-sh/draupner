@@ -2,7 +2,7 @@ mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-// mutagen/ssh are stubbed via `WS_MUTAGEN`/`WS_SSH`, so these assert the sync lifecycle `ws` drives, not real syncing.
+// mutagen/ssh are stubbed via `WS_MUTAGEN`/`WS_SSH`, so these assert the sync lifecycle `wsx` drives, not real syncing.
 
 fn recorded(args_file: &std::path::Path) -> String {
     std::fs::read_to_string(args_file).unwrap_or_default()
@@ -47,7 +47,7 @@ fn remote_set_writes_the_block_and_backfills_sync_for_existing_worktrees() {
 fn remote_set_ignores_dep_artifacts_present_in_the_worktree() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
-    // A vendor/ dir present at flip time must be excluded, same as `ws new` would arrange.
+    // A vendor/ dir present at flip time must be excluded, same as `wsx new` would arrange.
     std::fs::create_dir_all(ws.path().join(".worktrees/feat-x/api/vendor")).unwrap();
 
     let ok = ws.stub("ok", "exit 0");
@@ -165,7 +165,7 @@ fn remote_set_keeps_a_pinned_publish_address_across_a_repoint() {
 fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.run_ok(&["new", "api", "feat/x"]);
-    // Pretend the workspace was already offloaded to old-host after the local `ws new`.
+    // Pretend the workspace was already offloaded to old-host after the local `wsx new`.
     ws.write_ws_json(
         r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
     );
@@ -203,7 +203,7 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     ws.write_ws_json(
         r#"{"repos":["api"],"remote":{"connection":"old-host","workspace_path":"proj"}}"#,
     );
-    // A previous `ws up` against old-host allocated a port and left a forward
+    // A previous `wsx up` against old-host allocated a port and left a forward
     // session for it. The forward's endpoint is fixed at create time but its name
     // isn't host-keyed, so re-pointing must terminate it — otherwise the next `ws
     // up` no-ops on the name collision and `localhost:20000` still reaches
@@ -302,7 +302,7 @@ fn remote_set_without_any_host_names_all_three_sources() {
     let out = ws.run(&["remote", "set"]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
-    for hint in ["WS_REMOTE_HOST", "ws config set remote.host"] {
+    for hint in ["WS_REMOTE_HOST", "wsx config set remote.host"] {
         assert!(err.contains(hint), "error should mention `{hint}`:\n{err}");
     }
 }
@@ -333,9 +333,9 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
 }
 
-// Flipping a live workspace strands it — after `set` a local stack is past `ws down`, after `unset` server containers are unreachable — hence the pre-flight enforcing stop → flip → start.
+// Flipping a live workspace strands it — after `set` a local stack is past `wsx down`, after `unset` server containers are unreachable — hence the pre-flight enforcing stop → flip → start.
 
-/// A `kind: host` repo whose `up` is a long sleep — a real `ws`-supervised process for the pre-flight to find.
+/// A `kind: host` repo whose `up` is a long sleep — a real `wsx`-supervised process for the pre-flight to find.
 fn running_host_workspace() -> WorkspaceFixture {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
@@ -345,7 +345,7 @@ fn running_host_workspace() -> WorkspaceFixture {
     ws
 }
 
-/// Kill the supervised process directly — `ws rm` would dispatch to a server the test never had.
+/// Kill the supervised process directly — `wsx rm` would dispatch to a server the test never had.
 fn kill_host_proc(ws: &WorkspaceFixture) {
     let Ok(contents) = std::fs::read_to_string(ws.path().join(".ws-run/ws-feat-x-api.pid")) else {
         return;
@@ -365,7 +365,7 @@ fn remote_set_refuses_while_a_stack_is_running() {
     assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
     let err = stderr(&out);
     assert!(err.contains("still running: feat/x (api)"), "{err}");
-    assert!(err.contains("`ws down feat/x`"), "{err}");
+    assert!(err.contains("`wsx down feat/x`"), "{err}");
     assert!(err.contains("--force"), "the override must be discoverable:\n{err}");
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(!cfg.contains("srv"), "refusal must leave .ws.json untouched:\n{cfg}");
@@ -392,7 +392,7 @@ fn remote_set_force_flips_past_a_running_stack() {
     let err = stderr(&out);
     assert!(err.contains("--force"), "the override should say what it carried past:\n{err}");
     // The recovery sequence only prints when something was actually left running.
-    assert!(err.contains("ws remote unset"), "recovery sequence expected:\n{err}");
+    assert!(err.contains("wsx remote unset"), "recovery sequence expected:\n{err}");
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"srv\""), "{cfg}");
 }
@@ -450,7 +450,7 @@ fn remote_set_proceeds_when_the_container_stack_is_down() {
     );
     assert!(out.status.success(), "an idle stack must not block the flip:\n{}", stderr(&out));
     assert!(
-        !stderr(&out).contains("ws remote unset"),
+        !stderr(&out).contains("wsx remote unset"),
         "recovery note is for stranded stacks only:\n{}",
         stderr(&out)
     );
@@ -504,7 +504,7 @@ fn remote_unset_force_flips_when_liveness_is_unknown() {
     let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
     // Unknown liveness counts as possibly-stranded, so the recovery route is shown.
-    assert!(stderr(&out).contains("ws remote set srv"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("wsx remote set srv"), "{}", stderr(&out));
 }
 
 #[test]
@@ -526,9 +526,9 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
     assert!(err.contains("`*.myapp.test`"), "{err}");
     assert!(err.contains("should resolve to 127.0.0.2, not 127.0.0.1"), "{err}");
     // A nudge, not an action: rewriting a resolver stays user-consented.
-    assert!(err.contains("ws setup"), "{err}");
+    assert!(err.contains("wsx setup"), "{err}");
     assert!(err.contains("never edits your resolver"), "{err}");
-    // On a tty this would offer `ws setup`'s DNS step; scripted, no prompt can be shown or waited on.
+    // On a tty this would offer `wsx setup`'s DNS step; scripted, no prompt can be shown or waited on.
     assert!(!err.contains("[R]un"), "no unanswerable prompt in a scripted flip: {err}");
     assert!(!err.contains("dnsmasq"), "no command block in a scripted flip: {err}");
 }
@@ -557,7 +557,7 @@ fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
         err.contains("should resolve to 127.0.0.1, not 100.64.1.3"),
         "{err}"
     );
-    assert!(err.contains("ws setup"), "{err}");
+    assert!(err.contains("wsx setup"), "{err}");
     assert!(!err.contains("[R]un"), "no unanswerable prompt in a scripted flip: {err}");
 }
 

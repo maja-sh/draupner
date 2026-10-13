@@ -22,7 +22,7 @@ fn setup_on_linux_reports_gaps_and_points_at_the_script() {
     );
 }
 
-// Regression: a runtime preflight on `ws setup` used to fail paths that never spawn one (externally-managed Caddy, no `domain`).
+// Regression: a runtime preflight on `wsx setup` used to fail paths that never spawn one (externally-managed Caddy, no `domain`).
 #[test]
 fn setup_survives_a_runtime_that_isnt_installed() {
     let f = WorkspaceFixture::empty();

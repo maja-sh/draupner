@@ -3,7 +3,7 @@
 //! Caddy runs as a container (rootless host Caddy can't resolve container DNS)
 //! and dials worktree containers by `<project>-<service>-1`; host processes via
 //! `host.containers.internal`. Route CRUD is scoped by `@id` — never `/load` —
-//! so parallel `ws` processes with distinct ids don't race. The admin API is
+//! so parallel `wsx` processes with distinct ids don't race. The admin API is
 //! published on a host-loopback TCP port (a unix socket can't cross the macOS
 //! podman-machine VM boundary). `WS_CADDY_ADMIN` treats Caddy + `ws-net` as
 //! externally managed (BYO / test stub).
@@ -210,7 +210,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             None => {
                 crate::ui::note(&format!(
                     "{CADDY_CONTAINER} is running but its admin is unreachable — \
-                     re-seeding it (routes reinstall on `ws up`)"
+                     re-seeding it (routes reinstall on `wsx up`)"
                 ));
                 reseed(site, runtime);
             }
@@ -218,7 +218,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             Some(_) if !port_bindable(site, https_port()) => return Ok(()),
             Some(_) => {
                 crate::ui::note(&format!(
-                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `ws up`",
+                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `wsx up`",
                     https_port()
                 ));
                 reseed(site, runtime);
@@ -260,7 +260,7 @@ fn preflight_ports(site: &Site) -> Result<()> {
             let whose = if site.is_remote() { "the server" } else { "this machine" };
             bail!(
                 "{what} port :{port} is already in use on {whose} — another service (often an \
-                 existing Caddy) holds it. Move ws's Caddy off it with `ws setup {flag} <port>`."
+                 existing Caddy) holds it. Move wsx's Caddy off it with `wsx setup {flag} <port>`."
             );
         }
     }
@@ -345,7 +345,7 @@ pub fn resolve_hint(site: &Site, domain: &str, dns: &Dns) -> Option<String> {
         Dns::Wrong { got, expected: Some(want) } => Some(format!(
             "`*.{domain}` resolves to {got}, expected {want} — the wildcard points at the \
              wrong machine, so requests leave for a host this workspace no longer uses. \
-             Re-run `ws setup` to re-point it."
+             Re-run `wsx setup` to re-point it."
         )),
         Dns::Wrong { got, expected: None } => Some(format!(
             "`*.{domain}` resolves to {got}, but this workspace's stacks run on the server — \
@@ -430,7 +430,7 @@ impl Dns {
     }
 }
 
-/// Scratch thread with a short deadline so a slow resolver doesn't stall `ws up`.
+/// Scratch thread with a short deadline so a slow resolver doesn't stall `wsx up`.
 /// Without `expected`, falls back to loopback-vs-not so NXDOMAIN-hijacking resolvers don't read as "resolved".
 pub fn resolve_domain(site: &Site, domain: &str, expected: Option<&str>) -> Dns {
     // A label unlikely to be shadowed by a real service, so a hit means the wildcard resolves.
@@ -556,12 +556,12 @@ fn boot_config() -> serde_json::Value {
 
 fn stopped_stack_route() -> serde_json::Value {
     let body = "<!doctype html><meta charset=utf-8>\
-        <title>ws — no stack here</title>\
+        <title>wsx — no stack here</title>\
         <style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1.5rem;line-height:1.5}\
         code{background:#eee;padding:.15em .4em;border-radius:.3em}</style>\
         <h1>No stack is running here</h1>\
         <p>Nothing is routed for this hostname yet. Bring its worktree up with:</p>\
-        <p><code>ws up &lt;branch&gt;</code></p>";
+        <p><code>wsx up &lt;branch&gt;</code></p>";
     serde_json::json!({
         "@id": STOPPED_STACK_ID,
         "handle": [ {
@@ -682,7 +682,7 @@ mod tests {
     fn a_configured_address_narrows_only_the_remote_site() {
         let cfg = Some("100.64.1.3");
         assert_eq!(publish_address(&remote_site(), cfg), "100.64.1.3");
-        // Local ignores it: `ws setup`'s CA probe and `resolve_*` assume loopback.
+        // Local ignores it: `wsx setup`'s CA probe and `resolve_*` assume loopback.
         assert_eq!(publish_address(&Site::Local, cfg), "127.0.0.1");
     }
 
@@ -782,7 +782,7 @@ mod tests {
         assert!(r.get("match").is_none(), "catch-all must not filter by host: {r}");
         assert_eq!(r["handle"][0]["handler"], "static_response");
         assert_eq!(r["handle"][0]["status_code"], 503);
-        assert!(r["handle"][0]["body"].as_str().unwrap().contains("ws up"));
+        assert!(r["handle"][0]["body"].as_str().unwrap().contains("wsx up"));
     }
 
     #[test]

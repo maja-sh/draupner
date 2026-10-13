@@ -1,6 +1,6 @@
 # Roadmap
 
-Where `ws` is heading. No dates — items land when they're needed and someone
+Where `wsx` is heading. No dates — items land when they're needed and someone
 shows up to do them. In-flight bug fixes and cleanups live in `notes/`, not
 here.
 
@@ -25,10 +25,10 @@ an offload server, one machine fills up while the others sit idle. The intended
 shape:
 
 - `.ws.json` declares a named list of remotes and marks one default.
-- `ws up` uses the default; `ws up --remote=<name>` picks a specific one.
+- `wsx up` uses the default; `wsx up --remote=<name>` picks a specific one.
 - `.ws-meta/` records the landing remote per task, so every subsequent
-  `ws exec` / `ws down` / `ws here` routes to the right server without guessing.
-- `ws remotes` (name TBD) lists what's configured so a human can choose
+  `wsx exec` / `wsx down` / `wsx here` routes to the right server without guessing.
+- `wsx remotes` (name TBD) lists what's configured so a human can choose
   informed.
 
 Explicitly **not**: capacity-based auto-fallback, round-robin, or in-flight
@@ -36,6 +36,6 @@ retry. Capacity is fuzzy before a stack is up, and hiding the routing choice
 inside the tool makes commands surprising in ways that are hard to debug. The
 `--remote=` selector is a human primitive; devs eyeball their own load.
 
-Open question: what happens when `ws up --remote=X <task>` runs against a task
-already up on Y. Likely answer is refuse and require `ws down` first;
+Open question: what happens when `wsx up --remote=X <task>` runs against a task
+already up on Y. Likely answer is refuse and require `wsx down` first;
 cross-server migration is a separate rabbit hole.

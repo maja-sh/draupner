@@ -59,7 +59,7 @@ fn tree_fn() -> &'static str {
 }
 
 /// Start `cmd` as a detached process named `name`. Idempotent: an already-running
-/// process returns `Ok(false)`. Changed `cmd`/`env` only takes effect after `ws down`.
+/// process returns `Ok(false)`. Changed `cmd`/`env` only takes effect after `wsx down`.
 pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, String)]) -> Result<bool> {
     if is_active(site, name) {
         return Ok(false);
@@ -147,7 +147,7 @@ fn down_script(pid: &str) -> String {
     )
 }
 
-/// Stop a host process and drop its pid file. `TERM` then `KILL` — dead on return. A live pid whose identity doesn't match is left running *and reported*; silently forgetting would leak servers on the next `ws up`.
+/// Stop a host process and drop its pid file. `TERM` then `KILL` — dead on return. A live pid whose identity doesn't match is left running *and reported*; silently forgetting would leak servers on the next `wsx up`.
 pub fn down(site: &Site, name: &str) -> Result<()> {
     let (_, pid, _) = paths(name);
     let script = down_script(&pid);
@@ -471,7 +471,7 @@ mod tests {
         // (`Site::shell`), which is zsh on macOS and on plenty of Linux dev boxes.
         // zsh word-splits unquoted command substitution but not unquoted parameter
         // expansion, so `kill -TERM $victims` passed one "1234 5678" argument,
-        // signalled nothing, and fell through to `rm -f` on the pid file: `ws down`
+        // signalled nothing, and fell through to `rm -f` on the pid file: `wsx down`
         // reported success while leaking the tree and discarding the record of it.
         if !have("zsh") {
             eprintln!("skipping: no `zsh` to stand in for a non-POSIX login shell");
@@ -574,7 +574,7 @@ mod tests {
         // `ws_owner`'s two pid lists used to be iterated as bare `$pids`/`$2`, which
         // a login shell that doesn't split parameters (zsh) hands over as a single
         // word — so a healthy host process with more than one pid never matched and
-        // `ws list` reported "held by another process" for its own server.
+        // `wsx list` reported "held by another process" for its own server.
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch_dir("owner");
         let bin = dir.join("bin");

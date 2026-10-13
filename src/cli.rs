@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ws", version, about = "Multi-repo worktree orchestration")]
+#[command(name = "wsx", version, about = "Multi-repo worktree orchestration")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -14,7 +14,7 @@ enum Cmd {
         /// Rewrite .ws.schema.json from the current schema, leave .ws.json alone
         #[arg(long)]
         refresh_schema: bool,
-        /// Offload to a server: SSH host (falls back to $WS_REMOTE_HOST, then `ws config` remote.host)
+        /// Offload to a server: SSH host (falls back to $WS_REMOTE_HOST, then `wsx config` remote.host)
         #[arg(long, value_name = "CONNECTION", num_args = 0..=1)]
         remote: Option<Option<String>>,
         /// Server dir the worktrees live under (default: this workspace's dir name)
@@ -30,7 +30,7 @@ enum Cmd {
         #[arg(long, requires = "remote")]
         no_verify: bool,
     },
-    /// Install Claude Code skill files (~/.claude/skills/ws-*)
+    /// Install Claude Code skill files (~/.claude/skills/wsx-*)
     Claude,
     /// Create worktrees for a task
     New   {
@@ -70,7 +70,7 @@ enum Cmd {
         #[arg(short, long)]
         short: bool,
     },
-    /// Print a worktree path (composable with `$(...)`, e.g. `$EDITOR $(ws path feat/x -r api)`)
+    /// Print a worktree path (composable with `$(...)`, e.g. `$EDITOR $(wsx path feat/x -r api)`)
     Path {
         /// Branch of the task to look up
         branch: String,
@@ -151,7 +151,7 @@ enum RemoteCmd {
     },
     /// Offload this workspace to a server (writes the remote block + backfills sync)
     Set {
-        /// SSH host (falls back to $WS_REMOTE_HOST, then `ws config` remote.host)
+        /// SSH host (falls back to $WS_REMOTE_HOST, then `wsx config` remote.host)
         connection: Option<String>,
         /// Server dir the worktrees live under (default: kept, or this workspace's dir name)
         #[arg(long, value_name = "PATH")]
@@ -162,7 +162,7 @@ enum RemoteCmd {
         /// Skip the SSH reachability check (set refuses an unreachable host by default)
         #[arg(long)]
         no_verify: bool,
-        /// Flip even with a stack running (it stays where ws can no longer reach it)
+        /// Flip even with a stack running (it stays where wsx can no longer reach it)
         #[arg(long)]
         force: bool,
     },
@@ -178,7 +178,7 @@ enum RemoteCmd {
 enum ConfigCmd {
     /// Print a value (bare, on stdout; exit 1 when unset)
     Get { key: String },
-    /// Set a value (e.g. `ws config set remote.host srv`)
+    /// Set a value (e.g. `wsx config set remote.host srv`)
     Set { key: String, value: String },
     /// Remove a value (a no-op when already unset)
     Unset { key: String },

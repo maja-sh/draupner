@@ -1,12 +1,12 @@
 ---
-name: ws-context
-description: Cwd-adaptive JSON wakeup for LLM agents — workspace facts, current task/repo derived from cwd, per-repo state, aggregate task health, and in-band `hints` (do/don't rules + enum vocab). Run this first when starting work in a ws workspace, or when unsure which task the cwd belongs to. Use when the user runs /ws-context, asks to resume or work on a task, or the agent needs to reground.
+name: wsx-context
+description: Cwd-adaptive JSON wakeup for LLM agents — workspace facts, current task/repo derived from cwd, per-repo state, aggregate task health, and in-band `hints` (do/don't rules + enum vocab). Run this first when starting work in a ws workspace, or when unsure which task the cwd belongs to. Use when the user runs /wsx-context, asks to resume or work on a task, or the agent needs to reground.
 ---
 
 Invoke via bash:
-`ws context`
+`wsx context`
 
-The response is JSON on stdout. Treat it as the sole grounding for this session — do not run other `ws` commands to compensate for information the response should carry.
+The response is JSON on stdout. Treat it as the sole grounding for this session — do not run other `wsx` commands to compensate for information the response should carry.
 
 ## 1. Read `hints` first
 
@@ -29,7 +29,7 @@ The `hints` array is authoritative. It defines every enum's vocabulary (`task.st
 
 - Do not compute hostnames from the branch/repo — `routed_hostname` already handled sanitization (a dotted `feat/v1.2` becomes `feat-v1-2`).
 - Do not guess `is_running` from other signals.
-- Do not run `ws up`, `ws down`, `ws rm`, or `ws new` without explicit user consent.
+- Do not run `wsx up`, `wsx down`, `wsx rm`, or `wsx new` without explicit user consent.
 
 ## 4. Report back briefly
 
@@ -37,4 +37,4 @@ Tell the user what you found — the task, the aggregate state, and any conditio
 
 ## 5. Re-run when the state might have changed
 
-`ws context` is a snapshot. After the user runs `ws up`, `ws down`, or changes cwd, re-run it before acting on stale state.
+`wsx context` is a snapshot. After the user runs `wsx up`, `wsx down`, or changes cwd, re-run it before acting on stale state.

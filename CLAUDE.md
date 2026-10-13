@@ -110,7 +110,7 @@ contributed to a commit, the trailer is for humans only.
     ---
 
     # Objective
-    `ws new` was failing on shared-repo workspaces because the hook lookup
+    `wsx new` was failing on shared-repo workspaces because the hook lookup
     resolved paths relative to the workspace root instead of the config file's
     directory.
 

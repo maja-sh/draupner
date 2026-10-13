@@ -43,7 +43,7 @@ fn ws_port_is_stable_across_up_runs() {
 
     let first = port_in(&stderr(&f.run_ok(&["up", "feat/foo"])));
     let second = port_in(&stderr(&f.run_ok(&["up", "feat/foo"])));
-    assert_eq!(first, second, "a service must keep its port across `ws up` runs");
+    assert_eq!(first, second, "a service must keep its port across `wsx up` runs");
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn tracked_template_dest_is_refused() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     // Both the template AND its dest are committed — rendering would dirty a
-    // tracked file, so `ws up` must refuse rather than clobber it.
+    // tracked file, so `wsx up` must refuse rather than clobber it.
     std::fs::write(f.path().join("api/svc.conf.tmpl"), "port ${WS_PORT_mysql};\n").unwrap();
     std::fs::write(f.path().join("api/svc.conf"), "port 3306;\n").unwrap();
     f.git("api", &["add", "svc.conf.tmpl", "svc.conf"]);
@@ -175,7 +175,7 @@ fn tracked_template_dest_is_refused() {
             "scripts":{"up":"echo UP"}}]}"#,
     );
 
-    // Templates render before post-create, so the refusal surfaces at `ws new`.
+    // Templates render before post-create, so the refusal surfaces at `wsx new`.
     let out = f.run(&["new", "api", "feat/foo"]);
     assert_eq!(out.status.code(), Some(1), "rendering onto a tracked dest must fail");
     let err = stderr(&out);
@@ -186,7 +186,7 @@ fn tracked_template_dest_is_refused() {
 fn template_dest_escaping_the_worktree_is_refused() {
     // `.ws.json` isn't gitignored, so it arrives with a clone: a hostile
     // `templates` entry used to write attacker-chosen bytes anywhere the user can
-    // write on `ws new`/`ws up`, with no `scripts` entry declared. Both spellings
+    // write on `wsx new`/`wsx up`, with no `scripts` entry declared. Both spellings
     // of the escape are covered — `..` walks out of the worktree, and an absolute
     // `dest` discards the worktree entirely in `Path::join`.
     let f = WorkspaceFixture::empty();

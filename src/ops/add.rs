@@ -20,11 +20,11 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let task_dir = workspace::task_dir(&ws.root, branch);
     if !task_dir.is_dir() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `ws new` first"
+            "no worktrees for {branch}; run `wsx new` first"
         )));
     }
 
-    crate::ui::header("ws-add", &format!("{repos_arg} {branch}"));
+    crate::ui::header("wsx-add", &format!("{repos_arg} {branch}"));
 
     // Cheap preflights first — a typo shouldn't pay for a Caddy call, an
     // orphan scan (git worktree list per configured repo), or a status
@@ -37,8 +37,8 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         )));
     }
 
-    // Same legacy-hook migration gate `ws new` raises — only for the repos
-    // being added; the task's existing repos already crossed it at `ws new`.
+    // Same legacy-hook migration gate `wsx new` raises — only for the repos
+    // being added; the task's existing repos already crossed it at `wsx new`.
     crate::hooks::preflight_legacy_hook_files(&cfg, &ws.root, &requested, &["post-create"])
         .map_err(|e| super::preflight(e.to_string()))?;
 
@@ -53,7 +53,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
         .collect();
     if !orphans.is_empty() {
         return Err(super::preflight(format!(
-            "task `{branch}` has orphan worktree dir(s) ({}); run `ws clean` first",
+            "task `{branch}` has orphan worktree dir(s) ({}); run `wsx clean` first",
             orphans.join(", "),
         )));
     }
@@ -74,7 +74,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     if up {
         return super::up::run(branch);
     }
-    crate::ui::nudge(&format!("ws up {branch}"));
+    crate::ui::nudge(&format!("wsx up {branch}"));
     Ok(())
 }
 
@@ -108,7 +108,7 @@ fn require_task_stopped(
         return Ok(());
     }
     Err(super::preflight(format!(
-        "task `{branch}` is not fully stopped (live: {}); run `ws down {branch}` first",
+        "task `{branch}` is not fully stopped (live: {}); run `wsx down {branch}` first",
         live.join(", "),
     )))
 }

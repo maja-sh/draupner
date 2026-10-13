@@ -22,7 +22,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     let sanitized = workspace::validate_branch(branch).map_err(super::preflight)?;
 
-    crate::ui::header("ws-new", &format!("{repos_arg} {branch}"));
+    crate::ui::header("wsx-new", &format!("{repos_arg} {branch}"));
 
     // Create `ws-net` first: a container repo's post-create writes an override that joins it, and any compose invoked there would fail on a missing network.
     super::ensure_ws_net_if_active(&cfg, &site);
@@ -32,7 +32,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     let conflicts = workspace::existing_repos_in_task(&task_dir, &requested);
     if !conflicts.is_empty() {
         return Err(super::op_failure(format!(
-            "worktree(s) already exist for: {}; use `ws rm {}` first",
+            "worktree(s) already exist for: {}; use `wsx rm {}` first",
             conflicts.join(", "),
             branch,
         )));
@@ -52,17 +52,17 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     if let Err(e) = add_repos(&ws.root, &cfg, &site, branch, &sanitized, &requested) {
         // Remove the task dir if the rollback emptied it; a sibling task's
-        // dir (impossible for a fresh `ws new` but cheap to defend against)
+        // dir (impossible for a fresh `wsx new` but cheap to defend against)
         // would keep `remove_dir` from succeeding, and that's fine.
         let _ = std::fs::remove_dir(&task_dir);
         return Err(e);
     }
 
-    // Delegates to the same op `ws up` runs so the two can't drift.
+    // Delegates to the same op `wsx up` runs so the two can't drift.
     if up {
         return super::up::run(branch);
     }
-    crate::ui::nudge(&format!("ws up {branch}"));
+    crate::ui::nudge(&format!("wsx up {branch}"));
 
     Ok(())
 }
@@ -99,7 +99,7 @@ pub(super) fn add_repos(
         // IIFE wraps every fallible step so a `?` failure lands in one arm —
         // the outer match then rolls back this repo (if a worktree exists) and
         // every previously-completed repo in reverse, rather than leaving a
-        // half-created task the user can't `ws rm` without hand-cleanup.
+        // half-created task the user can't `wsx rm` without hand-cleanup.
         let created: Result<()> = (|| {
             fetch_origin(&repo_path);
 
@@ -152,7 +152,7 @@ pub(super) fn add_repos(
             git::add_worktree_excludes(&wt_path, &excludes)
                 .with_context(|| format!("register worktree excludes for {repo_name}"))?;
 
-            // Runs here (not on every `ws up`) because it inspects committed static properties of the compose file; advisory, never blocks.
+            // Runs here (not on every `wsx up`) because it inspects committed static properties of the compose file; advisory, never blocks.
             let lint = crate::compose::lint(cfg.runtime(), &wt_path);
             if !lint.is_empty() {
                 crate::ui::warn(&format!("{repo_name}: compose isolation opt-outs"), &lint);
@@ -427,7 +427,7 @@ struct CompletedRepo {
     name: String,
     wt_path: PathBuf,
     /// The branch didn't exist locally before `create_worktree` created it;
-    /// rollback deletes it so a rerun of `ws new` isn't blocked by a stray head.
+    /// rollback deletes it so a rerun of `wsx new` isn't blocked by a stray head.
     branch_was_new: bool,
 }
 

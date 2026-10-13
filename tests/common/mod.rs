@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Always-200 HTTP stub for `WS_CADDY_ADMIN` so `ws up`'s route calls exercise the routing path without spinning up a real Caddy; a test overrides the env var to a dead endpoint to drive the failure path.
+/// Always-200 HTTP stub for `WS_CADDY_ADMIN` so `wsx up`'s route calls exercise the routing path without spinning up a real Caddy; a test overrides the env var to a dead endpoint to drive the failure path.
 struct AdminStub {
     url: String,
     shutdown: Arc<AtomicBool>,
@@ -79,7 +79,7 @@ fn content_length(headers: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-/// Write `contents` to `path` and mark it 0755 — the one place that knows a script the tests hand to `ws` needs to be executable.
+/// Write `contents` to `path` and mark it 0755 — the one place that knows a script the tests hand to `wsx` needs to be executable.
 fn write_exec(path: &Path, contents: &str) {
     std::fs::write(path, contents).expect("write script");
     #[cfg(unix)]
@@ -203,7 +203,7 @@ impl WorkspaceFixture {
         path
     }
 
-    /// Executable stub that appends each argv to `$ARGS_FILE` — point `WS_SSH`/`WS_MUTAGEN` at it to assert the exact command `ws` would run without a real server.
+    /// Executable stub that appends each argv to `$ARGS_FILE` — point `WS_SSH`/`WS_MUTAGEN` at it to assert the exact command `wsx` would run without a real server.
     pub fn arg_recorder(&self, name: &str) -> PathBuf {
         let path = self.path().join(name);
         std::fs::write(
@@ -219,7 +219,7 @@ impl WorkspaceFixture {
         path
     }
 
-    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.ws-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it. A file, not an inline string, so a multi-line body needs no JSON escaping; `ws` anchors `.ws-hooks/…` to `$WS_WORKSPACE_ROOT` so it resolves from the worktree cwd.
+    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.ws-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it. A file, not an inline string, so a multi-line body needs no JSON escaping; `wsx` anchors `.ws-hooks/…` to `$WS_WORKSPACE_ROOT` so it resolves from the worktree cwd.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
         let dir = self.path().join(".ws-hooks");
         std::fs::create_dir_all(&dir).expect("create .ws-hooks");
@@ -232,7 +232,7 @@ impl WorkspaceFixture {
         self.apply_hook_scripts();
     }
 
-    /// Declare `cmd` inline as `(repo, event)`'s `scripts` entry — use when the test cares that `ws` is the shell's direct parent (`$PPID`), since a file-valued entry forks a shell around it and an inline one does not.
+    /// Declare `cmd` inline as `(repo, event)`'s `scripts` entry — use when the test cares that `wsx` is the shell's direct parent (`$PPID`), since a file-valued entry forks a shell around it and an inline one does not.
     pub fn add_script(&self, repo: &str, event: &str, cmd: &str) {
         self.hooks.borrow_mut().push((repo.to_string(), event.to_string(), cmd.to_string()));
         self.apply_hook_scripts();
@@ -272,12 +272,12 @@ impl WorkspaceFixture {
             .expect("write .ws.json");
     }
 
-    /// Run `ws <args>` from the fixture root; `HOME` and `CLAUDE_SKILLS_DIR` are redirected into the tempdir so an accidental `ws claude` never clobbers the developer's real `~/.claude/skills`.
+    /// Run `ws <args>` from the fixture root; `HOME` and `CLAUDE_SKILLS_DIR` are redirected into the tempdir so an accidental `wsx claude` never clobbers the developer's real `~/.claude/skills`.
     pub fn run(&self, args: &[&str]) -> Output {
         self.run_with_env(args, &[])
     }
 
-    /// Like `run`, but with CWD in `<root>/<subdir>` — for ops (e.g. `ws here`) whose behavior depends on which worktree you're in.
+    /// Like `run`, but with CWD in `<root>/<subdir>` — for ops (e.g. `wsx here`) whose behavior depends on which worktree you're in.
     pub fn run_in(&self, subdir: &str, args: &[&str]) -> Output {
         self.run_in_env(subdir, args, &[])
     }
@@ -291,7 +291,7 @@ impl WorkspaceFixture {
     }
 
     fn run_from(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
-        let bin = env!("CARGO_BIN_EXE_ws");
+        let bin = env!("CARGO_BIN_EXE_wsx");
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(cwd)

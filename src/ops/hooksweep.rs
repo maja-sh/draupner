@@ -1,4 +1,4 @@
-//! Shared driver for `ws up` and `ws down` — run one hook event across every worktree of a branch, isolating per-repo failures.
+//! Shared driver for `wsx up` and `wsx down` — run one hook event across every worktree of a branch, isolating per-repo failures.
 
 use anyhow::Result;
 
@@ -8,7 +8,7 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
-/// Window for a launched host process to bind its allocated port before `ws up` qualifies the line — long enough for an interpreted dev server, short enough not to stall on a compiled one. Missing it costs a note, not a failure.
+/// Window for a launched host process to bind its allocated port before `wsx up` qualifies the line — long enough for an interpreted dev server, short enough not to stall on a compiled one. Missing it costs a note, not a failure.
 const BIND_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Outcome of a sweep, for the caller to render its own summary from.
@@ -67,14 +67,14 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
     if targets.is_empty() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `ws new` first"
+            "no worktrees for {branch}; run `wsx new` first"
         )));
     }
 
     // Resolving a remote site fetches the server `$HOME`, so this doubles as
     // reachability probe. `down` degrades to local-only cleanup when the
     // server is out of reach — the local mutagen forwards would otherwise
-    // leak (`ws rm` already handles this the same way). Every other event
+    // leak (`wsx rm` already handles this the same way). Every other event
     // still hard-fails: `up` without a reachable site would silently skip
     // half its work.
     let site = match Site::resolve(&cfg) {
@@ -133,7 +133,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                     crate::caddy::Dns::Unresolved
                 }
             };
-            // Nudge to run `ws setup` when a privileged bit (DNS/CA/:443) is missing. Remote nudges on DNS alone — the full probe would dial the server.
+            // Nudge to run `wsx setup` when a privileged bit (DNS/CA/:443) is missing. Remote nudges on DNS alone — the full probe would dial the server.
             if !crate::caddy::externally_managed() {
                 let incomplete = if site.is_remote() {
                     !dns.is_ok()
@@ -143,7 +143,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                 };
                 if incomplete {
                     crate::ui::nudge(
-                        "`ws setup` — some routing setup (DNS / CA trust) is incomplete",
+                        "`wsx setup` — some routing setup (DNS / CA trust) is incomplete",
                     );
                 }
             }
@@ -158,7 +158,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        // Host processes are supervised as a detached `ws`-owned process, not run as a blocking hook.
+        // Host processes are supervised as a detached `wsx`-owned process, not run as a blocking hook.
         if cfg.is_host_repo(repo) {
             sweep_host(&cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
             continue;
@@ -437,7 +437,7 @@ fn sweep_host(
     proc_env.extend(extra_env.iter().cloned());
     match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
-            let label = if started { "start" } else { "already running (ws down to apply changes)" };
+            let label = if started { "start" } else { "already running (wsx down to apply changes)" };
             // A host service has no hostname to show — the bound port is the only user-visible handle. Sorted for stable output.
             let mut ports: Vec<String> = extra_env
                 .iter()
@@ -465,8 +465,8 @@ fn sweep_host(
                 Some(crate::supervise::Health::Silent(_)) => {
                     step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
                     crate::ui::note(&format!(
-                        "{repo}: nothing is listening on the port ws allocated yet. If it's still \
-                         starting this resolves itself — `ws list` will say. Otherwise check \
+                        "{repo}: nothing is listening on the port wsx allocated yet. If it's still \
+                         starting this resolves itself — `wsx list` will say. Otherwise check \
                          `~/.ws-run/{name}.log`."
                     ));
                 }

@@ -10,7 +10,7 @@ pub struct WsConfig {
     /// Private TLD for per-worktree hostnames, e.g. `myapp.test`; top-level because routing applies to local and remote alike.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub domain: Option<String>,
-    /// Container runtime for `ws`'s own calls; absent → detected on this machine's PATH (see `runtime`).
+    /// Container runtime for `wsx`'s own calls; absent → detected on this machine's PATH (see `runtime`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub runtime: Option<String>,
     /// Remote-offload block; absent → the workspace runs locally.
@@ -28,7 +28,7 @@ pub struct RemoteConfig {
     /// Parent dir on the server holding the synced worktrees; relative paths resolve against the SSH login home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
-    /// Address the server's Caddy publishes on; omitted → all interfaces, since offload's point is that another machine reaches it. Only read when Caddy is created; changing it recreates the container on the next `ws up`.
+    /// Address the server's Caddy publishes on; omitted → all interfaces, since offload's point is that another machine reaches it. Only read when Caddy is created; changing it recreates the container on the next `wsx up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_address: Option<String>,
 }
@@ -87,7 +87,7 @@ pub struct RepoConfig {
     /// Format-blind config templates: committed `src` rendered to gitignored `dest` with `${WS_*}` tokens substituted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
-    /// Untracked files seeded verbatim from the main checkout into each new worktree at `ws new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
+    /// Untracked files seeded verbatim from the main checkout into each new worktree at `wsx new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
@@ -100,7 +100,7 @@ pub struct RepoConfig {
 pub enum RepoKind {
     /// Compose stack; N copies de-conflicted via a generated compose override.
     Container,
-    /// Host process supervised as a detached `ws`-owned process — no systemd/launchd.
+    /// Host process supervised as a detached `wsx`-owned process — no systemd/launchd.
     Host,
 }
 
@@ -210,7 +210,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Runtimes `ws` drives, in detection-preference order.
+/// Runtimes `wsx` drives, in detection-preference order.
 pub const RUNTIMES: [&str; 2] = ["docker", "podman"];
 
 /// Runtime used when detection finds nothing — the value `.ws.json` carried before detection existed, and what `server-setup` installs.
@@ -222,7 +222,7 @@ pub fn detect_runtime() -> Option<&'static str> {
     *DETECTED.get_or_init(|| RUNTIMES.into_iter().find(|r| on_path(r)))
 }
 
-/// Deliberately not a preflight — flows that never spawn a runtime (e.g. `ws setup` with no `domain`) must stay a no-op. Called at the actual spawn sites, so a bare `No such file or directory` becomes a real explanation.
+/// Deliberately not a preflight — flows that never spawn a runtime (e.g. `wsx setup` with no `domain`) must stay a no-op. Called at the actual spawn sites, so a bare `No such file or directory` becomes a real explanation.
 pub fn ensure_available(runtime: &str) -> Result<()> {
     if on_path(runtime) {
         return Ok(());
@@ -230,7 +230,7 @@ pub fn ensure_available(runtime: &str) -> Result<()> {
     // The two cases want different advice: nothing installed → "install one"; a pin naming something absent → "fix the pin".
     match detect_runtime() {
         None => anyhow::bail!(
-            "no container runtime found — `ws` drives {}. Install one, or set \
+            "no container runtime found — `wsx` drives {}. Install one, or set \
              `runtime` in .ws.json if yours is under another name.",
             RUNTIMES.join(" or ")
         ),
@@ -339,7 +339,7 @@ impl RepoEntry {
     }
 }
 
-/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `ws`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `WS_KEEP_IMAGES=1` / `WS_KEEP_VOLUMES=1` opt out of the image and volume drops respectively — the escape hatches `ws rm --keep-images` and `ws rm --keep-volumes` set. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.ws.json`.
+/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `wsx`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `WS_KEEP_IMAGES=1` / `WS_KEEP_VOLUMES=1` opt out of the image and volume drops respectively — the escape hatches `wsx rm --keep-images` and `wsx rm --keep-volumes` set. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.ws.json`.
 pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     let args = match event {
         "up" => "compose up -d",
@@ -351,7 +351,7 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
 }
 
-/// Output vocabulary matches [`crate::supervise::Health::label`] so `ws list`'s glyph classifier lights up the same way for host and container repos. The ratio is running/declared, not running/last-known-created — a service pulled from `.ws.json` shouldn't inflate the denominator.
+/// Output vocabulary matches [`crate::supervise::Health::label`] so `wsx list`'s glyph classifier lights up the same way for host and container repos. The ratio is running/declared, not running/last-known-created — a service pulled from `.ws.json` shouldn't inflate the denominator.
 fn status_script(runtime: &str) -> String {
     format!(
         "r=$({r} compose ps -q 2>/dev/null | wc -l | tr -d ' '); \
@@ -386,7 +386,7 @@ exit $status
 /// and Rust runs any program string containing `/` as a path **relative to the
 /// process cwd**, i.e. the very workspace the hostile config came in. A clone
 /// carrying `{"runtime": ".ws-hooks/helper"}` plus a committed, executable
-/// `.ws-hooks/helper` would run it on the first `ws setup` / `ws remote check`,
+/// `.ws-hooks/helper` would run it on the first `wsx setup` / `wsx remote check`,
 /// before any prompt. `shell_quote` is no defence: the value *is* the program,
 /// not a shell word.
 ///
@@ -472,7 +472,7 @@ fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
             if event == "status" {
                 anyhow::bail!(
                     "`{}`.scripts.{event} is `interactive: true` — `status` runs in \
-                     parallel from `ws list`, so an interactive status probe would \
+                     parallel from `wsx list`, so an interactive status probe would \
                      collide across repos. `status` must never prompt.",
                     rc.name,
                 );
@@ -492,7 +492,7 @@ fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
 }
 
 // Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. `RepoConfig.hooks`
-// was silently parseable and would be dropped on the next `ws remote set` rewrite;
+// was silently parseable and would be dropped on the next `wsx remote set` rewrite;
 // name it at load instead so a leftover block can't erase a user's config.
 
 /// Refuse a `.ws.json` still carrying a repo's `hooks` override map.
@@ -530,7 +530,7 @@ fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
     )
 }
 
-/// Machine-global `ws` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
+/// Machine-global `wsx` config dir: `$XDG_CONFIG_HOME/ws/` or `~/.config/ws/`.
 ///
 /// Errors when neither `XDG_CONFIG_HOME` nor `HOME` is set — falling back to `.`
 /// would let a hostile clone's `./.config/ws/config.toml` be trusted as global config.
@@ -542,16 +542,16 @@ pub fn global_dir() -> Result<PathBuf> {
     }
     let home = std::env::var("HOME").map_err(|_| {
         anyhow::anyhow!(
-            "cannot locate global ws config: neither $XDG_CONFIG_HOME nor $HOME is set"
+            "cannot locate global wsx config: neither $XDG_CONFIG_HOME nor $HOME is set"
         )
     })?;
     if home.is_empty() {
-        anyhow::bail!("cannot locate global ws config: $HOME is empty");
+        anyhow::bail!("cannot locate global wsx config: $HOME is empty");
     }
     Ok(PathBuf::from(home).join(".config").join("ws"))
 }
 
-/// Cross-workspace defaults at `~/.config/ws/config.toml`. `deny_unknown_fields` because `ws config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `ws` wrote before a downgrade) would be silently dropped on next write.
+/// Cross-workspace defaults at `~/.config/ws/config.toml`. `deny_unknown_fields` because `wsx config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `wsx` wrote before a downgrade) would be silently dropped on next write.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
@@ -566,7 +566,7 @@ struct GlobalRemote {
     host: Option<String>,
 }
 
-/// Every key `ws config` understands.
+/// Every key `wsx config` understands.
 pub const GLOBAL_KEYS: &[&str] = &["remote.host"];
 
 fn unknown_key(key: &str) -> anyhow::Error {
@@ -674,7 +674,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `ws` writes.
+/// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `wsx` writes.
 pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value)?;
     write_atomic(path, format!("{s}\n").as_bytes())
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn load_refuses_interactive_on_status() {
-        // Status probes fan out in parallel from `ws list`; an interactive status
+        // Status probes fan out in parallel from `wsx list`; an interactive status
         // would collide with every other repo's probe. Refuse at load time.
         let dir = tempfile::tempdir().unwrap();
         write_cfg(
@@ -909,7 +909,7 @@ mod tests {
     }
 
     /// The migration shim (delete with it): a leftover `hooks` override map must
-    /// be named, not parsed away — `ws remote set` rewrites this file, so a
+    /// be named, not parsed away — `wsx remote set` rewrites this file, so a
     /// silently-ignored block would be silently deleted.
     #[test]
     fn load_refuses_a_leftover_hooks_override_map() {
@@ -1006,7 +1006,7 @@ mod tests {
             }
             None => assert!(err.contains("no container runtime found"), "{err}"),
         }
-        // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `ws` command.
+        // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `wsx` command.
         assert!(ensure_available("git").is_ok());
     }
 
@@ -1014,7 +1014,7 @@ mod tests {
     fn load_refuses_a_runtime_that_isnt_a_program_name() {
         // The value is executed as `argv[0]`, and a cloned `.ws.json` can name a
         // program *inside the clone* — `.ws-hooks/helper` next to a committed,
-        // executable helper runs on the first `ws setup`, before any prompt.
+        // executable helper runs on the first `wsx setup`, before any prompt.
         for bad in [
             ".ws-hooks/setup-helper",
             "./payload",
@@ -1111,7 +1111,7 @@ mod tests {
         let back: GlobalConfig = toml::from_str(&toml_s).unwrap();
         assert_eq!(back.remote_host(), Some("srv"));
 
-        // A typo'd hand-edit must refuse at parse — `save` rewrites the whole file, so a silently-ignored key would be silently dropped by the next `ws config set`.
+        // A typo'd hand-edit must refuse at parse — `save` rewrites the whole file, so a silently-ignored key would be silently dropped by the next `wsx config set`.
         let e = toml::from_str::<GlobalConfig>("[remote]\nhosst = \"x\"\n")
             .map(|_| ())
             .expect_err("unknown TOML key must be refused");

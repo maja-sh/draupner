@@ -10,8 +10,8 @@ fn claude_writes_all_skills() {
 
     let skills_dir = ws.path().join("claude-skills");
     for name in [
-        "ws-new", "ws-up", "ws-down", "ws-rm", "ws-list",
-        "ws-clean", "ws-exec", "ws-context",
+        "wsx-new", "wsx-up", "wsx-down", "wsx-rm", "wsx-list",
+        "wsx-clean", "wsx-exec", "wsx-context",
     ] {
         let p = skills_dir.join(name).join("SKILL.md");
         assert!(p.is_file(), "missing {p:?}");
@@ -24,7 +24,7 @@ fn claude_writes_all_skills() {
     for name in ["ws-init", "ws-show", "ws-resume"] {
         assert!(
             !skills_dir.join(name).exists(),
-            "retired `{name}` skill must not be written by `ws claude`"
+            "retired `{name}` skill must not be written by `wsx claude`"
         );
     }
 }
@@ -35,7 +35,7 @@ fn claude_is_idempotent() {
     for _ in 0..2 {
         ws.run_ok(&["claude"]);
     }
-    assert!(ws.path().join("claude-skills").join("ws-new").join("SKILL.md").is_file());
+    assert!(ws.path().join("claude-skills").join("wsx-new").join("SKILL.md").is_file());
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn claude_fails_helpfully_when_home_missing() {
     // Force both HOME and CLAUDE_SKILLS_DIR to be missing. Since the fixture
     // sets both by default, we override with empty strings via a different
     // path: spawn manually so we can `.env_remove`.
-    let bin = env!("CARGO_BIN_EXE_ws");
+    let bin = env!("CARGO_BIN_EXE_wsx");
     let out = std::process::Command::new(bin)
         .args(["claude"])
         .current_dir(ws.path())

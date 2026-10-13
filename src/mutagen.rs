@@ -12,7 +12,7 @@ fn mutagen_bin() -> String {
     std::env::var("WS_MUTAGEN").unwrap_or_else(|_| "mutagen".to_string())
 }
 
-/// Cheap PATH check so `ws init --remote` fails early instead of at `ws new`.
+/// Cheap PATH check so `wsx init --remote` fails early instead of at `wsx new`.
 pub fn installed() -> bool {
     Command::new(mutagen_bin())
         .arg("version")
@@ -100,7 +100,7 @@ pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     ignores
 }
 
-/// The `beta` endpoint mutagen syncs to; `remote_path` matches what `ws exec` uses so both agree on layout.
+/// The `beta` endpoint mutagen syncs to; `remote_path` matches what `wsx exec` uses so both agree on layout.
 fn beta_endpoint(connection: &str, remote_path: &str) -> String {
     format!("{connection}:{remote_path}")
 }

@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn load_stays_lossy_on_a_corrupt_file() {
-        // A single corrupt task must not break `ws list` for its siblings; the strict
+        // A single corrupt task must not break `wsx list` for its siblings; the strict
         // refusal belongs to the allocation path only.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

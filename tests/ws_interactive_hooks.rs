@@ -3,9 +3,9 @@ mod common;
 use common::{stderr, WorkspaceFixture};
 
 /// Build a workspace with `api` carrying an `interactive: true` up hook that,
-/// if it ever ran, would exit non-zero so we'd notice. The `ws new` runs with
+/// if it ever ran, would exit non-zero so we'd notice. The `wsx new` runs with
 /// `WS_NON_INTERACTIVE=1` so post-create (an "echo ready" we attach) doesn't
-/// itself trip the refusal; `ws up` runs with the same env override so no-TTY
+/// itself trip the refusal; `wsx up` runs with the same env override so no-TTY
 /// behavior is deterministic regardless of how `cargo test` was invoked.
 fn fixture_with_interactive_up() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
@@ -112,7 +112,7 @@ fn non_interactive_hook_is_unaffected_by_the_env_override() {
     // Regression: `WS_NON_INTERACTIVE` only gates the interactive-hook path.
     // A plain non-interactive hook under the same env must still run — if we
     // ever broaden the check and start refusing non-interactive hooks too,
-    // we'd break every CI/Claude invocation of `ws up`.
+    // we'd break every CI/Claude invocation of `wsx up`.
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.add_hook("api", "up", "echo ran-non-interactive");
     f.run_ok(&["new", "api", "feat/x"]);

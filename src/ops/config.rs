@@ -1,4 +1,4 @@
-//! `ws config` get/set/unset with git-style surface: bare value on stdout, exit 1 when unset.
+//! `wsx config` get/set/unset with git-style surface: bare value on stdout, exit 1 when unset.
 
 use anyhow::Result;
 

@@ -1,8 +1,8 @@
 # Lifecycle scripts and the environment contract
 
-Everything project-specific happens in a lifecycle script. `ws` handles
+Everything project-specific happens in a lifecycle script. `wsxx` handles
 worktrees, ports, hostnames and routing; your scripts do the part only your
-project knows about — installing dependencies, seeding a database, starting a dev
+project knowsx about — installing dependencies, seeding a database, starting a dev
 server.
 
 Declare them in `.ws.json` under a repo's `scripts`:
@@ -27,11 +27,11 @@ not resolved for you.
 | Event | When | Runs where |
 |---|---|---|
 | `prepare` | just before `up` | **always on the client** |
-| `post-create` | after `ws new` creates the worktrees | at the site |
-| `up` | `ws up` | at the site |
-| `down` | `ws down` | at the site |
-| `post-remove` | during `ws rm`, before the worktree goes | at the site |
-| `status` | `ws list` | at the site |
+| `post-create` | after `wsxx new` creates the worktrees | at the site |
+| `up` | `wsxx up` | at the site |
+| `down` | `wsxx down` | at the site |
+| `post-remove` | during `wsxx rm`, before the worktree goes | at the site |
+| `status` | `wsxx list` | at the site |
 
 "At the site" means: locally for a local workspace, and **on the server** for an
 offloaded one. That's the whole point of the abstraction — the same script runs
@@ -51,14 +51,14 @@ offloaded, a same-host copy when not.
 ### `status` is special
 
 It's read-only, capped at five seconds, and only its **first non-empty line** is
-captured, for the `ws list` status column. A slower script is reported as
+captured, for the `wsxx list` status column. A slower script is reported as
 unknown.
 
 Container repos get a default (`compose ps -q | wc -l`) if they declare nothing.
-`kind: host` repos don't need one at all: `ws` supervises the process itself and
+`kind: host` repos don't need one at all: `wsxx` supervises the process itself and
 reports whether it's running, crashed, or running without serving the port it was
 allocated. A declared `status` script still gets to speak when the process is
-healthy — but when `ws` has bad news about the process, that wins.
+healthy — but when `wsxx` has bad newsx about the process, that wins.
 
 ### Defaults for container repos
 
@@ -116,9 +116,9 @@ it. Bind exactly the port you were given:
 "scripts": { "up": "exec vite --port \"$WS_PORT_web\"" }
 ```
 
-### `ws exec`
+### `wsxx exec`
 
-Commands run through `ws exec` receive `WS_REPO`, `WS_BRANCH_SANITIZED`, and the
+Commands run through `wsxx exec` receive `WS_REPO`, `WS_BRANCH_SANITIZED`, and the
 same injected service variables — identical on the local and remote paths, so a
 command doesn't need to know where it landed.
 
@@ -127,7 +127,7 @@ command doesn't need to know where it landed.
 ## Interactive hooks (sudo prompts, confirmations)
 
 A hook that needs human input mid-run — a `sudo` password, a `read -p` yes/no,
-an MFA code paste — can opt into **interactive mode**. ws runs it with
+an MFA code paste — can opt into **interactive mode**. wsx runs it with
 inherited stdio so the prompt reaches the terminal, and refuses to run it at
 all when there's no human to prompt (Claude Code / CI / `nohup`), so you don't
 get a mysteriously-stuck hook with its password prompt swallowed by the
@@ -150,7 +150,7 @@ same as the plain string / list forms.
 | Invoker | Controlling terminal? | Behavior |
 |---|---|---|
 | You in a shell | yes | hook runs with inherited stdio, sudo prompts, you type |
-| Claude Code / CI / `nohup` | no | ws refuses the hook, exits **3**, names what to re-run from your shell |
+| Claude Code / CI / `nohup` | no | wsx refuses the hook, exits **3**, names what to re-run from your shell |
 
 Exit **3** is distinct from the generic hook-failure exit **1** so an
 automation wrapper (Claude's shell, a CI job) can tell "needs human attention"
@@ -160,10 +160,10 @@ Mixed cases — some repos refuse, others crash outright — exit **1**, because
 a Claude wrapper watching for 3-vs-1 would otherwise retry assuming nothing
 else is broken.
 
-### What ws uses to detect
+### What wsx uses to detect
 
 Opens `/dev/tty` with `O_RDWR`. Matches sudo's own test, catches both "no tty"
-and "backgrounded" cases that `isatty(0)` would miss (e.g. `ws up < some-file`
+and "backgrounded" cases that `isatty(0)` would miss (e.g. `wsxx up < some-file`
 redirects stdin but leaves /dev/tty available).
 
 ### Overriding from the shell
@@ -174,7 +174,7 @@ automation, or debugging the refusal UX from a real shell.
 
 ### Branching inside a hook
 
-ws exports `WS_INTERACTIVE=1` to every hook iff the current invocation can
+wsx exports `WS_INTERACTIVE=1` to every hook iff the current invocation can
 prompt. A hook that wants to handle non-interactive invocation itself
 (custom message, custom exit) can branch:
 
@@ -187,13 +187,13 @@ fi
 sudo gcloud auth login
 ```
 
-Not required — ws's own refusal (exit 3 with the message) is enough — but
+Not required — wsx's own refusal (exit 3 with the message) is enough — but
 the escape hatch is there if you want to customize.
 
 ### What's not supported (yet)
 
 - **Interactive on `status`** — refused at `.ws.json` load. `status` fans
-  out in parallel from `ws list`, and an interactive status probe would
+  out in parallel from `wsxx list`, and an interactive status probe would
   collide with every other repo's probe for the one terminal.
 - **Interactive hooks on a remote workspace** — refused at load. There's no
   pty allocated over SSH, so the prompt can't actually reach you.
@@ -202,23 +202,23 @@ the escape hatch is there if you want to customize.
 
 ## Host processes
 
-A `kind: host` repo's `up` script is started **detached**: `ws` launches it, notes
+A `kind: host` repo's `up` script is started **detached**: `wsxx` launches it, notes
 its PID and start time, and returns rather than blocking. So the script should
 run the server in the foreground — `exec` into it where you can, so the process
-`ws` tracks is the server itself.
+`wsxx` tracks is the server itself.
 
 - Output goes to `~/.ws-run/<name>.log` at the site, PID to `~/.ws-run/<name>.pid`.
 - A process that dies immediately fails the `up` loudly, with the tail of its log.
-- After launch, `ws` checks that something is listening on the port it allocated
+- After launch, `wsxx` checks that something is listening on the port it allocated
   and that it belongs to the process it started. A different process holding that
   port is reported — that's the case where a dev server quietly moves to another
   port and everything downstream keeps dialling the old one.
-- `ws down` stops the whole process tree, not just the recorded PID, so a wrapper
+- `wsxx down` stops the whole process tree, not just the recorded PID, so a wrapper
   shell can't leave the real server orphaned.
-- There's no crash-restart. A process that dies stays dead until the next `ws up`
-  — but `ws list` says so.
+- There's no crash-restart. A process that dies stays dead until the next `wsxx up`
+  — but `wsxx list` says so.
 
-On an offloaded workspace the process runs on the server, and `ws` harvests the
+On an offloaded workspace the process runs on the server, and `wsxx` harvests the
 `PATH` from your login shell there, so version-manager toolchains (nvm, asdf)
 are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 
@@ -227,8 +227,8 @@ are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 ## The `.ws-hooks/` directory
 
 Anything longer than a line belongs in a shell file rather than inline JSON.
-`.ws-hooks/` at the workspace root is where those live — `ws init` scaffolds a
-starter `.ws-hooks/<repo>-<event>.sh` per event, and `ws` pushes the whole
+`.ws-hooks/` at the workspace root is where those live — `wsxx init` scaffolds a
+starter `.ws-hooks/<repo>-<event>.sh` per event, and `wsxx` pushes the whole
 directory to the server on each `up`, so a shared script works the same in both
 places. Point a `scripts` entry at one:
 
@@ -239,13 +239,13 @@ places. Point a `scripts` entry at one:
 Nothing in `.ws-hooks/` runs unless a `scripts` entry names it. The scaffolded
 files are inert until you declare one.
 
-Scripts must be executable. `ws` restores the executable bit on the copy it
+Scripts must be executable. `wsxx` restores the executable bit on the copy it
 pushes to a server, but a client-side script (notably `prepare`) that an editor
 rewrote to `644` will fail with a bare `Permission denied` — `chmod +x` it.
 
 ### Upgrading from hook files (pre-0.6)
 
-`ws` used to *discover* an executable `.ws-hooks/<repo>/<event>` and run it with
+`wsxx` used to *discover* an executable `.ws-hooks/<repo>/<event>` and run it with
 no `scripts` entry at all. That mechanism is gone; a leftover file now fails the
 repo with the line to paste rather than silently doing nothing:
 

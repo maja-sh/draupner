@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-/// `ws setup` — ready the *client* for per-worktree routing. Runs even for
+/// `wsx setup` — ready the *client* for per-worktree routing. Runs even for
 /// remote-offload workspaces: the browser still needs `*.<domain>` resolving to
 /// the server and the server's Caddy root CA trusted locally.
 pub fn run(yes: bool, port: Option<u16>, admin_port: Option<u16>) -> Result<()> {

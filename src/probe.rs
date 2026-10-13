@@ -33,7 +33,7 @@ pub fn ssh_status(connection: &str, ok: bool) -> Probe {
     )
 }
 
-/// Standalone SSH-reachability check for callers that do no server probing (e.g. `ws init --remote`).
+/// Standalone SSH-reachability check for callers that do no server probing (e.g. `wsx init --remote`).
 pub fn ssh_reachable(connection: &str) -> Probe {
     ssh_status(connection, remote::reachable(connection))
 }

@@ -37,7 +37,7 @@
 #
 # Run it as your normal user; it invokes `sudo` per privileged command (so sudo
 # prompts you directly — the script never reads your password). Caddy must be up
-# first so its root CA exists — `ws setup` or `ws up` starts it, run on whichever
+# first so its root CA exists — `wsx setup` or `wsx up` starts it, run on whichever
 # machine `ws` lives on. On an **offload box** that is a *different* machine:
 # `ws` is deliberately never installed on the server, so every `ws` command named
 # in this script's output runs on the client and reaches this box over SSH.
@@ -78,7 +78,7 @@ want_443=0
 # answer (`address != 127.0.0.1`) and got it wrong for a real setup — `ws` running
 # locally on a box that also serves peers on the LAN takes an `--address` for
 # their benefit, and was then told `ws` doesn't run here. Every hint below is
-# phrased to hold either way; `ws remote check` reports on the server when a
+# phrased to hold either way; `wsx remote check` reports on the server when a
 # `remote` block exists and on the local host otherwise, so it needs no branch.
 
 while [ $# -gt 0 ]; do
@@ -211,7 +211,7 @@ prerequisites() {
   have_bin curl   "used below to fetch mutagen"           || missing+=(curl)
   have_bin sshd   "the transport ws drives this box over" || missing+=(openssh-server)
   # `podman compose` is only a delegating front-end — without a real Compose
-  # binary beside it, every `ws up` fails at the compose call.
+  # binary beside it, every `wsx up` fails at the compose call.
   if compose_provider_present; then
     note "✓ compose provider"
   else
@@ -234,7 +234,7 @@ prerequisites() {
 # Having the binaries isn't enough — they have to be new enough to understand the
 # override file `ws` generates. Debian 12 fails this on both counts (podman 4.3.1
 # has no `compose` subcommand at all; its docker-compose is the 1.x line), so say
-# so plainly rather than letting `ws up` fail later with a YAML parse error.
+# so plainly rather than letting `wsx up` fail later with a YAML parse error.
 check_compose() {
   local v
   if ! podman compose version >/dev/null 2>&1; then
@@ -253,7 +253,7 @@ check_compose() {
   if [ -n "$v" ] &&
      [ "$(printf '%s\n%s\n' "$COMPOSE_MIN" "$v" | sort -V | head -1)" != "$COMPOSE_MIN" ]; then
     note "✗ Compose $v is older than $COMPOSE_MIN — \`!override\` is unsupported."
-    note "    Container repos will fail at \`ws up\` until this is upgraded."
+    note "    Container repos will fail at \`wsx up\` until this is upgraded."
     return 0
   fi
   note "✓ podman compose${v:+ (provider $v)}"
@@ -292,7 +292,7 @@ trust_ca() {
   say "Trust Caddy's root CA"
   if ! podman container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
     note "skip: the $CADDY_CONTAINER container isn't running yet."
-    note "      start it from the machine running \`ws\` (\`ws setup\`, which reaches"
+    note "      start it from the machine running \`ws\` (\`wsx setup\`, which reaches"
     note "      this box over SSH when it's remote), then re-run this script."
     return 0
   fi
@@ -656,7 +656,7 @@ unprivileged_443() {
     sudo sysctl --system >/dev/null
     note "set net.ipv4.ip_unprivileged_port_start=443 ($SYSCTL_FILE)."
   fi
-  note "then, from the machine running \`ws\`: \`ws setup --port 443\` to move this"
+  note "then, from the machine running \`ws\`: \`wsx setup --port 443\` to move this"
   note "box's Caddy onto :443 (it re-seeds)."
 }
 
@@ -685,7 +685,7 @@ enable_linger() {
 # 5. The podman API socket — what `podman compose` actually talks to
 # ---------------------------------------------------------------------------
 # `podman compose` hands the work to Docker's Compose binary, which speaks the
-# Docker API over podman's socket. Without it every `ws up` dies on "Cannot
+# Docker API over podman's socket. Without it every `wsx up` dies on "Cannot
 # connect to the Docker daemon". Runs after linger because the rootless socket
 # is a `systemd --user` unit, and `ws` connects over a non-login SSH session
 # where the user manager only exists if lingering is on.
@@ -694,7 +694,7 @@ podman_socket() {
   local path
   path="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
   # Test the path itself. podman's own `RemoteSocket.Exists` reports true for a
-  # socket that isn't there, so trusting it skips the work and `ws up` then
+  # socket that isn't there, so trusting it skips the work and `wsx up` then
   # fails with a bare "Cannot connect to the Docker daemon".
   if [ -n "$path" ] && [ -S "$path" ]; then
     note "already listening ($path)."
@@ -731,11 +731,11 @@ podman_socket
 
 # Deliberately doesn't name a `ws` command to run *here*: this box hosts the
 # stacks, and on a dedicated one `ws` isn't installed — the client drives it over
-# SSH. `ws remote check` is the right call from wherever `ws` lives, reporting on
+# SSH. `wsx remote check` is the right call from wherever `ws` lives, reporting on
 # the server when a `remote` block exists and on the local host otherwise.
 #
 # Say that `ws` may not be here, without claiming to know. Phrasing this as a bare
 # "re-check from the machine running ws" reads, to someone sitting on the server
 # that just printed it, as an instruction to run a command that isn't installed.
-say "Done. Re-check with \`ws remote check\`, run from wherever you use \`ws\`"
+say "Done. Re-check with \`wsx remote check\`, run from wherever you use \`ws\`"
 say "— on a dedicated offload box that's your client machine, not this one."

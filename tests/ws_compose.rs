@@ -1,4 +1,4 @@
-//! Compose-driven `services` auto-derivation, end-to-end through `ws up`.
+//! Compose-driven `services` auto-derivation, end-to-end through `wsx up`.
 
 mod common;
 
@@ -130,7 +130,7 @@ fn explicit_container_hard_fails_when_derivation_fails() {
             "scripts":{"up":"echo UP"}}]}"#,
     );
 
-    // Derivation runs at `ws new`, so the failure surfaces here, not at `up`.
+    // Derivation runs at `wsx new`, so the failure surfaces here, not at `up`.
     let out = f.run(&["new", "api", "feat/foo"]);
     assert_eq!(out.status.code(), Some(1), "a broken container derivation must fail");
     let err = stderr(&out);
@@ -225,8 +225,8 @@ fn a_bare_name_compose_repo_is_namespaced_per_worktree() {
     f.git("api", &["add", "docker-compose.yml"]);
     f.git("api", &["commit", "-q", "-m", "add compose"]);
 
-    // A *bare-name* entry — what `ws init` writes when the derive finds no
-    // port-bearing service or the runtime is missing at init time. `ws` still
+    // A *bare-name* entry — what `wsx init` writes when the derive finds no
+    // port-bearing service or the runtime is missing at init time. `wsx` still
     // infers a container repo from the compose file and runs the compose
     // lifecycle for it, so the project must be namespaced all the same; otherwise
     // every worktree's stack is compose's default project `api` and they collide.

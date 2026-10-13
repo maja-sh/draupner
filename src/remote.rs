@@ -30,7 +30,7 @@ impl Site {
                     .filter(|h| !h.is_empty())
                     .ok_or_else(|| {
                         anyhow!(
-                            "can't reach the server `{}` over SSH (run `ws remote check`)",
+                            "can't reach the server `{}` over SSH (run `wsx remote check`)",
                             r.connection
                         )
                     })?;
@@ -154,7 +154,7 @@ fn ssh_bin() -> String {
 const SSH_FAST_OPTS: &[&str] = &["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"];
 
 /// Collapses N TCP+auth handshakes into one; `%C` in `ControlPath` keeps
-/// parallel `ws` to different servers from sharing a master.
+/// parallel `wsx` to different servers from sharing a master.
 const SSH_MUX_OPTS: &[&str] = &[
     "-o", "ControlMaster=auto",
     "-o", "ControlPath=~/.ssh/ws-cm-%C",
@@ -468,7 +468,7 @@ pub fn run_event(
     crate::hooks::stream_and_wait(child, &format!("{repo}-{event}"))
 }
 
-/// Remote analogue of `hooks::capture_command`; server-side `timeout` so a wedged probe can't stall `ws list`.
+/// Remote analogue of `hooks::capture_command`; server-side `timeout` so a wedged probe can't stall `wsx list`.
 pub fn capture_status(
     connection: &str,
     base: &str,
@@ -491,7 +491,7 @@ pub fn capture_status(
     // Same env-word rule as `remote_script` (see `env_prefix`): a key that isn't a
     // shell name — `WS_PORT_redis-cache` from a dashed compose service — would be
     // run as a command instead of set, and the failure is silent here, since
-    // `ssh_capture` turns the non-zero exit into `None` and `ws list` just shows a
+    // `ssh_capture` turns the non-zero exit into `None` and `wsx list` just shows a
     // dash forever.
     let script = format!(
         "cd {} && {}timeout {timeout_secs} sh -c {}",

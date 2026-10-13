@@ -32,7 +32,7 @@ fn rm_on_a_remote_workspace_terminates_the_sync_session() {
             ("WS_SSH", ssh.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws rm failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx rm failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&term_args).expect("mutagen was invoked on rm");
     assert!(rec.contains("terminate"), "expected `sync terminate`:\n{rec}");
@@ -168,8 +168,8 @@ fn down_and_post_remove_hooks_run_in_order() {
 #[test]
 fn unregistered_dir_in_task_dir_is_reported_not_torn_down() {
     // A directory under the task dir is not a worktree: it can be a hand-made
-    // copy, or what an interrupted removal left behind (`ws clean` documents
-    // both). Enumerating the task dir from the filesystem made `ws rm` treat one
+    // copy, or what an interrupted removal left behind (`wsx clean` documents
+    // both). Enumerating the task dir from the filesystem made `wsx rm` treat one
     // as a repo — running teardown inside it and then failing `git worktree
     // remove` there, which aborted the whole op with some repos already gone and
     // left the branch permanently unremovable.
@@ -214,7 +214,7 @@ fn leftover_file_in_task_dir_does_not_fail() {
     assert!(!f.path().join(".worktrees/feat-leftover/api").exists());
 }
 
-// `ws list` enumerates from git, so `rm` must reach registrations whose directory is gone.
+// `wsx list` enumerates from git, so `rm` must reach registrations whose directory is gone.
 #[test]
 fn rm_clears_a_registration_whose_directory_is_gone() {
     let f = WorkspaceFixture::with_repos(&["api"]);

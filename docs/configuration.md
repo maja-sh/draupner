@@ -3,15 +3,15 @@
 `.ws.json` sits at the workspace root and describes your local multi-repo layout.
 
 **Every field is documented in `.ws.schema.json`**, which is generated from the
-code and therefore cannot drift. Point your editor at it (`ws init` writes a
+code and therefore cannot drift. Point your editor at it (`wsx init` writes a
 `$schema` reference for you) and you get completion, types, and per-field
-descriptions for free. Regenerate it after upgrading `ws`:
+descriptions for free. Regenerate it after upgrading `wsx`:
 
 ```sh
-ws init --refresh-schema
+wsx init --refresh-schema
 ```
 
-This page covers what a schema can't: how the pieces interact, what `ws` infers
+This page covers what a schema can't: how the pieces interact, what `wsx` infers
 on your behalf, and which rule wins when two say different things.
 
 `.ws.json` is **per-machine**, not shared project config. It describes where
@@ -22,11 +22,11 @@ lives in it directly rather than in a separate overlay.
 
 ## Container runtime
 
-`ws` drives **docker** or **podman** — for `compose config` derivation, the
+`wsx` drives **docker** or **podman** — for `compose config` derivation, the
 shared `ws-net` network, and the routing Caddy container.
 
-Leave `runtime` out and `ws` detects one on PATH, **docker first**. That's why
-`ws init` doesn't write the key: an omitted `runtime` re-detects on whatever
+Leave `runtime` out and `wsx` detects one on PATH, **docker first**. That's why
+`wsx init` doesn't write the key: an omitted `runtime` re-detects on whatever
 machine opens the workspace, while a pinned one would freeze the answer from the
 box that ran `init`.
 
@@ -34,11 +34,11 @@ Pin it when the detected choice is wrong for you — both installed and you want
 podman, or your binary is under another name:
 
 ```sh
-ws init --runtime podman     # or: add "runtime": "podman" to .ws.json
+wsx init --runtime podman     # or: add "runtime": "podman" to .ws.json
 ```
 
-With neither installed, the operations that need one (`ws new` into a routed
-workspace, `ws up`, `ws setup`) say so directly instead of failing on a missing
+With neither installed, the operations that need one (`wsx new` into a routed
+workspace, `wsx up`, `wsx setup`) say so directly instead of failing on a missing
 binary.
 
 ### `runtime` is per *site*, not per machine
@@ -46,7 +46,7 @@ binary.
 For a workspace with a `remote` block, everything that spawns the runtime —
 `compose config`, the `ws-net` network, the Caddy container — spawns it **on the
 server**, over SSH. So `runtime` describes wherever this workspace's stacks
-actually run, and the machine you type `ws` on doesn't come into it.
+actually run, and the machine you type `wsx` on doesn't come into it.
 
 That makes the supported topology **docker or podman on your machine, podman on
 the server** ([server-setup](../server-setup/) provisions podman: rootless, no
@@ -58,7 +58,7 @@ The practical consequence: **leave `runtime` out** and a workspace gets docker
 locally and podman when you offload it, with no edit in between. Pin it only to
 override one of those.
 
-One rough edge: the compose isolation lint on `ws new` is a static check over
+One rough edge: the compose isolation lint on `wsx new` is a static check over
 the committed files, so it always runs locally. On a docker-only machine with a
 podman-pinned workspace it yields nothing rather than erroring — you lose a
 lint, not a command.
@@ -86,13 +86,13 @@ derivation, no port allocation, no injected environment. Anything beyond
 
 `kind` decides how a repo's stack is launched:
 
-- **`container`** — a compose project. `ws` generates a per-worktree override
+- **`container`** — a compose project. `wsx` generates a per-worktree override
   that namespaces the project and reissues published ports.
-- **`host`** — a long-running process that `ws` starts detached and tracks by PID
-  file (see [hooks.md](hooks.md) for how it's launched, and `ws list` for how it
+- **`host`** — a long-running process that `wsx` starts detached and tracks by PID
+  file (see [hooks.md](hooks.md) for how it's launched, and `wsx list` for how it
   reports).
 
-Omit `kind` and `ws` infers `container` when a compose file is present. The
+Omit `kind` and `wsx` infers `container` when a compose file is present. The
 inference is deliberately one-way: it will never infer `host`, because
 supervision changes `up` from a blocking script into a detached process, and
 that shouldn't happen to a repo by accident. **A host repo must say so.**
@@ -101,7 +101,7 @@ that shouldn't happen to a repo by accident. **A host repo must say so.**
 
 ## Services and routing
 
-A service is a thing that listens. `ws` classifies each one as HTTP or raw TCP,
+A service is a thing that listens. `wsx` classifies each one as HTTP or raw TCP,
 and that classification decides how parallel worktrees are kept apart:
 
 - **HTTP** services get a *hostname*: `<branch>.<subdomain>.<domain>`, routed by
@@ -138,7 +138,7 @@ it.
 
 ### Derivation: you usually don't write this block
 
-For a container repo, `ws` runs `<runtime> compose config` at `ws up` and derives
+For a container repo, `wsx` runs `<runtime> compose config` at `wsx up` and derives
 the service set from the compose file itself. Your declared `services` are an
 *overlay*: declared wins per key, derived fills in the rest.
 
@@ -153,7 +153,7 @@ What derivation does:
   reached. If your app serves HTTP on 8000, declare it.
 - `expose`-only ports (not published) are not derived — nothing to de-conflict.
 
-If a repo is *explicitly* `kind: container` and the derivation fails, `ws` stops:
+If a repo is *explicitly* `kind: container` and the derivation fails, `wsx` stops:
 a broken compose file should surface, not quietly produce an unrouted stack. If
 the kind was merely inferred, it falls back to your declared services with a
 note.
@@ -171,9 +171,9 @@ by the schema and **currently does nothing** — every service is per-worktree.
 
 ## Getting values into your app
 
-`ws` owns `WS_HOST_*` and `WS_PORT_*`. You decide which of *your* variables
+`wsx` owns `WS_HOST_*` and `WS_PORT_*`. You decide which of *your* variables
 receive them, through three channels — all of them format-blind, none of them
-requiring `ws` to understand your config file.
+requiring `wsx` to understand your config file.
 
 ### 1. `env` — the primary channel
 
@@ -217,7 +217,7 @@ environment:
 ```
 
 `src` is committed, `dest` is rendered on every `up` and added to the worktree's
-git excludes so it never shows up as a change. `ws` refuses to render over a
+git excludes so it never shows up as a change. `wsx` refuses to render over a
 tracked file.
 
 ### `copy` vs `templates`
@@ -273,26 +273,26 @@ the sync.
 
 ---
 
-## What `ws` writes next to your config
+## What `wsx` writes next to your config
 
 - **`.worktrees/<branch>/<repo>/`** — the worktrees themselves.
 - **`.ws-meta/`** — per-machine state: the port allocation for each worktree, the
   effective service set recorded at `up`, and the generated compose override.
   Disposable, but deleting it loses stable port assignments.
 
-Both are `ws`'s to manage. Add them to the workspace's ignore rules if the
+Both are `wsx`'s to manage. Add them to the workspace's ignore rules if the
 workspace directory is itself a git repo.
 
 ---
 
 ## A note on compose files
 
-At `ws new`, `ws` lints each repo's compose file for two things that break
+At `wsx new`, `wsx` lints each repo's compose file for two things that break
 worktree isolation:
 
 - a pinned `container_name`, which is global — a second worktree can't start.
 - an `external:` volume, shared across worktrees, so one branch's migration lands
   in another branch's database.
 
-Both are warnings, not refusals. `ws` never edits your compose file; the
+Both are warnings, not refusals. `wsx` never edits your compose file; the
 per-worktree override it generates lives in `.ws-meta/`.

@@ -4,7 +4,7 @@ name: release
 #   git tag v0.1.0 && git push origin v0.1.0
 # Builds natively on macOS (no cross-compilation) and attaches the binary to a
 # GitHub Release. Install with:
-#   gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O ws
+#   gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O wsx
 on:
   push:
     tags: ['v*']
@@ -41,11 +41,11 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       # Name the asset by target so re-added targets slot in without churn.
       - name: Rename
-        run: cp target/${{ matrix.target }}/release/ws ws-${{ matrix.target }}
+        run: cp target/${{ matrix.target }}/release/wsx wsx-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ws-${{ matrix.target }}
-          path: ws-${{ matrix.target }}
+          name: wsx-${{ matrix.target }}
+          path: wsx-${{ matrix.target }}
           if-no-files-found: error
 
   release:

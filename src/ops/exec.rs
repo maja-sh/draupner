@@ -1,4 +1,4 @@
-//! `ws exec` — run a command in a repo's worktree, remote via `ssh -t` or local, with stdio and exit code passing straight through.
+//! `wsx exec` — run a command in a repo's worktree, remote via `ssh -t` or local, with stdio and exit code passing straight through.
 
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
@@ -39,20 +39,20 @@ pub fn run(
     let repo = match repo {
         Some(r) => r.to_string(),
         None => repo_from_cwd.ok_or_else(|| {
-            super::preflight("can't infer the repo; pass it: `ws exec [--branch <b>] <repo> -- …`")
+            super::preflight("can't infer the repo; pass it: `wsx exec [--branch <b>] <repo> -- …`")
         })?,
     };
     if !cfg.repos.iter().any(|e| e.name() == repo) {
         return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
     }
-    // Check locally before any SSH: `ws new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
+    // Check locally before any SSH: `wsx new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
     if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
         return Err(super::preflight(format!("no worktree for `{repo}` in task `{task}`")));
     }
 
     let remote = if local { None } else { cfg.remote.as_ref() };
 
-    // Local run allocates host ports (Exec); remote only loads ports recorded at `ws up` (Inspect). Passing `Site::Local` unconditionally keeps `ws exec` from pre-dialing the server.
+    // Local run allocates host ports (Exec); remote only loads ports recorded at `wsx up` (Inspect). Passing `Site::Local` unconditionally keeps `wsx exec` from pre-dialing the server.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let wt = workspace::task_dir(&ws.root, &task).join(&repo);
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
@@ -66,7 +66,7 @@ pub fn run(
 }
 
 /// Base `WS_*` env every dispatched command sees. Deliberately does NOT set
-/// `WS_HOOK_NAME` — `ws exec` isn't a hook, so lying about the event context
+/// `WS_HOOK_NAME` — `wsx exec` isn't a hook, so lying about the event context
 /// would surprise a script that special-cases lifecycle events.
 ///
 /// Kept in lockstep with `hooks::base_env`; the parity test in this module
@@ -142,7 +142,7 @@ fn exec_remote(
     }
 
     let script = remote::remote_script(&dir, &env, command);
-    // Both TTYs required: keying on stdin alone puts a pty on `ws exec … > file` and corrupts the redirect with CRLF/control sequences.
+    // Both TTYs required: keying on stdin alone puts a pty on `wsx exec … > file` and corrupts the redirect with CRLF/control sequences.
     let want_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     crate::ui::note(&format!("→ {}:{dir}", r.connection));
@@ -151,7 +151,7 @@ fn exec_remote(
         .with_context(|| format!("ssh {}", r.connection))
 }
 
-/// Mirror the child's exit status; non-zero or signal death becomes a silent passthrough error so `ws` exits with the code but prints no banner over the command's own output.
+/// Mirror the child's exit status; non-zero or signal death becomes a silent passthrough error so `wsx` exits with the code but prints no banner over the command's own output.
 fn propagate(status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
@@ -159,7 +159,7 @@ fn propagate(status: ExitStatus) -> Result<()> {
     Err(super::passthrough_exit(exit_code(&status)))
 }
 
-/// Child's exit code, mapping signal death to `128 + signum` (Ctrl-C → 130) to match `ws`'s exit conventions elsewhere.
+/// Child's exit code, mapping signal death to `128 + signum` (Ctrl-C → 130) to match `wsx`'s exit conventions elsewhere.
 #[cfg(unix)]
 fn exit_code(status: &ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
@@ -180,7 +180,7 @@ mod tests {
 
     /// The parity invariant: every `WS_*` key `hooks::base_env` sets — except
     /// `WS_HOOK_NAME`, which exec deliberately omits — must appear in
-    /// `build_env` with the same value. Prevents `ws exec` from silently
+    /// `build_env` with the same value. Prevents `wsx exec` from silently
     /// drifting away from the hook env contract when a new key is added.
     #[test]
     fn build_env_matches_hooks_base_env_minus_hook_name() {

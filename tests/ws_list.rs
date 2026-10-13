@@ -79,7 +79,7 @@ fn recorded_host_ports_are_shown_as_sub_rows() {
     let f = WorkspaceFixture::with_repos(&["api"]);
     f.run_ok(&["new", "api", "feat/ports"]);
 
-    // JSON shape mirrors what `ws up` writes into `.ws-meta`; keep in sync with that writer.
+    // JSON shape mirrors what `wsx up` writes into `.ws-meta`; keep in sync with that writer.
     let meta_dir = f.path().join(".ws-meta");
     std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(
@@ -118,7 +118,7 @@ fn a_repo_with_no_recorded_ports_emits_no_sub_rows() {
 
 #[test]
 fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
-    // Regression: `capture_command` joined the script's commands without anchoring `.ws-hooks/`, so a status script naming a shared hook exited 127 under cwd = worktree, and `ws list` silently showed a blank status column while `up` (which anchors) worked.
+    // Regression: `capture_command` joined the script's commands without anchoring `.ws-hooks/`, so a status script naming a shared hook exited 127 under cwd = worktree, and `wsx list` silently showed a blank status column while `up` (which anchors) worked.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     let hook = f.path().join(".ws-hooks").join("api-status.sh");

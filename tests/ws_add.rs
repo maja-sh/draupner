@@ -4,7 +4,7 @@ use common::{stderr, WorkspaceFixture};
 
 #[test]
 fn happy_path_extends_an_existing_task() {
-    // The whole point: after `ws new api feat/x`, running `ws add app feat/x`
+    // The whole point: after `wsx new api feat/x`, running `wsx add app feat/x`
     // should leave both worktrees in place with no state on `api` disturbed.
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
 
@@ -19,7 +19,7 @@ fn happy_path_extends_an_existing_task() {
     assert!(f.path().join(".worktrees/feat-x/app").is_dir(), "app worktree must exist after add");
     assert!(err.contains("Worktree created"), "expected 'Worktree created' for app in:\n{err}");
     assert!(err.contains("app:"), "expected 'app:' in summary:\n{err}");
-    assert!(err.contains("ws up feat/x"), "expected nudge in:\n{err}");
+    assert!(err.contains("wsx up feat/x"), "expected nudge in:\n{err}");
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn refuses_when_the_task_does_not_exist() {
 
     let err = stderr(&out);
     assert!(err.contains("no worktrees for"), "expected 'no worktrees for' in:\n{err}");
-    assert!(err.contains("ws new"), "expected 'ws new' nudge in:\n{err}");
+    assert!(err.contains("wsx new"), "expected 'wsx new' nudge in:\n{err}");
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn refuses_when_the_task_is_live() {
     let err = stderr(&out);
     assert!(err.contains("not fully stopped"), "expected 'not fully stopped' in:\n{err}");
     assert!(err.contains("api"), "expected the live repo named in:\n{err}");
-    assert!(err.contains("ws down feat/x"), "expected the down nudge in:\n{err}");
+    assert!(err.contains("wsx down feat/x"), "expected the down nudge in:\n{err}");
 
     assert!(
         !f.path().join(".worktrees/feat-x/app").exists(),

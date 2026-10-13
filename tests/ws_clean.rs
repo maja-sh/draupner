@@ -117,7 +117,7 @@ fn a_directory_git_doesnt_know_is_reported_not_audited() {
 
     assert!(err.contains("not registered with git"), "expected an orphan report in:\n{err}");
     assert!(err.contains("feat-ghost"), "expected the path named in:\n{err}");
-    // Reported, never removed: `ws` didn't put it there and can't judge it.
+    // Reported, never removed: `wsx` didn't put it there and can't judge it.
     assert!(f.path().join(".worktrees/feat-ghost/api").exists(), "must not remove an orphan");
 }
 

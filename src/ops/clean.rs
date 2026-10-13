@@ -10,7 +10,7 @@ pub fn run(force: bool) -> Result<()> {
     let ws = workspace::locate()?;
     let cfg = config::load(&ws.root)?;
 
-    crate::ui::header("ws-clean", if force { "--force" } else { "" });
+    crate::ui::header("wsx-clean", if force { "--force" } else { "" });
 
     // Audit only what git enumerates; filesystem orphans can't answer the git questions audit asks.
     let known = workspace::worktrees(&ws.root, &cfg);
@@ -52,7 +52,7 @@ pub fn run(force: bool) -> Result<()> {
     if !orphans.is_empty() {
         crate::ui::note(&format!(
             "{} director{} under .worktrees/ {} not registered with git — leftovers from an \
-             interrupted removal, or copied by hand. `ws` ignores them; remove by hand once \
+             interrupted removal, or copied by hand. `wsx` ignores them; remove by hand once \
              you've checked them:",
             orphans.len(),
             if orphans.len() == 1 { "y" } else { "ies" },
@@ -74,7 +74,7 @@ pub fn run(force: bool) -> Result<()> {
         crate::ui::summary_ok(&[format!("Removed {removed}, kept {kept}")]);
     } else if removable > 0 {
         crate::ui::summary_ok(&[format!("{removable} removable, {kept} kept")]);
-        crate::ui::nudge("ws clean --force to remove");
+        crate::ui::nudge("wsx clean --force to remove");
     } else {
         crate::ui::summary_ok(&[format!("Nothing to remove, {kept} kept")]);
     }

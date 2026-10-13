@@ -2,7 +2,7 @@ mod common;
 
 use common::{stderr, stdout, WorkspaceFixture};
 
-// The fixture is used only for its HOME isolation; `ws config` is machine-global.
+// The fixture is used only for its HOME isolation; `wsx config` is machine-global.
 
 #[test]
 fn config_set_get_unset_round_trip() {
@@ -129,7 +129,7 @@ fn init_remote_without_any_host_names_all_three_sources() {
     let out = ws.run(&["init", "--remote"]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
-    for hint in ["--remote <host>", "WS_REMOTE_HOST", "ws config set remote.host"] {
+    for hint in ["--remote <host>", "WS_REMOTE_HOST", "wsx config set remote.host"] {
         assert!(err.contains(hint), "error should mention `{hint}`:\n{err}");
     }
 }

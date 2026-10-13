@@ -27,7 +27,7 @@ pub fn run(short: bool) -> Result<()> {
     // `None` = unreachable remote; the listing still renders, just without status.
     let site = crate::remote::Site::resolve(&cfg).ok();
 
-    crate::ui::header("ws-list", "");
+    crate::ui::header("wsx-list", "");
 
     // Shared with `remote set` and `clean` so the ops can never disagree.
     let worktrees = workspace::worktrees(&ws.root, &cfg);
@@ -208,7 +208,7 @@ pub(super) fn probe_status(
                 _ => None,
             }
         } else {
-            // Local status; Inspect phase — no allocation or derivation from a status probe. `ws list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
+            // Local status; Inspect phase — no allocation or derivation from a status probe. `wsx list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
             let cmd = match hooks::resolve(
                 cfg, ws_root, repo, "status", cfg.is_container_repo(repo, wt_path),
             ) {

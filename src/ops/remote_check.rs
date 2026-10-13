@@ -1,4 +1,4 @@
-//! `ws remote check` — read-only verification of where a workspace's stack
+//! `wsx remote check` — read-only verification of where a workspace's stack
 //! lives, safe to run against a server you're still setting up.
 
 use anyhow::Result;
@@ -78,7 +78,7 @@ fn check_remote(
         let client_side = match domain {
             Some(d) => format!(
                 "Still client-side: trust the server's Caddy root CA, and resolve *.{d} \
-                 to the server from here (`ws setup`)."
+                 to the server from here (`wsx setup`)."
             ),
             None => "Trust the server's Caddy root CA from this machine if you haven't.".to_string(),
         };
@@ -91,14 +91,14 @@ fn check_remote(
     }
 }
 
-/// Report local routing readiness by reusing `ws setup`'s probe so the two agree on "ready".
+/// Report local routing readiness by reusing `wsx setup`'s probe so the two agree on "ready".
 fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     crate::ui::header("ws-remote-check", "local");
 
     let Some(domain) = cfg.domain.as_deref() else {
         crate::ui::note(
             "no `domain` set — no local routing to verify. Add `domain` to .ws.json \
-             to route worktrees, or `ws init --remote` to offload to a server.",
+             to route worktrees, or `wsx init --remote` to offload to a server.",
         );
         return Ok(());
     };
@@ -114,7 +114,7 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     }
 
     if report.privileged_gaps() {
-        crate::ui::nudge("`ws setup` — walk through fixing the gaps above");
+        crate::ui::nudge("`wsx setup` — walk through fixing the gaps above");
         return Err(super::op_failure("local routing setup is incomplete"));
     }
     crate::ui::summary_ok(&[format!(

@@ -474,7 +474,7 @@ pub fn clean_empty() {
     }
 }
 
-/// stdout is the one channel scripts consume (`ws config get`); everything human-facing goes to stderr, and this line is never styled.
+/// stdout is the one channel scripts consume (`wsx config get`); everything human-facing goes to stderr, and this line is never styled.
 pub fn value(text: &str) {
     println!("{text}");
 }

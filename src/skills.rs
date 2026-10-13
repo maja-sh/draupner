@@ -3,19 +3,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SKILLS: &[(&str, &str)] = &[
-    ("ws-new",      include_str!("../skills/ws-new/SKILL.md")),
-    ("ws-add",      include_str!("../skills/ws-add/SKILL.md")),
-    ("ws-up",       include_str!("../skills/ws-up/SKILL.md")),
-    ("ws-down",     include_str!("../skills/ws-down/SKILL.md")),
-    ("ws-rm",       include_str!("../skills/ws-rm/SKILL.md")),
-    ("ws-list",     include_str!("../skills/ws-list/SKILL.md")),
-    ("ws-clean",    include_str!("../skills/ws-clean/SKILL.md")),
-    ("ws-exec",     include_str!("../skills/ws-exec/SKILL.md")),
-    ("ws-context",  include_str!("../skills/ws-context/SKILL.md")),
+    ("wsx-new",      include_str!("../skills/wsx-new/SKILL.md")),
+    ("wsx-add",      include_str!("../skills/wsx-add/SKILL.md")),
+    ("wsx-up",       include_str!("../skills/wsx-up/SKILL.md")),
+    ("wsx-down",     include_str!("../skills/wsx-down/SKILL.md")),
+    ("wsx-rm",       include_str!("../skills/wsx-rm/SKILL.md")),
+    ("wsx-list",     include_str!("../skills/wsx-list/SKILL.md")),
+    ("wsx-clean",    include_str!("../skills/wsx-clean/SKILL.md")),
+    ("wsx-exec",     include_str!("../skills/wsx-exec/SKILL.md")),
+    ("wsx-context",  include_str!("../skills/wsx-context/SKILL.md")),
 ];
 
-/// Skills that used to ship and were removed. `write_all` sweeps them from the target so a re-run of `ws claude` cleans up any prior install. Keep entries here for at least one release cycle after retirement so users who upgrade catch the removal; then drop them.
-const DEPRECATED_SKILLS: &[&str] = &["ws-init", "ws-show", "ws-resume"];
+/// Skills that used to ship and were removed. `write_all` sweeps them from the target so a re-run of `wsx claude` cleans up any prior install. Keep entries here for at least one release cycle after retirement so users who upgrade catch the removal; then drop them.
+const DEPRECATED_SKILLS: &[&str] = &[
+    // Retired commands (dropped before the ws→wsx rename).
+    "ws-init", "ws-show", "ws-resume",
+    // Pre-rename skill names, swept when a user re-runs `wsx claude` after upgrading.
+    "ws-new", "ws-add", "ws-up", "ws-down", "ws-rm",
+    "ws-list", "ws-clean", "ws-exec", "ws-context",
+];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(target_root)
@@ -82,13 +88,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_all(tmp.path()).unwrap();
         write_all(tmp.path()).unwrap();
-        assert!(tmp.path().join("ws-new").join("SKILL.md").is_file());
+        assert!(tmp.path().join("wsx-new").join("SKILL.md").is_file());
     }
 
     #[test]
     fn write_all_sweeps_deprecated_skills_from_prior_installs() {
         let tmp = tempfile::tempdir().unwrap();
-        // A prior `ws claude` install had a skill that has since been retired — the file below stands in for whatever `~/.claude/skills/<retired>/SKILL.md` a user carried over from an older ws.
+        // A prior `wsx claude` install had a skill that has since been retired — the file below stands in for whatever `~/.claude/skills/<retired>/SKILL.md` a user carried over from an older ws.
         for name in DEPRECATED_SKILLS {
             let dir = tmp.path().join(name);
             fs::create_dir_all(&dir).unwrap();
@@ -98,7 +104,7 @@ mod tests {
         for name in DEPRECATED_SKILLS {
             assert!(
                 !tmp.path().join(name).exists(),
-                "deprecated skill `{name}` must be swept when `ws claude` runs against an older install"
+                "deprecated skill `{name}` must be swept when `wsx claude` runs against an older install"
             );
         }
     }

@@ -1,4 +1,4 @@
-//! Flip a workspace between local and remote after `ws init`; worktree syncs
+//! Flip a workspace between local and remote after `wsx init`; worktree syncs
 //! must be backfilled or torn down to match, and running stacks and stale DNS
 //! are guarded because both are derived rather than declared.
 
@@ -26,8 +26,8 @@ pub fn set(
         .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`ws remote set` needs a host: pass one, set $WS_REMOTE_HOST, \
-                 or `ws config set remote.host <host>`",
+                "`wsx remote set` needs a host: pass one, set $WS_REMOTE_HOST, \
+                 or `wsx config set remote.host <host>`",
             )
         })?;
     // Fresh user input headed for ssh argv — refuse an option-shaped host before storing it.
@@ -102,7 +102,7 @@ pub fn set(
             }
         }
     }
-    // Best-effort initial push so files exist before the first `ws up`/`exec`.
+    // Best-effort initial push so files exist before the first `wsx up`/`exec`.
     for session in &created {
         let _ = mutagen::flush(session);
     }
@@ -124,15 +124,15 @@ pub fn set(
     crate::ui::summary_ok(&summary);
     if stranded {
         crate::ui::note(
-            "stacks that were running keep running and `ws down` now targets the server — \
-             `ws remote unset`, `ws down`, then `ws remote set` again to stop them",
+            "stacks that were running keep running and `wsx down` now targets the server — \
+             `wsx remote unset`, `wsx down`, then `wsx remote set` again to stop them",
         );
     }
     settle_dns_flip(cfg.domain.as_deref(), &old_answer, &new_answer, true);
-    crate::ui::nudge("run `ws remote check` once the server's set up for full validation");
+    crate::ui::nudge("run `wsx remote check` once the server's set up for full validation");
 
     if failed {
-        return Err(super::op_failure("one or more sync sessions failed — fix and rerun `ws remote set`"));
+        return Err(super::op_failure("one or more sync sessions failed — fix and rerun `wsx remote set`"));
     }
     Ok(())
 }
@@ -180,8 +180,8 @@ pub fn unset(force: bool) -> Result<()> {
     crate::ui::summary_ok(&["workspace is local again".to_string()]);
     if stranded {
         crate::ui::note(&format!(
-            "stacks and routes still on {} are left as-is — `ws remote set {}`, `ws down`, \
-             then `ws remote unset` again to stop them",
+            "stacks and routes still on {} are left as-is — `wsx remote set {}`, `wsx down`, \
+             then `wsx remote unset` again to stop them",
             old.connection, old.connection
         ));
     }
@@ -218,7 +218,7 @@ fn settle_dns_flip(domain: Option<&str>, old: &str, new: &str, offloading: bool)
     }
     crate::ui::note(&format!(
         "DNS is now stale: `*.{domain}` should resolve to {new}, not {old} — \
-         re-run `ws setup` to re-point it (`ws` never edits your resolver itself)"
+         re-run `wsx setup` to re-point it (`wsx` never edits your resolver itself)"
     ));
 }
 
@@ -282,7 +282,7 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
             .join(", ");
         let cmds = branches
             .iter()
-            .map(|(b, _)| format!("`ws down {b}`"))
+            .map(|(b, _)| format!("`wsx down {b}`"))
             .collect::<Vec<_>>()
             .join(", ");
         return refuse(
@@ -333,8 +333,8 @@ fn refuse(force: bool, finding: String, remedy: String) -> Result<bool> {
         return Ok(true);
     }
     Err(super::preflight(format!(
-        "refusing to flip — {finding}. {remedy} Flipping now leaves the stack where `ws` \
-         will no longer look for it (`ws down` follows the config, not the containers); \
+        "refusing to flip — {finding}. {remedy} Flipping now leaves the stack where `wsx` \
+         will no longer look for it (`wsx down` follows the config, not the containers); \
          pass --force to flip anyway."
     )))
 }

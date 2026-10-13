@@ -35,13 +35,13 @@ pub struct Report {
 }
 
 impl Report {
-    /// The rootless Caddy bit isn't counted — `ws` fixes that itself without a prompt.
+    /// The rootless Caddy bit isn't counted — `wsx` fixes that itself without a prompt.
     pub fn privileged_gaps(&self) -> bool {
         !self.dns.is_ok() || !self.ca_ok || !self.port_ok
     }
 }
 
-/// Shared by `ws setup` and `ws remote check`'s local mode so the two never drift.
+/// Shared by `wsx setup` and `wsx remote check`'s local mode so the two never drift.
 pub fn render_report(report: &Report, domain: &str) {
     // Show what the wildcard *does* answer when wrong; a bare cross reads as "not wired yet".
     let detail = match &report.dns {
@@ -61,7 +61,7 @@ pub fn render_report(report: &Report, domain: &str) {
     }
 }
 
-/// Non-mutating; the single owner of "what counts as ready" — `ws up` and `ws setup` both read the `Report`.
+/// Non-mutating; the single owner of "what counts as ready" — `wsx up` and `wsx setup` both read the `Report`.
 ///
 /// `known_dns` lets a caller that already resolved the wildcard pass the answer in to skip a second lookup.
 pub fn probe(
@@ -90,7 +90,7 @@ pub fn probe(
 fn ca_trusted(domain: &str, port: u16, address: &str) -> bool {
     let host = format!("ws-ca-probe.{domain}");
     Command::new("curl")
-        // Short timeout: this runs on the `ws up` hot path — a wedged Caddy mustn't stall the up.
+        // Short timeout: this runs on the `wsx up` hot path — a wedged Caddy mustn't stall the up.
         .args(["-sS", "-o", "/dev/null", "-m", "4", "--resolve"])
         .arg(format!("{host}:{port}:{address}"))
         .arg(format!("https://{host}:{port}"))
@@ -269,7 +269,7 @@ fn macos_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
     steps
 }
 
-/// Persists to `ws`'s config dir (not `$TMPDIR`) so the trust command has a non-clobberable file to point at.
+/// Persists to `wsx`'s config dir (not `$TMPDIR`) so the trust command has a non-clobberable file to point at.
 fn fetch_root_ca(site: &Site) -> Option<String> {
     match crate::caddy::write_root_ca(site) {
         Ok(path) => Some(path.to_string_lossy().into_owned()),
@@ -321,10 +321,10 @@ fn walk_gaps(steps: Vec<Step>, yes: bool) -> Result<()> {
 
     if printed {
         crate::ui::nudge(
-            "stdin isn't a terminal — run the commands above, or re-run `ws setup` in a terminal.",
+            "stdin isn't a terminal — run the commands above, or re-run `wsx setup` in a terminal.",
         );
     } else {
-        crate::ui::summary_ok(&["setup walk complete — re-run `ws setup` to re-check.".to_string()]);
+        crate::ui::summary_ok(&["setup walk complete — re-run `wsx setup` to re-check.".to_string()]);
     }
     Ok(())
 }
@@ -368,7 +368,7 @@ fn apply_step(step: &Step, yes: bool) -> Result<Outcome> {
     }
 }
 
-/// Inherits the terminal so `sudo` prompts directly — `ws` never reads the password.
+/// Inherits the terminal so `sudo` prompts directly — `wsx` never reads the password.
 fn run_commands(commands: &[String]) -> Result<()> {
     for c in commands {
         crate::ui::note(&format!("$ {c}"));

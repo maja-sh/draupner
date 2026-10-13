@@ -19,7 +19,7 @@ use crate::remote::{self, Site};
 pub enum Phase {
     /// `up` / `post-create`: allocate ports and render templates.
     Activate,
-    /// `ws exec` locally: allocate ports but don't render — exec is a command
+    /// `wsx exec` locally: allocate ports but don't render — exec is a command
     /// runner, not a config step.
     Exec,
     /// `down` / `post-remove` / `status` / remote exec: never allocate or render.
@@ -132,7 +132,7 @@ pub fn prepare(
     Ok(env)
 }
 
-/// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `ws rm` wiped the sibling's DB volumes).
+/// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `wsx rm` wiped the sibling's DB volumes).
 fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
     let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
     match entry.config() {
@@ -155,7 +155,7 @@ fn recorded_or_declared(
     if recorded.is_empty() { rc.services.clone() } else { recorded }
 }
 
-/// `WS_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `WS_REMOTE_HOST` because that is an input override a nested `ws` call would silently inherit.
+/// `WS_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `WS_REMOTE_HOST` because that is an input override a nested `wsx` call would silently inherit.
 fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     vec![
         ("WS_RUNTIME".to_string(), cfg.runtime().to_string()),
@@ -418,7 +418,7 @@ fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>)
     git::add_worktree_excludes(worktree, &dests)
 }
 
-/// `.ws.json` arrives with a clone, so `dest` is attacker-controlled: without this, an entry like `../../../../.ssh/authorized_keys` had `ws new` and every `ws up` write anywhere the user could. Same rule `copy` entries have always had (`ops::new::seed_copies`); the `is_tracked` guard below inverts for escaping paths and never caught this.
+/// `.ws.json` arrives with a clone, so `dest` is attacker-controlled: without this, an entry like `../../../../.ssh/authorized_keys` had `wsx new` and every `wsx up` write anywhere the user could. Same rule `copy` entries have always had (`ops::new::seed_copies`); the `is_tracked` guard below inverts for escaping paths and never caught this.
 fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
     let rel = Path::new(p);
     if rel.is_absolute() {

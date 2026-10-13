@@ -16,7 +16,7 @@ The shape of it:
 
 ## Granularity
 
-**Offload is a property of a workspace root** — not of `ws`, and not of an
+**Offload is a property of a workspace root** — not of `wsxx`, and not of an
 individual repo. Every repo in a workspace goes to the same place.
 
 If you want an API on a server and a frontend on your laptop, that's two
@@ -34,39 +34,39 @@ of pieces of configuration that genuinely need root. Copy
 [`server-setup/debian.sh`](../server-setup/) to the box, read it, run it. It's
 idempotent and it explains each step as it goes.
 
-Make sure you can `ssh` to it non-interactively first — `ws` drives everything
+Make sure you can `ssh` to it non-interactively first — `wsxx` drives everything
 over that connection, and an SSH host alias in `~/.ssh/config` is the tidiest way
 to name it.
 
 The server runs **podman** — that's what the script installs, and what a
 workspace with a `remote` block and no `runtime` uses. Your own machine can run
 docker regardless; `runtime` describes where the stacks run, not where you type
-`ws`. See [configuration.md](configuration.md#runtime-is-per-site-not-per-machine).
+`wsxx`. See [configuration.md](configuration.md#runtime-is-per-site-not-per-machine).
 
 ### 2. Point the workspace at it
 
 For a new workspace:
 
 ```sh
-ws init --remote my-server --domain myapp.test
+wsxx init --remote my-server --domain myapp.test
 ```
 
 For one that already exists:
 
 ```sh
-ws remote set my-server
+wsxx remote set my-server
 ```
 
 Either writes a `remote` block to `.ws.json` and verifies the host is reachable
 first, refusing rather than writing a config that can't work (`--no-verify` to
-skip). `ws remote set` also backfills sync sessions for every worktree you
+skip). `wsxx remote set` also backfills sync sessions for every worktree you
 already have.
 
 If you always use the same server, record it once:
 
 ```sh
-ws config set remote.host my-server
-ws remote set              # picks it up
+wsxx config set remote.host my-server
+wsxx remote set              # picks it up
 ```
 
 Precedence is: the argument you passed > `$WS_REMOTE_HOST` > the global config.
@@ -74,19 +74,19 @@ Precedence is: the argument you passed > `$WS_REMOTE_HOST` > the global config.
 ### 3. Check it
 
 ```sh
-ws remote check
+wsxx remote check
 ```
 
 Read-only. It probes SSH reachability and `mutagen` locally, then in a single
 round trip on the server: `mutagen`, the container runtime, whether the routing Caddy
 is running, whether the workspace directory exists and is writable, and — when
 the workspace has a `domain` — whether the server resolves `*.<domain>` to
-itself. `-v` shows the exact command behind each probe.
+itself. `-v` showsx the exact command behind each probe.
 
 ### Coming back
 
 ```sh
-ws remote unset
+wsxx remote unset
 ```
 
 Removes the `remote` block and terminates the sync sessions. The worktrees stay
@@ -95,10 +95,10 @@ where they are.
 Both directions of the flip change what `*.<domain>` should resolve to, and
 neither one touches your resolver on its own — that stays a consented step. So
 each **offers** to re-point it right there, with the same `[R]un / [S]kip /
-show-me` prompt `ws setup` uses and the same commands; you see them before
+show-me` prompt `wsxx setup` uses and the same commands; you see them before
 anything runs, and `sudo` still prompts for itself. Skip it, or run the flip from
 a script (no terminal to prompt at), and you get the old and new answers plus a
-pointer to `ws setup` instead — re-run that, or the wildcard keeps aiming at the
+pointer to `wsxx setup` instead — re-run that, or the wildcard keeps aiming at the
 machine you just stopped using.
 
 ---
@@ -113,24 +113,24 @@ you want it outside the home directory.
 Shared scripts in `.ws-hooks/` are pushed to the server on each `up`, which is
 what lets a `scripts` entry like `".ws-hooks/api-up.sh"` resolve in both places.
 
-`ws` also keeps one multiplexed SSH connection per server rather than
+`wsxx` also keeps one multiplexed SSH connection per server rather than
 handshaking for every small command.
 
 ---
 
 ## Reaching it
 
-Two independent questions: can the *browser* resolve the hostname, and can it
+Two independent questions: can the *browsxer* resolve the hostname, and can it
 trust the certificate.
 
-`ws` routes HTTP services through a Caddy container on the server, matching on
-the Host header, so all branches share one HTTPS port (8443 by default; `ws setup
+`wsxx` routes HTTP services through a Caddy container on the server, matching on
+the Host header, so all branches share one HTTPS port (8443 by default; `wsxx setup
 --port 443` if you want URLs without a suffix and are willing to grant the
 privilege). For that to work from your machine:
 
 - `*.<domain>` has to resolve to the server. A wildcard DNS entry, or the
   dnsmasq setup `server-setup/debian.sh` installs and wires.
-- The CA that signs those certificates has to be trusted by your browser. `ws
+- The CA that signs those certificates has to be trusted by your browsxer. `wsx
   setup` on your own machine reports whether it is.
 
 ### Two resolvers, not one
@@ -139,13 +139,13 @@ There are two separate "resolve `*.<domain>`" requirements, and they fail in
 completely different ways. Keeping them apart is worth the paragraph:
 
 **The client must resolve `*.<domain>` to the server's address.** Everyone who
-routes anything needs this — it's how your browser finds a worktree at all.
-`ws setup` on your own machine reports on it and walks you through fixing it.
+routes anything needs this — it's how your browsxer finds a worktree at all.
+`wsxx setup` on your own machine reports on it and walks you through fixing it.
 
 The *correct* answer here is derived from where the stacks live: loopback for a
 local workspace, the server's address for an offloaded one. Flipping between them
 therefore invalidates it, which is why both flips offer to re-point it (and say
-what's stale when you decline). `ws setup` and `ws up` report what the wildcard
+what's stale when you decline). `wsxx setup` and `wsxx up` report what the wildcard
 actually resolves to when it disagrees — a wildcard pointing at some other
 machine reads as `resolves to <address>, expected <address>`, not as "doesn't
 resolve yet". They are different problems: one is a DNS entry you never made,
@@ -165,7 +165,7 @@ to whatever configures the interface, so a DHCP lease renewal can drop the
 loopback nameserver hours or days after setup: dnsmasq stays up and answers
 correctly when queried directly, but nothing queries it, and the host-side dev
 server starts failing every proxy hop with `getaddrinfo ENOTFOUND`. The setup
-script now defends against that (step 2c), and `ws remote check` probes it, so
+script now defends against that (step 2c), and `wsxx remote check` probes it, so
 it reads as one red line instead of an hour of confusion.
 
 By default the server's Caddy publishes on all interfaces, because the entire
@@ -178,10 +178,10 @@ it:
 
 Any address your client can route to works — a tailnet address, a LAN address.
 Nothing here assumes Tailscale. It's only read when the Caddy container is
-created, so changing it recreates the container on the next `ws up` (routes
+created, so changing it recreates the container on the next `wsxx up` (routes
 survive; they reload from the config volume).
 
-Raw-TCP services don't need any of this: `ws up` creates a `mutagen forward` per
+Raw-TCP services don't need any of this: `wsxx up` creates a `mutagen forward` per
 allocated port and prints the `localhost:<port>` dial string for each one. The
 same port number on both ends, so nothing downstream has to know it moved.
 
@@ -194,7 +194,7 @@ same port number on both ends, so nothing downstream has to know it moved.
 | `git`, worktree creation | client |
 | `prepare` | **client**, before the sync — stage local-only data here |
 | `post-create`, `up`, `down`, `post-remove`, `status` | server |
-| `ws exec` | server (`--local` to force otherwise) |
+| `wsxx exec` | server (`--local` to force otherwise) |
 | Port allocation bookkeeping | client (`.ws-meta` is the record) |
 | Port *freeness* probe | server — the port must be free where it's published |
 
@@ -205,20 +205,20 @@ Your scripts see `WS_REMOTE=1` and `WS_CONNECTION`, and their `WS_WORKSPACE_ROOT
 
 ## Things worth knowing
 
-**A flip is refused while a stack is running.** `ws down` follows the config, not
-the containers: after `ws remote set` a stack still running locally is beyond its
-reach, and after `ws remote unset` so are the server's containers and routes. So
+**A flip is refused while a stack is running.** `wsxx down` followsx the config, not
+the containers: after `wsxx remote set` a stack still running locally is beyond its
+reach, and after `wsxx remote unset` so are the server's containers and routes. So
 both commands check first — host processes via their supervision record, compose
 projects via `compose ps` — and refuse, naming the branches that are up and the
-`ws down <branch>` that clears them. The working order is stop, flip, start again.
+`wsxx down <branch>` that clears them. The working order is stop, flip, start again.
 
-If liveness can't be determined — `ws remote unset` on a workspace whose server
+If liveness can't be determined — `wsxx remote unset` on a workspace whose server
 has gone away, say — that is also a refusal, not a shrug. Assuming "nothing is
 running" is how a stack ends up somewhere nothing will look for it. `--force`
-overrides either refusal, and prints the recovery sequence (flip back, `ws down`,
+overrides either refusal, and prints the recovery sequence (flip back, `wsxx down`,
 flip again) for whatever it left behind.
 
-**`ws remote set/unset` rewrites `.ws.json`** through its own types, so any keys
+**`wsxx remote set/unset` rewrites `.ws.json`** through its own types, so any keys
 it doesn't model are dropped. Everything documented in the schema round-trips.
 
 **`ss` is required on the server.** Without it every port reads as busy and

@@ -58,7 +58,7 @@ fn new_remote(f: &WorkspaceFixture, repo: &str, ssh: &Path, mg: &Path) {
             ("ARGS_FILE", f.path().join("new-ssh.txt").to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws new failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx new failed:\n{}", stderr(&out));
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn up_runs_the_script_on_the_server_over_ssh() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -123,7 +123,7 @@ fn a_dashed_service_name_keeps_the_up_script_runnable() {
 
     let args = f.path().join("up-ssh.txt");
     let out = f.run_with_env(&["up", "feat/foo"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -138,7 +138,7 @@ fn a_dashed_service_name_keeps_the_up_script_runnable() {
 
 #[test]
 fn a_dashed_service_name_keeps_the_status_probe_runnable() {
-    // Same key, the `ws list` path. Here the breakage was silent: the exit 127 made
+    // Same key, the `wsx list` path. Here the breakage was silent: the exit 127 made
     // `ssh_capture` return `None`, so the status column showed the missing-value
     // dash with no error anywhere.
     let f = WorkspaceFixture::empty();
@@ -150,7 +150,7 @@ fn a_dashed_service_name_keeps_the_status_probe_runnable() {
 
     let args = f.path().join("list-ssh.txt");
     let out = f.run_with_env(&["list"], &remote_env(&ssh, &mg, &args));
-    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx list failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     let line = rec
@@ -182,7 +182,7 @@ fn down_runs_the_script_on_the_server_over_ssh() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws down failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx down failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
@@ -194,7 +194,7 @@ fn down_runs_the_script_on_the_server_over_ssh() {
 
 #[test]
 fn down_degrades_to_local_cleanup_when_the_server_is_unreachable() {
-    // Parity with `ws rm`: a `down` on an unreachable server used to abort at
+    // Parity with `wsx rm`: a `down` on an unreachable server used to abort at
     // `Site::resolve`, orphaning local mutagen forwards even though the
     // teardown code that would free them is entirely local. Now `down` runs
     // its local cleanup and warns about the server-side leftovers instead.
@@ -248,7 +248,7 @@ fn list_runs_status_on_the_server_for_a_remote_workspace() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws list failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx list failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
@@ -284,7 +284,7 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(rec.contains("nohup "), "host process not launched (no nohup) over ssh:\n{rec}");
@@ -347,7 +347,7 @@ esac"#,
     );
 
     let err = stderr(&out);
-    assert!(!out.status.success(), "a dead host process must fail `ws up`:\n{err}");
+    assert!(!out.status.success(), "a dead host process must fail `wsx up`:\n{err}");
     assert!(
         err.contains("exited immediately"),
         "the step must say the process died, not report it started:\n{err}"
@@ -379,7 +379,7 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx up failed:\n{}", stderr(&out));
 
     assert!(
         f.path().join(".worktrees/feat-foo/api/prepared.txt").exists(),
@@ -391,7 +391,7 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
 
 #[test]
 fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
-    // A workspace-root `.ws-hooks/` lives outside the repos and can't ride the worktree sync, so `ws` pushes it so a hook can reference `$WS_WORKSPACE_ROOT/.ws-hooks/…` there.
+    // A workspace-root `.ws-hooks/` lives outside the repos and can't ride the worktree sync, so `wsx` pushes it so a hook can reference `$WS_WORKSPACE_ROOT/.ws-hooks/…` there.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(remote_container_ws());
@@ -410,7 +410,7 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "ws up failed:\n{}", stderr(&out));
+    assert!(out.status.success(), "wsx up failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(

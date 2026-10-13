@@ -57,7 +57,7 @@ impl<F: FnMut()> Drop for Teardown<F> {
     }
 }
 
-/// The pid `ws` recorded for `feat/foo`'s api.
+/// The pid `wsx` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
     let contents = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid"))
         .expect("pid file after up");
@@ -111,13 +111,13 @@ fn host_up_launches_a_detached_process_with_injected_env() {
 
 #[test]
 fn list_reports_a_host_process_that_crashed() {
-    // A dead host process used to look identical to a healthy one in `ws list`, since the `status` script is usually absent.
+    // A dead host process used to look identical to a healthy one in `wsx list`, since the `status` script is usually absent.
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
     let pid = recorded_pid(&f);
 
-    // Kill it the way a crash would — behind ws's back, no `ws down`.
+    // Kill it the way a crash would — behind ws's back, no `wsx down`.
     std::process::Command::new("kill").args(["-9", &pid]).status().unwrap();
     for _ in 0..20 {
         if !proc_alive(&f) {
@@ -129,7 +129,7 @@ fn list_reports_a_host_process_that_crashed() {
     let out = f.run_ok(&["list"]);
     assert!(
         stderr(&out).contains("crashed"),
-        "a host process that died must be visible in `ws list`:\n{}",
+        "a host process that died must be visible in `wsx list`:\n{}",
         stderr(&out)
     );
     stop(&f);
@@ -148,7 +148,7 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
     let out = f.run_ok(&["up", "feat/foo"]);
     let err = stderr(&out);
     assert!(
-        err.contains("nothing is listening on the port ws allocated"),
+        err.contains("nothing is listening on the port wsx allocated"),
         "up must say the port it reported isn't being served:\n{err}"
     );
 
@@ -156,7 +156,7 @@ fn list_reports_a_host_process_that_never_bound_its_allocated_port() {
     let port = allocated_port(&err);
     assert!(
         stderr(&out).contains(&format!("nothing on :{port}")),
-        "`ws list` must name the unserved port:\n{}",
+        "`wsx list` must name the unserved port:\n{}",
         stderr(&out)
     );
     stop(&f);
@@ -232,7 +232,7 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
     let out = f.run_ok(&["list"]);
     assert!(
         stderr(&out).contains(&format!("running :{port}")),
-        "`ws list` must confirm the served port:\n{}",
+        "`wsx list` must confirm the served port:\n{}",
         stderr(&out)
     );
 }
