@@ -1,6 +1,6 @@
 # server-setup — the one-time host bits
 
-`wsx` does the **rootless** routing setup itself (creates the `ws-net` network,
+`wsx` does the **rootless** routing setup itself (creates the `wsx-net` network,
 runs the Caddy container) — no prompts, no privilege. What's left is the stuff
 `wsx` needs but shouldn't do to your machine behind your back: the packages it
 expects to find, and three bits that genuinely need root. How they're delivered

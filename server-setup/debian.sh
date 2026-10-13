@@ -4,7 +4,7 @@
 #
 # Everything `ws` needs on a host but deliberately does NOT do to it for you:
 # the packages it expects to find, and the privileged one-time bits. `ws` handles
-# the rootless pieces itself (the `ws-net` network, the Caddy container); the
+# the rootless pieces itself (the `wsx-net` network, the Caddy container); the
 # rest lives here — a readable script you run yourself. That's the transparency
 # contract: nothing privileged happens invisibly.
 #
@@ -12,7 +12,7 @@
 # you run it *from*, but a server is podman: rootless by default, no daemon, and
 # no root-equivalent group to join. Debian's docker packages are also too old for
 # the Compose features `ws` generates. So a workspace that offloads here runs on
-# podman — which is exactly what an absent `runtime` in `.ws.json` resolves to.
+# podman — which is exactly what an absent `runtime` in `.wsx.json` resolves to.
 #
 #   0. Prerequisites  → podman, a Compose provider, iproute2, mutagen, curl, sshd.
 #   1. Trust Caddy's internal root CA  → browsers stop warning on the TLS cert.
@@ -29,7 +29,7 @@
 #
 # Usage:
 #   server-setup/debian.sh <domain> [--address <ip>] [--port 443]
-#   WS_DOMAIN=myapp.test server-setup/debian.sh
+#   WSX_DOMAIN=myapp.test server-setup/debian.sh
 #
 # `--address` is what `*.<domain>` resolves to; it defaults to 127.0.0.1, which
 # is right when `ws` runs on this same box. On an offload box, pass the address
@@ -59,11 +59,11 @@ MUTAGEN_SHA256_arm64="bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd5
 # only understands from this version on.
 COMPOSE_MIN="2.24.4"
 
-domain="${WS_DOMAIN:-}"
+domain="${WSX_DOMAIN:-}"
 # What `*.<domain>` should answer with. Loopback is right when the workspaces
 # live on this same machine; an offload box wants the address its clients
 # actually reach it at (LAN IP, tailnet IP, whatever routes).
-address="${WS_ADDRESS:-127.0.0.1}"
+address="${WSX_ADDRESS:-127.0.0.1}"
 want_443=0
 
 # Whether this box is an *offload server* (it runs the stacks; `ws` itself runs

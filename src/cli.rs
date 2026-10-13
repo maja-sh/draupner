@@ -9,12 +9,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Bootstrap .ws.json + .ws-hooks/ in the current directory
+    /// Bootstrap .wsx.json + .wsx-hooks/ in the current directory
     Init {
-        /// Rewrite .ws.schema.json from the current schema, leave .ws.json alone
+        /// Rewrite .wsx.schema.json from the current schema, leave .wsx.json alone
         #[arg(long)]
         refresh_schema: bool,
-        /// Offload to a server: SSH host (falls back to $WS_REMOTE_HOST, then `wsx config` remote.host)
+        /// Offload to a server: SSH host (falls back to $WSX_REMOTE_HOST, then `wsx config` remote.host)
         #[arg(long, value_name = "CONNECTION", num_args = 0..=1)]
         remote: Option<Option<String>>,
         /// Server dir the worktrees live under (default: this workspace's dir name)
@@ -114,7 +114,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
-    /// Get/set machine-global defaults (~/.config/ws/config.toml)
+    /// Get/set machine-global defaults (~/.config/wsx/config.toml)
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
@@ -151,7 +151,7 @@ enum RemoteCmd {
     },
     /// Offload this workspace to a server (writes the remote block + backfills sync)
     Set {
-        /// SSH host (falls back to $WS_REMOTE_HOST, then `wsx config` remote.host)
+        /// SSH host (falls back to $WSX_REMOTE_HOST, then `wsx config` remote.host)
         connection: Option<String>,
         /// Server dir the worktrees live under (default: kept, or this workspace's dir name)
         #[arg(long, value_name = "PATH")]

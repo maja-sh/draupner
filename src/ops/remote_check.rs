@@ -97,7 +97,7 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
 
     let Some(domain) = cfg.domain.as_deref() else {
         crate::ui::note(
-            "no `domain` set — no local routing to verify. Add `domain` to .ws.json \
+            "no `domain` set — no local routing to verify. Add `domain` to .wsx.json \
              to route worktrees, or `wsx init --remote` to offload to a server.",
         );
         return Ok(());

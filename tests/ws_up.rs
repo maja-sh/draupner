@@ -154,7 +154,7 @@ fn up_fails_when_an_http_route_cannot_be_installed() {
     f.run_ok(&["new", "api", "feat/route"]);
 
     // Dead admin endpoint so route_up cannot install the route.
-    let out = f.run_with_env(&["up", "feat/route"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
+    let out = f.run_with_env(&["up", "feat/route"], &[("WSX_CADDY_ADMIN", "http://127.0.0.1:1")]);
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -177,7 +177,7 @@ fn up_succeeds_and_routes_when_caddy_is_reachable() {
     f.run_ok(&["new", "api", "feat/route"]);
 
     // Pinned so this doesn't depend on the machine's opted-in HTTPS port.
-    let out = f.run_with_env(&["up", "feat/route"], &[("WS_HTTPS_PORT", "8443")]);
+    let out = f.run_with_env(&["up", "feat/route"], &[("WSX_HTTPS_PORT", "8443")]);
     let err = stderr(&out);
     assert!(out.status.success(), "up failed:\n{err}");
     assert!(
@@ -199,7 +199,7 @@ fn raw_tcp_only_up_makes_no_route_call() {
     f.run_ok(&["new", "api", "feat/db"]);
 
     // Even with a dead admin, a stack that installs no route must still come up.
-    let out = f.run_with_env(&["up", "feat/db"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
+    let out = f.run_with_env(&["up", "feat/db"], &[("WSX_CADDY_ADMIN", "http://127.0.0.1:1")]);
     assert!(
         out.status.success(),
         "a raw-TCP-only stack must not need Caddy:\n{}",

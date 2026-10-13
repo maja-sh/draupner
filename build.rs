@@ -11,7 +11,7 @@ fn main() {
     } else {
         "linux".to_string()
     };
-    println!("cargo:rustc-env=WS_COMPAT_MATRIX={matrix}");
+    println!("cargo:rustc-env=WSX_COMPAT_MATRIX={matrix}");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");

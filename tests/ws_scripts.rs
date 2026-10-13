@@ -1,4 +1,4 @@
-//! Declarative `scripts` in `.ws.json` — the only lifecycle mechanism; also covers the migration error for a leftover executable `.ws-hooks/<repo>/<event>` file.
+//! Declarative `scripts` in `.wsx.json` — the only lifecycle mechanism; also covers the migration error for a leftover executable `.wsx-hooks/<repo>/<event>` file.
 
 mod common;
 
@@ -36,9 +36,9 @@ fn declarative_up_script_multi_command_runs_in_order() {
     assert!(first < second, "commands should run in order:\n{err}");
 }
 
-/// Write an executable `.ws-hooks/<repo>/<event>` — the layout the removed hook-file mechanism discovered by convention.
+/// Write an executable `.wsx-hooks/<repo>/<event>` — the layout the removed hook-file mechanism discovered by convention.
 fn write_legacy_hook_file(f: &WorkspaceFixture, repo: &str, event: &str) {
-    let dir = f.path().join(".ws-hooks").join(repo);
+    let dir = f.path().join(".wsx-hooks").join(repo);
     std::fs::create_dir_all(&dir).expect("create hook dir");
     let path = dir.join(event);
     std::fs::write(&path, "#!/usr/bin/env bash\necho FROM-HOOK-FILE\n").expect("write hook file");
@@ -63,10 +63,10 @@ fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
     let err = stderr(&out);
     assert!(!err.contains("FROM-HOOK-FILE"), "the hook file must not run:\n{err}");
     assert!(
-        err.contains(r#""scripts": {"up": ".ws-hooks/api/up"}"#),
+        err.contains(r#""scripts": {"up": ".wsx-hooks/api/up"}"#),
         "the error must name the exact JSON to paste:\n{err}"
     );
-    assert!(err.contains("$WS_WORKTREE"), "the error must name the new worktree var:\n{err}");
+    assert!(err.contains("$WSX_WORKTREE"), "the error must name the new worktree var:\n{err}");
 }
 
 // ...and declaring it is the whole migration: the same file, now named under
@@ -77,7 +77,7 @@ fn declaring_a_hook_file_under_scripts_runs_it_again() {
     f.add_repo("api");
     write_legacy_hook_file(&f, "api", "up");
     f.write_ws_json(
-        r#"{"repos":[{"name":"api","scripts":{"up":".ws-hooks/api/up"}}]}"#,
+        r#"{"repos":[{"name":"api","scripts":{"up":".wsx-hooks/api/up"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/migrated"]);
 

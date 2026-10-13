@@ -105,7 +105,7 @@ struct Step {
     commands: Vec<String>,
 }
 
-/// Refuses shell metacharacters so a hand-edited `.ws.json` can't smuggle a command into a consented `sudo` line.
+/// Refuses shell metacharacters so a hand-edited `.wsx.json` can't smuggle a command into a consented `sudo` line.
 fn valid_domain(domain: &str) -> bool {
     !domain.is_empty()
         && domain.len() <= 253
@@ -135,7 +135,7 @@ fn dns_step_macos(domain: &str, address: &str) -> Step {
         commands: vec![
             "brew list dnsmasq >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install dnsmasq"
                 .to_string(),
-            format!("sed -i.ws-bak '/^address=\\/{pattern}\\//d' {conf}"),
+            format!("sed -i.wsx-bak '/^address=\\/{pattern}\\//d' {conf}"),
             format!("echo 'address=/{domain}/{address}' >> {conf}"),
             "sudo brew services restart dnsmasq".to_string(),
             "sudo mkdir -p /etc/resolver".to_string(),
@@ -198,7 +198,7 @@ pub fn run(
 
     let Some(domain) = domain else {
         crate::ui::summary_ok(&["No `domain` set — routing isn't configured, so there are no \
-                                 privileged bits to set up. Add `domain` to .ws.json to route \
+                                 privileged bits to set up. Add `domain` to .wsx.json to route \
                                  worktrees.".to_string()]);
         return Ok(());
     };
@@ -211,7 +211,7 @@ pub fn run(
     if !valid_address(address) {
         return Err(crate::ops::op_failure(format!(
             "refusing to build setup commands for `{address}` — the routing address must be \
-             a literal IP. Set `remote.publish_address` in .ws.json to the server's address."
+             a literal IP. Set `remote.publish_address` in .wsx.json to the server's address."
         )));
     }
 
@@ -603,10 +603,10 @@ mod tests {
         // dnsmasq answers with every matching `address=` line — a stale loopback would win half the time.
         let step = dns_step_macos("myapp.test", "100.64.1.2");
         let joined = step.commands.join("\n");
-        assert!(joined.contains("sed -i.ws-bak"), "must delete before appending: {joined}");
+        assert!(joined.contains("sed -i.wsx-bak"), "must delete before appending: {joined}");
         // Anchored and dot-escaped so `myapp.test` can't match `myappXtest`.
         assert!(joined.contains(r"/^address=\/myapp\.test\//d"), "{joined}");
-        let del = joined.find("sed -i.ws-bak").unwrap();
+        let del = joined.find("sed -i.wsx-bak").unwrap();
         let add = joined.find("echo 'address=/myapp.test/100.64.1.2'").unwrap();
         assert!(del < add, "the delete must precede the append: {joined}");
     }
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn dns_step_is_not_offered_for_values_that_cant_be_shell_safe() {
-        // The flip must not let a hand-edited `.ws.json` smuggle anything into a consented `sudo` line.
+        // The flip must not let a hand-edited `.wsx.json` smuggle anything into a consented `sudo` line.
         assert!(!offer_dns_step("myapp.test; rm -rf /", "127.0.0.1", true).unwrap());
         assert!(!offer_dns_step("myapp.test", "the server `srv`", true).unwrap());
     }

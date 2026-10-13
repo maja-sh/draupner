@@ -11,29 +11,29 @@ fn init_local_writes_config_and_hook_templates() {
     let out = ws.run_ok(&["init"]);
     let err = stderr(&out);
     assert!(err.contains("ws-init"));
-    assert!(err.contains(".ws.json"));
-    assert!(err.contains(".ws.schema.json"));
+    assert!(err.contains(".wsx.json"));
+    assert!(err.contains(".wsx.schema.json"));
     // The success nudge must point at the current op name, not the renamed one.
     assert!(err.contains("wsx claude"), "success nudge should mention `wsx claude`, got: {err}");
     assert!(!err.contains("ws register"), "success nudge must not mention the old `ws register` name");
 
-    assert!(ws.path().join(".ws.json").is_file());
-    assert!(ws.path().join(".ws.schema.json").is_file());
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    assert!(ws.path().join(".wsx.json").is_file());
+    assert!(ws.path().join(".wsx.schema.json").is_file());
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"api\""));
     assert!(cfg.contains("\"app\""));
     assert!(cfg.contains("$schema"));
 
     // Starter scripts, one per repo per lifecycle event, named so a `scripts`
     // entry can point at them. Each body says which entry turns it on — `wsx`
-    // runs only what `.ws.json` declares.
+    // runs only what `.wsx.json` declares.
     for repo in ["api", "app"] {
         for event in ["prepare", "post-create", "up", "down", "post-remove", "status"] {
-            let p = ws.path().join(".ws-hooks").join(format!("{repo}-{event}.sh"));
+            let p = ws.path().join(".wsx-hooks").join(format!("{repo}-{event}.sh"));
             assert!(p.is_file(), "expected hook template {p:?}");
             let body = std::fs::read_to_string(&p).unwrap();
             assert!(
-                body.contains(&format!("\"{event}\": \".ws-hooks/{repo}-{event}.sh\"")),
+                body.contains(&format!("\"{event}\": \".wsx-hooks/{repo}-{event}.sh\"")),
                 "template should name the `scripts` entry that enables it: {body}"
             );
             assert!(!body.contains("$1"), "the removed $1 contract must not be taught: {body}");
@@ -48,18 +48,18 @@ fn init_remote_writes_the_remote_block() {
     // Make the client-readiness check pass: mutagen "installed" and host reachable.
     let ok = ws.stub("ok", "exit 0");
 
-    // Bare `--remote` falls back to $WS_REMOTE_HOST; workspace_path defaults to the workspace dir name.
+    // Bare `--remote` falls back to $WSX_REMOTE_HOST; workspace_path defaults to the workspace dir name.
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[
-            ("WS_REMOTE_HOST", "srv"),
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", ok.to_str().unwrap()),
+            ("WSX_REMOTE_HOST", "srv"),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", ok.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "wsx init --remote failed:\n{}", stderr(&out));
 
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"remote\""), "expected a remote block:\n{cfg}");
     assert!(cfg.contains("srv"), "expected the connection:\n{cfg}");
     assert!(cfg.contains("\"connection\""));
@@ -76,12 +76,12 @@ fn init_remote_refuses_an_unreachable_host_by_default() {
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv"],
-        &[("WS_MUTAGEN", ok.to_str().unwrap()), ("WS_SSH", bad.to_str().unwrap())],
+        &[("WSX_MUTAGEN", ok.to_str().unwrap()), ("WSX_SSH", bad.to_str().unwrap())],
     );
     assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
     assert!(stderr(&out).contains("reach"), "clear message:\n{}", stderr(&out));
     // Strict refusal leaves nothing behind.
-    assert!(!ws.path().join(".ws.json").exists(), "no config written on refusal");
+    assert!(!ws.path().join(".wsx.json").exists(), "no config written on refusal");
 }
 
 #[test]
@@ -93,11 +93,11 @@ fn init_remote_refuses_when_mutagen_missing() {
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv"],
-        &[("WS_SSH", ok.to_str().unwrap()), ("WS_MUTAGEN", bad.to_str().unwrap())],
+        &[("WSX_SSH", ok.to_str().unwrap()), ("WSX_MUTAGEN", bad.to_str().unwrap())],
     );
     assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
     assert!(stderr(&out).contains("mutagen"), "clear message:\n{}", stderr(&out));
-    assert!(!ws.path().join(".ws.json").exists());
+    assert!(!ws.path().join(".wsx.json").exists());
 }
 
 #[test]
@@ -108,10 +108,10 @@ fn init_remote_no_verify_skips_the_checks() {
 
     let out = ws.run_with_env(
         &["init", "--remote", "srv", "--no-verify"],
-        &[("WS_SSH", bad.to_str().unwrap()), ("WS_MUTAGEN", bad.to_str().unwrap())],
+        &[("WSX_SSH", bad.to_str().unwrap()), ("WSX_MUTAGEN", bad.to_str().unwrap())],
     );
     assert!(out.status.success(), "--no-verify should skip the checks:\n{}", stderr(&out));
-    assert!(ws.path().join(".ws.json").exists(), "config written with --no-verify");
+    assert!(ws.path().join(".wsx.json").exists(), "config written with --no-verify");
 }
 
 #[test]
@@ -119,17 +119,17 @@ fn init_without_remote_writes_no_remote_block() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     ws.run_ok(&["init"]);
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(!cfg.contains("\"remote\""), "no remote block expected without --remote:\n{cfg}");
 }
 
-/// A detected runtime is this machine's answer, not the workspace's, so it stays out of `.ws.json`.
+/// A detected runtime is this machine's answer, not the workspace's, so it stays out of `.wsx.json`.
 #[test]
 fn init_leaves_a_detected_runtime_out_of_the_config() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     let err = stderr(&ws.run_ok(&["init"]));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(!cfg.contains("\"runtime\""), "a detected runtime must not be pinned:\n{cfg}");
     assert!(err.contains("runtime →"), "the detected runtime should be reported:\n{err}");
     assert!(err.contains("detected"), "the summary should say it was detected:\n{err}");
@@ -141,30 +141,30 @@ fn init_pins_an_explicit_runtime() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     let err = stderr(&ws.run_ok(&["init", "--runtime", "podman"]));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"runtime\": \"podman\""), "--runtime must be pinned:\n{cfg}");
     assert!(err.contains("pinned"), "the summary should say it was pinned:\n{err}");
 }
 
-/// Only the runtimes `wsx` can drive are accepted — a typo used to reach `.ws.json` and only surface as a failed spawn much later.
+/// Only the runtimes `wsx` can drive are accepted — a typo used to reach `.wsx.json` and only surface as a failed spawn much later.
 #[test]
 fn init_rejects_an_unknown_runtime() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     let out = ws.run(&["init", "--runtime", "dokcer"]);
     assert_ne!(out.status.code(), Some(0), "an unknown runtime must be refused");
-    assert!(!ws.path().join(".ws.json").exists(), "nothing should be written on a refusal");
+    assert!(!ws.path().join(".wsx.json").exists(), "nothing should be written on a refusal");
 }
 
 #[test]
 fn init_refuses_when_ws_json_exists() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
-    std::fs::write(ws.path().join(".ws.json"), "{}").unwrap();
+    std::fs::write(ws.path().join(".wsx.json"), "{}").unwrap();
 
     let out = ws.run(&["init"]);
-    assert!(!out.status.success(), "expected failure when .ws.json exists");
-    assert!(stderr(&out).contains(".ws.json"));
+    assert!(!out.status.success(), "expected failure when .wsx.json exists");
+    assert!(stderr(&out).contains(".wsx.json"));
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn init_skips_dotfile_directories() {
         .unwrap();
 
     ws.run_ok(&["init"]);
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("keeper"));
     assert!(!cfg.contains(".hidden"));
 }
@@ -192,26 +192,26 @@ fn refresh_schema_only_rewrites_schema_file() {
     ws.add_repo("api");
     ws.run_ok(&["init"]);
 
-    let cfg_before = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
-    std::fs::write(ws.path().join(".ws.schema.json"), "STALE").unwrap();
+    let cfg_before = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
+    std::fs::write(ws.path().join(".wsx.schema.json"), "STALE").unwrap();
 
     ws.run_ok(&["init", "--refresh-schema"]);
 
-    let schema = std::fs::read_to_string(ws.path().join(".ws.schema.json")).unwrap();
+    let schema = std::fs::read_to_string(ws.path().join(".wsx.schema.json")).unwrap();
     assert_ne!(schema, "STALE");
     assert!(schema.contains("$schema"));
-    let cfg_after = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
-    assert_eq!(cfg_before, cfg_after, ".ws.json should be untouched by --refresh-schema");
+    let cfg_after = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
+    assert_eq!(cfg_before, cfg_after, ".wsx.json should be untouched by --refresh-schema");
 }
 
 #[test]
 fn refresh_schema_refuses_outside_workspace() {
     let ws = WorkspaceFixture::empty();
-    // No `.ws.json` present — refresh-schema shouldn't scatter an orphan schema.
+    // No `.wsx.json` present — refresh-schema shouldn't scatter an orphan schema.
     let out = ws.run(&["init", "--refresh-schema"]);
     assert!(!out.status.success(), "expected failure outside a workspace");
-    assert!(stderr(&out).contains(".ws.json"));
-    assert!(!ws.path().join(".ws.schema.json").exists(), "should not create orphan schema file");
+    assert!(stderr(&out).contains(".wsx.json"));
+    assert!(!ws.path().join(".wsx.schema.json").exists(), "should not create orphan schema file");
 }
 
 #[test]
@@ -220,16 +220,16 @@ fn refresh_schema_works_from_a_subdirectory() {
     let ws = WorkspaceFixture::empty();
     ws.add_repo("api");
     ws.run_ok(&["init"]);
-    std::fs::write(ws.path().join(".ws.schema.json"), "STALE").unwrap();
+    std::fs::write(ws.path().join(".wsx.schema.json"), "STALE").unwrap();
 
     let out = ws.run_in("api", &["init", "--refresh-schema"]);
     assert!(out.status.success(), "should locate the workspace from a subdir:\n{}", stderr(&out));
 
-    let schema = std::fs::read_to_string(ws.path().join(".ws.schema.json")).unwrap();
+    let schema = std::fs::read_to_string(ws.path().join(".wsx.schema.json")).unwrap();
     assert_ne!(schema, "STALE", "the schema at the workspace root should be refreshed");
     // And not scattered where the command happened to be run.
     assert!(
-        !ws.path().join("api/.ws.schema.json").exists(),
+        !ws.path().join("api/.wsx.schema.json").exists(),
         "the schema belongs at the workspace root, not the cwd"
     );
 }
@@ -244,7 +244,7 @@ fn init_refuses_inside_an_enclosing_workspace() {
     assert_eq!(out.status.code(), Some(2), "expected preflight exit 2");
     let err = stderr(&out);
     assert!(err.contains("already inside the workspace"), "expected nesting refusal in:\n{err}");
-    assert!(!sub.join(".ws.json").exists(), "must not write a nested .ws.json");
+    assert!(!sub.join(".wsx.json").exists(), "must not write a nested .wsx.json");
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn init_skips_symlinked_directories() {
     std::os::unix::fs::symlink(&real, ws.path().join("linked")).unwrap();
 
     ws.run_ok(&["init"]);
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"real\""));
     assert!(!cfg.contains("\"linked\""), "symlinked entries must be skipped");
 }

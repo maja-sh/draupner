@@ -24,9 +24,9 @@ A workspace pins to one remote today (or none). Once several developers share
 an offload server, one machine fills up while the others sit idle. The intended
 shape:
 
-- `.ws.json` declares a named list of remotes and marks one default.
+- `.wsx.json` declares a named list of remotes and marks one default.
 - `wsx up` uses the default; `wsx up --remote=<name>` picks a specific one.
-- `.ws-meta/` records the landing remote per task, so every subsequent
+- `.wsx-meta/` records the landing remote per task, so every subsequent
   `wsx exec` / `wsx down` / `wsx here` routes to the right server without guessing.
 - `wsx remotes` (name TBD) lists what's configured so a human can choose
   informed.

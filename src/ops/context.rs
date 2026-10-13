@@ -242,7 +242,7 @@ mod tests {
     use super::*;
 
     fn scaffold(root: &Path, ws_json: &str) {
-        std::fs::write(root.join(".ws.json"), ws_json).expect("write .ws.json");
+        std::fs::write(root.join(".wsx.json"), ws_json).expect("write .wsx.json");
     }
 
     fn repo(name: &str, is_running: Option<bool>) -> show::RepoInfo {

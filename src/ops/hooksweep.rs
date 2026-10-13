@@ -107,7 +107,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // `up` allocates; `down` only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
-    // Best-effort: a sweep of only raw-TCP repos needs neither Caddy nor `ws-net`, so a broken infra shouldn't block it; failure surfaces later where routing is load-bearing (HTTP container's own `compose up`, or the demote below).
+    // Best-effort: a sweep of only raw-TCP repos needs neither Caddy nor `wsx-net`, so a broken infra shouldn't block it; failure surfaces later where routing is load-bearing (HTTP container's own `compose up`, or the demote below).
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
             // `ensure_routing` probes DNS; reuse its verdict for the auto-offer below rather than resolving twice.
@@ -117,7 +117,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             if site.is_remote() && configured.is_none() {
                 crate::ui::note(
                     "server Caddy binds every interface — worktree HTTP is exposed on all of \
-                     the server's networks; pin one with `remote.publish_address` in .ws.json",
+                     the server's networks; pin one with `remote.publish_address` in .wsx.json",
                 );
             }
             let dns = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
@@ -391,7 +391,7 @@ fn sweep_host(
         let step = crate::ui::step(repo, "stop");
         result.record(repo, step, crate::supervise::down(site, &name));
         if cfg.routing_active() {
-            // Best-effort (unlike a container): a host service keeps its real `WS_PORT`, so a route sync failure doesn't strand it.
+            // Best-effort (unlike a container): a host service keeps its real `WSX_PORT`, so a route sync failure doesn't strand it.
             let _ = sync_routes(cfg, site, root, sanitized, repo, "down");
         }
         sync_forwards(cfg, root, branch, sanitized, repo, "down");
@@ -413,12 +413,12 @@ fn sweep_host(
         }
     };
 
-    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `WS_WORKSPACE_ROOT` is what a `.ws-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
+    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `WSX_WORKSPACE_ROOT` is what a `.wsx-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
     let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
             let base = site.abs_base(&r.worktree_base(root));
-            // Ship `.ws-hooks/` so a host `up` referencing `$WS_WORKSPACE_ROOT/.ws-hooks/…` resolves on the server.
+            // Ship `.wsx-hooks/` so a host `up` referencing `$WSX_WORKSPACE_ROOT/.wsx-hooks/…` resolves on the server.
             if event == "up" {
                 if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
                     crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
@@ -431,7 +431,7 @@ fn sweep_host(
         None => (wt.to_string_lossy().into_owned(), root.to_string_lossy().into_owned()),
     };
 
-    // The detached path bypasses the `Command`-based hook runner, so apply the base `WS_*` contract here — otherwise `$WS_BRANCH_SANITIZED` & friends come out empty. Third time this path has been caught missing what `remote::run_event` already does; they are overdue for a shared owner.
+    // The detached path bypasses the `Command`-based hook runner, so apply the base `WSX_*` contract here — otherwise `$WSX_BRANCH_SANITIZED` & friends come out empty. Third time this path has been caught missing what `remote::run_event` already does; they are overdue for a shared owner.
     let mut proc_env =
         crate::hooks::base_env(std::path::Path::new(&site_root), &worktree, repo, sanitized, event);
     proc_env.extend(extra_env.iter().cloned());
@@ -441,7 +441,7 @@ fn sweep_host(
             // A host service has no hostname to show — the bound port is the only user-visible handle. Sorted for stable output.
             let mut ports: Vec<String> = extra_env
                 .iter()
-                .filter_map(|(k, v)| k.strip_prefix("WS_PORT_").map(|svc| format!("{svc}:{v}")))
+                .filter_map(|(k, v)| k.strip_prefix("WSX_PORT_").map(|svc| format!("{svc}:{v}")))
                 .collect();
             ports.sort();
             let step = crate::ui::step(repo, label);
@@ -449,7 +449,7 @@ fn sweep_host(
             // Post-condition: `supervise::up` proves a process launched and survived half a second, not that it's serving the allocated port. Missed cases (server that bound a different port after finding this one busy, orphan still holding it) surfaced later as opaque failures.
             let allocated: Vec<u16> = extra_env
                 .iter()
-                .filter(|(k, _)| k.starts_with("WS_PORT_"))
+                .filter(|(k, _)| k.starts_with("WSX_PORT_"))
                 .filter_map(|(_, v)| v.parse().ok())
                 .collect();
             let health = crate::supervise::health_settled(site, &name, &allocated, BIND_GRACE);
@@ -459,7 +459,7 @@ fn sweep_host(
             match &health {
                 // Died after launch = failed `up`, not a green line with caveats.
                 Some(crate::supervise::Health::Crashed) => {
-                    step.fail(&format!("exited after launch — see ~/.ws-run/{name}.log"));
+                    step.fail(&format!("exited after launch — see ~/.wsx-run/{name}.log"));
                 }
                 // Alive but nothing on the port yet is genuinely ambiguous — `cargo watch` compiles before it listens — so qualify rather than fail.
                 Some(crate::supervise::Health::Silent(_)) => {
@@ -467,7 +467,7 @@ fn sweep_host(
                     crate::ui::note(&format!(
                         "{repo}: nothing is listening on the port wsx allocated yet. If it's still \
                          starting this resolves itself — `wsx list` will say. Otherwise check \
-                         `~/.ws-run/{name}.log`."
+                         `~/.wsx-run/{name}.log`."
                     ));
                 }
                 // A stranger on the port is unambiguous: whatever just started can't have it.
@@ -495,7 +495,7 @@ fn sweep_host(
             }
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
-                // Best-effort (see the `down` arm): a host service keeps its bound `WS_PORT`.
+                // Best-effort (see the `down` arm): a host service keeps its bound `WSX_PORT`.
                 let _ = sync_routes(cfg, site, root, sanitized, repo, "up");
             }
             // A squatted port belongs to some other process; forwarding `localhost:<port>` there would silently tunnel client traffic to the squatter.

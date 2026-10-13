@@ -26,7 +26,7 @@ pub fn run(
         let root = crate::workspace::locate()
             .map(|ws| ws.root)
             .map_err(|_| super::preflight(format!(
-                "no `.ws.json` in {} or any parent — `wsx init --refresh-schema` \
+                "no `.wsx.json` in {} or any parent — `wsx init --refresh-schema` \
                  only runs inside an initialized workspace.",
                 cwd.display()
             )))?;
@@ -37,7 +37,7 @@ pub fn run(
     init_local(&cwd, remote_cfg, domain, runtime, no_verify)
 }
 
-/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, falling back to `$WS_REMOTE_HOST` then the stored global default; `None` when `--remote` wasn't given.
+/// Turn the `--remote[=host]` / `--remote-path` flags into a `RemoteConfig`, falling back to `$WSX_REMOTE_HOST` then the stored global default; `None` when `--remote` wasn't given.
 fn build_remote(
     root: &Path,
     remote: Option<Option<String>>,
@@ -48,7 +48,7 @@ fn build_remote(
         .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`wsx init --remote` needs a host: pass `--remote <host>`, set $WS_REMOTE_HOST, \
+                "`wsx init --remote` needs a host: pass `--remote <host>`, set $WSX_REMOTE_HOST, \
                  or `wsx config set remote.host <host>`",
             )
         })?;
@@ -70,7 +70,7 @@ fn init_local(
 ) -> Result<()> {
     crate::ui::header("ws-init", &format!("in {}", root.display()));
 
-    // Only an explicit `--runtime` is persisted; a detected one stays out of `.ws.json` so the workspace re-detects wherever it's opened.
+    // Only an explicit `--runtime` is persisted; a detected one stays out of `.wsx.json` so the workspace re-detects wherever it's opened.
     let effective =
         runtime.clone().unwrap_or_else(|| crate::config::detect_runtime().unwrap_or("podman").to_string());
 
@@ -89,10 +89,10 @@ fn init_local(
         )));
     }
 
-    if root.join(".ws.json").exists() {
+    if root.join(".wsx.json").exists() {
         bail!(
             "{} already exists. Remove it (or use `--refresh-schema` to regenerate the JSON Schema).",
-            root.join(".ws.json").display()
+            root.join(".wsx.json").display()
         );
     }
 
@@ -105,45 +105,45 @@ fn init_local(
 
     let remote_note = remote.as_ref().map(|r| r.connection.clone());
     let pinned = runtime.is_some();
-    let step_config = crate::ui::step("cfg", ".ws.json");
+    let step_config = crate::ui::step("cfg", ".wsx.json");
     let cfg = WsConfig {
-        schema: Some("./.ws.schema.json".to_string()),
+        schema: Some("./.wsx.schema.json".to_string()),
         domain,
         runtime,
         remote,
         repos: repos.iter().map(|r| scaffold_repo(root, r, &effective)).collect(),
     };
-    let cfg_path = root.join(".ws.json");
+    let cfg_path = root.join(".wsx.json");
     crate::config::write_json_pretty(&cfg_path, &cfg)?;
     step_config.ok();
 
-    let step_schema = crate::ui::step("cfg", ".ws.schema.json");
+    let step_schema = crate::ui::step("cfg", ".wsx.schema.json");
     let schema = schemars::schema_for!(WsConfig);
-    crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
+    crate::config::write_json_pretty(&root.join(".wsx.schema.json"), &schema)?;
     step_schema.ok();
 
-    let step_hooks = crate::ui::step("hks", ".ws-hooks/ templates");
-    write_hook_templates(&root.join(".ws-hooks"), &repos)?;
+    let step_hooks = crate::ui::step("hks", ".wsx-hooks/ templates");
+    write_hook_templates(&root.join(".wsx-hooks"), &repos)?;
     step_hooks.ok();
 
     let mut summary = Vec::new();
-    summary.push(format!(".ws.json  ({} repos: {})", repos.len(), repos.join(", ")));
+    summary.push(format!(".wsx.json  ({} repos: {})", repos.len(), repos.join(", ")));
     if let Some(conn) = &remote_note {
         summary.push(format!("remote  → {conn}"));
     }
-    // A detected runtime isn't written to `.ws.json`, so surface it here or it'd be invisible until something used it.
+    // A detected runtime isn't written to `.wsx.json`, so surface it here or it'd be invisible until something used it.
     summary.push(if pinned {
-        format!("runtime → {effective} (pinned in .ws.json)")
+        format!("runtime → {effective} (pinned in .wsx.json)")
     } else {
-        format!("runtime → {effective} (detected — add `runtime` to .ws.json to pin it)")
+        format!("runtime → {effective} (detected — add `runtime` to .wsx.json to pin it)")
     });
-    summary.push(".ws.schema.json".to_string());
-    summary.push(".ws-hooks/".to_string());
+    summary.push(".wsx.schema.json".to_string());
+    summary.push(".wsx-hooks/".to_string());
     crate::ui::summary_ok(&summary);
     if remote_note.is_some() {
         crate::ui::nudge("run `wsx remote check` once the server's set up for full validation");
     } else {
-        crate::ui::nudge("edit .ws.json / .ws-hooks/, then `wsx claude`");
+        crate::ui::nudge("edit .wsx.json / .wsx-hooks/, then `wsx claude`");
     }
     Ok(())
 }
@@ -151,23 +151,23 @@ fn init_local(
 fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("ws-init", "--refresh-schema");
 
-    let step = crate::ui::step("cfg", ".ws.schema.json");
+    let step = crate::ui::step("cfg", ".wsx.schema.json");
     let schema = schemars::schema_for!(WsConfig);
-    crate::config::write_json_pretty(&root.join(".ws.schema.json"), &schema)?;
+    crate::config::write_json_pretty(&root.join(".wsx.schema.json"), &schema)?;
     step.ok();
-    crate::ui::summary_ok(&[format!("{} refreshed", root.join(".ws.schema.json").display())]);
+    crate::ui::summary_ok(&[format!("{} refreshed", root.join(".wsx.schema.json").display())]);
     Ok(())
 }
 
-/// Nearest ancestor of `root` holding `.ws.json`, or `None` if not nested inside a workspace.
+/// Nearest ancestor of `root` holding `.wsx.json`, or `None` if not nested inside a workspace.
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     root.ancestors()
         .skip(1)
-        .find(|dir| dir.join(".ws.json").is_file())
+        .find(|dir| dir.join(".wsx.json").is_file())
         .map(Path::to_path_buf)
 }
 
-/// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.ws.json`; `wsx up` re-derives live regardless.
+/// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.wsx.json`; `wsx up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
     // No server exists yet — the workspace is being created — so derivation runs on the local site.
@@ -190,7 +190,7 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     // Shared walk skips symlinks/non-dirs and swallows per-entry errors; only the dotfile skip and `is_git_repo` filter are init-specific.
     for (name, path) in crate::workspace::list_child_dirs(root) {
         let Some(name) = name else {
-            // Non-UTF-8 dir names would round-trip lossily through `.ws.json` and break later worktree lookups.
+            // Non-UTF-8 dir names would round-trip lossily through `.wsx.json` and break later worktree lookups.
             crate::ui::note(&format!(
                 "skipping non-UTF-8 directory name: {}",
                 path.display()
@@ -208,9 +208,9 @@ fn detect_repos(root: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Scaffold a starter shell script per repo per event under `.ws-hooks/`, as
+/// Scaffold a starter shell script per repo per event under `.wsx-hooks/`, as
 /// `<repo>-<event>.sh`. They're inert until a repo's `scripts` block names one —
-/// `wsx` runs only what `.ws.json` declares — so the template body says how.
+/// `wsx` runs only what `.wsx.json` declares — so the template body says how.
 /// Written executable, because a `scripts` entry invokes the file directly.
 fn write_hook_templates(dir: &Path, repos: &[String]) -> Result<()> {
     fs::create_dir_all(dir)?;
@@ -234,12 +234,12 @@ fn hook_template(repo: &str, event: &str) -> String {
     let name = hook_template_name(repo, event);
     format!(
         "#!/usr/bin/env bash\n\
-         # {repo}'s {event} script. Runs from the worktree; its path is $WS_WORKTREE.\n\
-         # Enable it by adding to {repo}'s `scripts` in .ws.json:\n\
-         #   \"{event}\": \".ws-hooks/{name}\"\n\
+         # {repo}'s {event} script. Runs from the worktree; its path is $WSX_WORKTREE.\n\
+         # Enable it by adding to {repo}'s `scripts` in .wsx.json:\n\
+         #   \"{event}\": \".wsx-hooks/{name}\"\n\
          set -euo pipefail\n\
          \n\
-         echo \"{repo}-{event}: worktree=$WS_WORKTREE\"\n"
+         echo \"{repo}-{event}: worktree=$WSX_WORKTREE\"\n"
     )
 }
 

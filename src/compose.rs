@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::caddy::WS_NET;
+use crate::caddy::WSX_NET;
 use crate::config::{HttpDecl, ServiceConfig};
 use crate::remote::{self, Site};
 
@@ -87,7 +87,7 @@ struct ServicePlan {
     reissue: Vec<(u16, u16)>,
 }
 
-/// When `join_ws_net` is true (6.2b routing flip) HTTP services join `ws-net` and drop their host publish so they're reachable only through Caddy; false (no `domain`/remote) is the standalone form where HTTP services keep their publish since nothing else would route them.
+/// When `join_ws_net` is true (6.2b routing flip) HTTP services join `wsx-net` and drop their host publish so they're reachable only through Caddy; false (no `domain`/remote) is the standalone form where HTTP services keep their publish since nothing else would route them.
 fn render_override(
     services: &BTreeMap<String, ServiceConfig>,
     all_services: &std::collections::BTreeSet<String>,
@@ -149,7 +149,7 @@ fn render_override(
             None => {}
         }
         if join.contains(name) {
-            out.push_str(&format!("    networks:\n      - default\n      - {WS_NET}\n"));
+            out.push_str(&format!("    networks:\n      - default\n      - {WSX_NET}\n"));
         }
         if !env.is_empty() {
             out.push_str("    environment:\n");
@@ -163,7 +163,7 @@ fn render_override(
         }
     }
     if !join.is_empty() {
-        out.push_str(&format!("networks:\n  {WS_NET}:\n    external: true\n"));
+        out.push_str(&format!("networks:\n  {WSX_NET}:\n    external: true\n"));
     }
     Some(out)
 }
@@ -178,7 +178,7 @@ fn compose_escape(v: &str) -> String {
     v.replace('$', "$$")
 }
 
-/// Both key sinks (declared env names, compose service names) are `.ws.json`-controlled, and a raw newline in one closes `environment:` and dedents back to service level — enough to inject `privileged: true`/`/:/host` into the generated override.
+/// Both key sinks (declared env names, compose service names) are `.wsx.json`-controlled, and a raw newline in one closes `environment:` and dedents back to service level — enough to inject `privileged: true`/`/:/host` into the generated override.
 fn yaml_key(k: &str) -> String {
     let mut chars = k.chars();
     let plain = chars.next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -254,7 +254,7 @@ fn compose_config_json(site: &Site, runtime: &str, worktree: &str, clean_env: bo
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `runtime` comes from a checked-in `.ws.json`, so a hostile value must be shell-quoted here to match the local `Command::new(runtime)` no-shell contract.
+/// `runtime` comes from a checked-in `.wsx.json`, so a hostile value must be shell-quoted here to match the local `Command::new(runtime)` no-shell contract.
 fn remote_compose_script(worktree: &str, runtime: &str) -> String {
     format!(
         "cd {} && {} compose config --format json",
@@ -298,7 +298,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
         .filter(|p| p.protocol.as_deref().unwrap_or("tcp") == "tcp")
         .map(|p| p.target)
         .collect();
-    // HTTP is deliberately narrow (80/443 only) — widen via `.ws.json`, not here; mis-classifying raw TCP as HTTP would have Caddy try to HTTP-proxy a non-HTTP protocol.
+    // HTTP is deliberately narrow (80/443 only) — widen via `.wsx.json`, not here; mis-classifying raw TCP as HTTP would have Caddy try to HTTP-proxy a non-HTTP protocol.
     let (http, tcp): (Vec<u16>, Vec<u16>) =
         ports.into_iter().partition(|p| *p == 80 || *p == 443);
 
@@ -309,7 +309,7 @@ fn derive_service(name: &str, svc: &ComposeService, out: &mut BTreeMap<String, S
             ServiceConfig { http: Some(HttpDecl::Subdomain(name.to_string())), port: dial, shared: false, wildcard: false },
         );
     }
-    // Suffix with the port whenever the service yields more than one entry, so keys (and `WS_PORT_*` names) stay distinct.
+    // Suffix with the port whenever the service yields more than one entry, so keys (and `WSX_PORT_*` names) stay distinct.
     let single = http.is_empty() && tcp.len() == 1;
     for p in tcp {
         let key = if single { name.to_string() } else { format!("{name}_{p}") };
@@ -541,16 +541,16 @@ mod tests {
     fn override_escapes_dollars_so_compose_wont_interpolate_an_unresolved_token() {
         // An unresolved cross-repo token written raw would trigger compose's own interpolation and abort `up`.
         let services = map(&[("web", svc(Some(HttpDecl::Subdomain("web".into())), 80))]);
-        let env = [("SSO".to_string(), "host:${WS_PORT_app.web}/login".to_string())];
+        let env = [("SSO".to_string(), "host:${WSX_PORT_app.web}/login".to_string())];
         let out = render_override(&services, &names(&services), &BTreeMap::new(), &env, false)
             .expect("some override");
-        assert!(out.contains(r#"SSO: "host:$${WS_PORT_app.web}/login""#), "{out}");
-        assert!(!out.contains(r#"SSO: "host:${WS_PORT_app.web}"#), "raw token must not survive: {out}");
+        assert!(out.contains(r#"SSO: "host:$${WSX_PORT_app.web}/login""#), "{out}");
+        assert!(!out.contains(r#"SSO: "host:${WSX_PORT_app.web}"#), "raw token must not survive: {out}");
     }
 
     #[test]
     fn override_quotes_a_hostile_env_key_so_it_cant_inject_service_directives() {
-        // `.ws.json` arrives with a cloned repo, and a JSON key can carry
+        // `.wsx.json` arrives with a cloned repo, and a JSON key can carry
         // newlines. Unquoted, this key closes the `environment:` map and dedents
         // back to service level, handing every service in the stack
         // `privileged: true` plus the host root — none of which the repo's
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn override_quotes_a_hostile_service_name() {
-        // Same shape one level up: a `.ws.json` `services` key becomes a compose
+        // Same shape one level up: a `.wsx.json` `services` key becomes a compose
         // service name and is emitted as a YAML key too, so a newline in it would
         // inject a whole extra service block.
         let hostile = "web:\n    privileged: true\n  evil";
@@ -640,16 +640,16 @@ mod tests {
         let ports = [("db".to_string(), 20001u16)].into_iter().collect();
 
         let off = render_override(&services, &names(&services), &ports, &[], false).unwrap();
-        assert!(!off.contains("ws-net"), "join off must not touch ws-net:\n{off}");
+        assert!(!off.contains("wsx-net"), "join off must not touch wsx-net:\n{off}");
         assert!(!off.contains("web:"), "HTTP web untouched when routing off:\n{off}");
 
         let on = render_override(&services, &names(&services), &ports, &[], true).unwrap();
         assert!(
-            on.contains("  web:\n    ports: !reset []\n    networks:\n      - default\n      - ws-net\n"),
-            "web must reset its publish and join ws-net:\n{on}"
+            on.contains("  web:\n    ports: !reset []\n    networks:\n      - default\n      - wsx-net\n"),
+            "web must reset its publish and join wsx-net:\n{on}"
         );
         assert!(on.contains("  db:\n    ports: !override\n"), "db still reissued:\n{on}");
-        assert!(on.contains("networks:\n  ws-net:\n    external: true\n"), "external net decl:\n{on}");
+        assert!(on.contains("networks:\n  wsx-net:\n    external: true\n"), "external net decl:\n{on}");
     }
 
     #[test]
@@ -665,7 +665,7 @@ mod tests {
         let on = render_override(&services, &names(&services), &ports, &[], true).unwrap();
         assert!(
             on.contains("  web:\n    ports: !override\n      - \"20005:9000\"\n    networks:"),
-            "mixed service keeps only its raw port + joins ws-net:\n{on}"
+            "mixed service keeps only its raw port + joins wsx-net:\n{on}"
         );
         assert!(!on.contains("!reset"), "a mixed service uses !override, not !reset:\n{on}");
     }

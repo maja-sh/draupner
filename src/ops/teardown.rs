@@ -83,7 +83,7 @@ pub fn remove_task(
         }
 
         // Free ports before worktree removal so a `git worktree remove` failure
-        // can't leak the `.ws-meta` reservation.
+        // can't leak the `.wsx-meta` reservation.
         ports::forget(root, &sanitized, repo);
 
         // Terminate the sync before deleting the worktree so mutagen isn't
@@ -117,7 +117,7 @@ pub fn remove_task(
         delete_branch(&main, branch);
     }
 
-    // Cross-repo `${WS_PORT_<peer>.<svc>}` pre-allocates the peer's port, so a
+    // Cross-repo `${WSX_PORT_<peer>.<svc>}` pre-allocates the peer's port, so a
     // peer that never got a worktree still holds a reservation to free here.
     let torn_down: std::collections::HashSet<&str> =
         worktrees.iter().map(|(r, _)| r.as_str()).collect();
@@ -226,7 +226,7 @@ fn teardown_remote(
     }
 }
 
-/// Scope `WS_KEEP_IMAGES` / `WS_KEEP_VOLUMES` to `post-remove` so a user's declared `down` script can't accidentally read them as signals meant for teardown's later prune phase.
+/// Scope `WSX_KEEP_IMAGES` / `WSX_KEEP_VOLUMES` to `post-remove` so a user's declared `down` script can't accidentally read them as signals meant for teardown's later prune phase.
 fn post_remove_env(
     base: &[(String, String)],
     event: &str,
@@ -238,10 +238,10 @@ fn post_remove_env(
     }
     let mut env = base.to_vec();
     if keep_images {
-        env.push(("WS_KEEP_IMAGES".to_string(), "1".to_string()));
+        env.push(("WSX_KEEP_IMAGES".to_string(), "1".to_string()));
     }
     if keep_volumes {
-        env.push(("WS_KEEP_VOLUMES".to_string(), "1".to_string()));
+        env.push(("WSX_KEEP_VOLUMES".to_string(), "1".to_string()));
     }
     env
 }

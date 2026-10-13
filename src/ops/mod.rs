@@ -52,7 +52,7 @@ pub(crate) fn interactive_required(msg: impl Into<String>) -> anyhow::Error {
 
 /// Machine-wide default remote host completing the precedence flag > env > global config; a malformed global config is noted, not fatal, so the caller's "needs a host" error isn't masked.
 pub(crate) fn default_remote_host() -> Option<String> {
-    if let Some(h) = std::env::var("WS_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
+    if let Some(h) = std::env::var("WSX_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
         return Some(h);
     }
     match crate::config::GlobalConfig::load() {
@@ -119,9 +119,9 @@ pub(crate) fn run_remote_event(
 ) -> anyhow::Result<()> {
     // Best-effort: session may not exist yet or mutagen may be absent, and a failed flush shouldn't block dispatch.
     let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-    // Absolute base — a relative one leaves `WS_WORKSPACE_ROOT` relative, so hooks resolving `$WS_WORKSPACE_ROOT/…` land in the wrong place.
+    // Absolute base — a relative one leaves `WSX_WORKSPACE_ROOT` relative, so hooks resolving `$WSX_WORKSPACE_ROOT/…` land in the wrong place.
     let base = site.abs_base(&r.worktree_base(root));
-    // Ship workspace-root `.ws-hooks/` because those scripts live outside the repos and never ride the worktree sync; fatal here so the failure isn't muddied later.
+    // Ship workspace-root `.wsx-hooks/` because those scripts live outside the repos and never ride the worktree sync; fatal here so the failure isn't muddied later.
     if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
         return Err(op_failure(format!("{event} on {}: {e}", r.connection)));
     }
@@ -145,7 +145,7 @@ pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Best-effort `ws-net` creation when routing is on — a failure notes rather
+/// Best-effort `wsx-net` creation when routing is on — a failure notes rather
 /// than fails so a broken infra doesn't block worktree creation for a
 /// stack that doesn't need routing.
 pub(crate) fn ensure_ws_net_if_active(
@@ -154,7 +154,7 @@ pub(crate) fn ensure_ws_net_if_active(
 ) {
     if cfg.routing_active() {
         if let Err(e) = crate::caddy::ensure_net(site, cfg.runtime()) {
-            crate::ui::note(&format!("ws-net: {e}"));
+            crate::ui::note(&format!("wsx-net: {e}"));
         }
     }
 }

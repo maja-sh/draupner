@@ -36,7 +36,7 @@ fn services_are_derived_from_compose_config() {
     // No `services` declared — everything comes from the live derivation.
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
-            "scripts":{"up":"echo HOST=$WS_HOST_web DB=[$WS_PORT_db] MP=[$WS_PORT_mailpit_8025]"}}]}"#,
+            "scripts":{"up":"echo HOST=$WSX_HOST_web DB=[$WSX_PORT_db] MP=[$WSX_PORT_mailpit_8025]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
 
@@ -71,13 +71,13 @@ fn declared_services_override_the_derivation() {
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
             "services":{"mailpit":{"http":"mail","port":8025}},
-            "scripts":{"up":"echo HOST=[$WS_HOST_mailpit] PORT=[$WS_PORT_mailpit]"}}]}"#,
+            "scripts":{"up":"echo HOST=[$WSX_HOST_mailpit] PORT=[$WSX_PORT_mailpit]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
 
     let err = stderr(&f.run_ok(&["up", "feat/foo"]));
     assert!(err.contains("HOST=[feat-foo.mail.myapp.test]"), "override should route as HTTP:\n{err}");
-    assert!(err.contains("PORT=[]"), "overridden HTTP service should not get a WS_PORT:\n{err}");
+    assert!(err.contains("PORT=[]"), "overridden HTTP service should not get a WSX_PORT:\n{err}");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn read_phases_resolve_derived_services_after_up() {
 
     let out = f.run_in(
         ".worktrees/feat-foo/api",
-        &["exec", "api", "--", "sh", "-c", "echo H=$WS_HOST_web DB=[$WS_PORT_db]"],
+        &["exec", "api", "--", "sh", "-c", "echo H=$WSX_HOST_web DB=[$WSX_PORT_db]"],
     );
     assert!(out.status.success(), "exec failed:\n{}", stderr(&out));
     let combined = format!("{}{}", common::stdout(&out), stderr(&out));
@@ -156,7 +156,7 @@ fn init_scaffolds_derived_services() {
     let out = f.run(&["init", "--runtime", "docker"]);
     assert!(out.status.success(), "init failed:\n{}", stderr(&out));
 
-    let ws_json = std::fs::read_to_string(f.path().join(".ws.json")).unwrap();
+    let ws_json = std::fs::read_to_string(f.path().join(".wsx.json")).unwrap();
     assert!(ws_json.contains("\"runtime\": \"docker\""), "runtime should be docker:\n{ws_json}");
     assert!(ws_json.contains("\"services\""), "expected a scaffolded services block:\n{ws_json}");
     assert!(ws_json.contains("\"web\""), "expected the web service:\n{ws_json}");
@@ -196,11 +196,11 @@ fn container_override_deconflicts_raw_tcp_ports() {
     assert!(err_a.contains("PROJ=feat-a-api"), "project name not namespaced:\n{err_a}");
     assert!(err_b.contains("PROJ=feat-b-api"), "project name not namespaced:\n{err_b}");
 
-    // HTTP services drop their host publish (`!reset []`) so they're only reachable via Caddy on `ws-net`.
+    // HTTP services drop their host publish (`!reset []`) so they're only reachable via Caddy on `wsx-net`.
     let ov_a = read_override(&f, "feat-a", "api");
     let ov_b = read_override(&f, "feat-b", "api");
     assert!(ov_a.contains("db:") && ov_a.contains("ports: !override"), "no db override:\n{ov_a}");
-    assert!(ov_a.contains("ws-net"), "HTTP web should join ws-net:\n{ov_a}");
+    assert!(ov_a.contains("wsx-net"), "HTTP web should join wsx-net:\n{ov_a}");
     assert!(ov_a.contains("web:\n    ports: !reset []"), "6.2b must !reset the HTTP publish:\n{ov_a}");
     let a = override_port(&ov_a);
     let b = override_port(&ov_b);
@@ -270,7 +270,7 @@ fn container_override_injects_declared_env() {
 
     f.write_ws_json(
         r#"{"domain":"myapp.test","runtime":"docker","repos":[{"name":"api",
-            "env":{"APP_URL":"https://${WS_HOST_web}"},
+            "env":{"APP_URL":"https://${WSX_HOST_web}"},
             "scripts":{"up":"docker compose config -q && echo OK"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/a"]);
@@ -287,7 +287,7 @@ fn read_override(f: &WorkspaceFixture, branch_sanitized: &str, repo: &str) -> St
     // Build the filename via the same length-prefix scheme `ports::override_file`
     // uses so this stays parity with the production naming.
     let stem = format!("{}_{branch_sanitized}-{}_{repo}", branch_sanitized.len(), repo.len());
-    std::fs::read_to_string(f.path().join(".ws-meta").join(format!("{stem}.override.yml")))
+    std::fs::read_to_string(f.path().join(".wsx-meta").join(format!("{stem}.override.yml")))
         .unwrap_or_else(|e| panic!("read override for {branch_sanitized}/{repo}: {e}"))
 }
 

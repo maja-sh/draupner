@@ -1,8 +1,8 @@
 # Configuring a workspace
 
-`.ws.json` sits at the workspace root and describes your local multi-repo layout.
+`.wsx.json` sits at the workspace root and describes your local multi-repo layout.
 
-**Every field is documented in `.ws.schema.json`**, which is generated from the
+**Every field is documented in `.wsx.schema.json`**, which is generated from the
 code and therefore cannot drift. Point your editor at it (`wsx init` writes a
 `$schema` reference for you) and you get completion, types, and per-field
 descriptions for free. Regenerate it after upgrading `wsx`:
@@ -14,7 +14,7 @@ wsx init --refresh-schema
 This page covers what a schema can't: how the pieces interact, what `wsx` infers
 on your behalf, and which rule wins when two say different things.
 
-`.ws.json` is **per-machine**, not shared project config. It describes where
+`.wsx.json` is **per-machine**, not shared project config. It describes where
 *your* clones live and where *your* stacks run, which is why the offload target
 lives in it directly rather than in a separate overlay.
 
@@ -23,7 +23,7 @@ lives in it directly rather than in a separate overlay.
 ## Container runtime
 
 `wsx` drives **docker** or **podman** — for `compose config` derivation, the
-shared `ws-net` network, and the routing Caddy container.
+shared `wsx-net` network, and the routing Caddy container.
 
 Leave `runtime` out and `wsx` detects one on PATH, **docker first**. That's why
 `wsx init` doesn't write the key: an omitted `runtime` re-detects on whatever
@@ -34,7 +34,7 @@ Pin it when the detected choice is wrong for you — both installed and you want
 podman, or your binary is under another name:
 
 ```sh
-wsx init --runtime podman     # or: add "runtime": "podman" to .ws.json
+wsx init --runtime podman     # or: add "runtime": "podman" to .wsx.json
 ```
 
 With neither installed, the operations that need one (`wsx new` into a routed
@@ -44,7 +44,7 @@ binary.
 ### `runtime` is per *site*, not per machine
 
 For a workspace with a `remote` block, everything that spawns the runtime —
-`compose config`, the `ws-net` network, the Caddy container — spawns it **on the
+`compose config`, the `wsx-net` network, the Caddy container — spawns it **on the
 server**, over SSH. So `runtime` describes wherever this workspace's stacks
 actually run, and the machine you type `wsx` on doesn't come into it.
 
@@ -106,9 +106,9 @@ and that classification decides how parallel worktrees are kept apart:
 
 - **HTTP** services get a *hostname*: `<branch>.<subdomain>.<domain>`, routed by
   a shared Caddy. Many branches share one HTTPS port because the Host header
-  tells them apart. Exposed to your scripts as `WS_HOST_<service>`.
+  tells them apart. Exposed to your scripts as `WSX_HOST_<service>`.
 - **raw TCP** services get an allocated *host port* — there's no host header to
-  route on, so each one needs its own. Exposed as `WS_PORT_<service>`.
+  route on, so each one needs its own. Exposed as `WSX_PORT_<service>`.
 
 Routing only happens when a top-level `domain` is set. Without one, HTTP services
 simply aren't routed and you reach things on ports.
@@ -133,7 +133,7 @@ is absent/`false` (raw TCP). Above, `web` becomes
 
 Set `"wildcard": true` on an HTTP service to also route *every* subdomain of its
 host, for a multi-tenant app addressed as `<tenant>.<branch>.<sub>.<domain>`.
-`WS_HOST_<svc>` stays the base host, so the app builds tenant URLs by prefixing
+`WSX_HOST_<svc>` stays the base host, so the app builds tenant URLs by prefixing
 it.
 
 ### Derivation: you usually don't write this block
@@ -147,7 +147,7 @@ What derivation does:
 - One entry per published port. A service publishing a single port keeps its own
   name; one publishing several is split into `<service>_<port>` keys (so a
   mailpit publishing 1025 and 8025 yields `mailpit_1025` and `mailpit_8025`, and
-  the underscore keeps `WS_PORT_*` shell-clean).
+  the underscore keeps `WSX_PORT_*` shell-clean).
 - **Only ports 80 and 443 are treated as HTTP.** Anything else is raw TCP.
   Conservative on purpose: a wrong guess here silently changes how a service is
   reached. If your app serves HTTP on 8000, declare it.
@@ -171,27 +171,27 @@ by the schema and **currently does nothing** — every service is per-worktree.
 
 ## Getting values into your app
 
-`wsx` owns `WS_HOST_*` and `WS_PORT_*`. You decide which of *your* variables
+`wsx` owns `WSX_HOST_*` and `WSX_PORT_*`. You decide which of *your* variables
 receive them, through three channels — all of them format-blind, none of them
 requiring `wsx` to understand your config file.
 
 ### 1. `env` — the primary channel
 
-Your app's variable name on the left, a `${WS_*}` template on the right:
+Your app's variable name on the left, a `${WSX_*}` template on the right:
 
 ```json
 "env": {
-  "APP_URL": "https://${WS_HOST_web}",
-  "DB_PORT": "${WS_PORT_db}",
-  "DOCKER_COMMAND": "${WS_RUNTIME}"
+  "APP_URL": "https://${WSX_HOST_web}",
+  "DB_PORT": "${WSX_PORT_db}",
+  "DOCKER_COMMAND": "${WSX_RUNTIME}"
 }
 ```
 
 These are set in the environment of every lifecycle script, and for a container
 repo they're written into the generated compose override as well.
 
-Substitution is deliberately **brace-only** (`${WS_FOO}`, never `$WS_FOO`) and
-touches nothing but `WS_`-prefixed names — so an nginx template full of `$host`
+Substitution is deliberately **brace-only** (`${WSX_FOO}`, never `$WSX_FOO`) and
+touches nothing but `WSX_`-prefixed names — so an nginx template full of `$host`
 passes through untouched. An unresolved token is left literal rather than
 blanked, which is what makes a missing value visible instead of silently empty.
 
@@ -200,10 +200,10 @@ blanked, which is what makes a missing value visible instead of silently empty.
 A repo's `env` and `templates` can reference a *sibling* repo's service:
 
 ```json
-"env": { "SSO_REDIRECT": "https://localhost:${WS_PORT_app.web}" }
+"env": { "SSO_REDIRECT": "https://localhost:${WSX_PORT_app.web}" }
 ```
 
-`${WS_HOST_<repo>.<svc>}` and `${WS_PORT_<repo>.<svc>}` read the peer's recorded
+`${WSX_HOST_<repo>.<svc>}` and `${WSX_PORT_<repo>.<svc>}` read the peer's recorded
 allocation. Peers are read-only here — a peer that has never been brought up has
 no allocation yet, so the token stays literal.
 
@@ -253,8 +253,8 @@ repo that declares nothing gets sensible defaults (`compose up -d`,
 `compose down`, `compose ps`, and `compose down -v` on removal), so a plain
 compose project often needs no `scripts` at all.
 
-A value beginning `.ws-hooks/` is anchored to the workspace root automatically,
-so `".ws-hooks/api-up.sh"` resolves whether the script runs locally or on an
+A value beginning `.wsx-hooks/` is anchored to the workspace root automatically,
+so `".wsx-hooks/api-up.sh"` resolves whether the script runs locally or on an
 offload server. **Any other relative path is not resolved** — it runs against the
 worktree's working directory.
 
@@ -276,7 +276,7 @@ the sync.
 ## What `wsx` writes next to your config
 
 - **`.worktrees/<branch>/<repo>/`** — the worktrees themselves.
-- **`.ws-meta/`** — per-machine state: the port allocation for each worktree, the
+- **`.wsx-meta/`** — per-machine state: the port allocation for each worktree, the
   effective service set recorded at `up`, and the generated compose override.
   Disposable, but deleting it loses stable port assignments.
 
@@ -295,4 +295,4 @@ worktree isolation:
   in another branch's database.
 
 Both are warnings, not refusals. `wsx` never edits your compose file; the
-per-worktree override it generates lives in `.ws-meta/`.
+per-worktree override it generates lives in `.wsx-meta/`.

@@ -26,7 +26,7 @@ pub fn set(
         .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`wsx remote set` needs a host: pass one, set $WS_REMOTE_HOST, \
+                "`wsx remote set` needs a host: pass one, set $WSX_REMOTE_HOST, \
                  or `wsx config set remote.host <host>`",
             )
         })?;
@@ -57,7 +57,7 @@ pub fn set(
     super::verify_remote_client(&new_remote, no_verify)?;
 
     // Sync backfill runs *before* the cfg write: an interrupt mid-loop then
-    // leaves `.ws.json` still pointing at the old host, so the user can re-run
+    // leaves `.wsx.json` still pointing at the old host, so the user can re-run
     // from a consistent state instead of a workspace whose config points at a
     // new host that has none of its files. Every helper below reads the flip
     // target from local args (`connection`, `base`, `new_remote`) rather than
@@ -113,8 +113,8 @@ pub fn set(
     if domain.is_some() {
         cfg.domain = domain;
     }
-    let step = crate::ui::step("cfg", ".ws.json");
-    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
+    let step = crate::ui::step("cfg", ".wsx.json");
+    config::write_json_pretty(&ws.root.join(".wsx.json"), &cfg)?;
     step.ok();
 
     let mut summary = vec![format!("remote  → {connection}:{base}")];
@@ -173,8 +173,8 @@ pub fn unset(force: bool) -> Result<()> {
         }
     }
 
-    let step = crate::ui::step("cfg", ".ws.json");
-    config::write_json_pretty(&ws.root.join(".ws.json"), &cfg)?;
+    let step = crate::ui::step("cfg", ".wsx.json");
+    config::write_json_pretty(&ws.root.join(".wsx.json"), &cfg)?;
     step.ok();
 
     crate::ui::summary_ok(&["workspace is local again".to_string()]);
@@ -383,7 +383,7 @@ fn compose_liveness(
         _ => wt.path.to_string_lossy().into_owned(),
     };
     // `ps` needs no COMPOSE_FILE since the generated override only carries ports/env.
-    // Every interpolated value is shell-quoted: `runtime` comes from a possibly cloned `.ws.json`.
+    // Every interpolated value is shell-quoted: `runtime` comes from a possibly cloned `.wsx.json`.
     let script = format!(
         "command -v {rt} >/dev/null 2>&1 || exit 3\n\
          cd {dir} 2>/dev/null || exit 4\n\

@@ -43,7 +43,7 @@ pub fn run(
         })?,
     };
     if !cfg.repos.iter().any(|e| e.name() == repo) {
-        return Err(super::preflight(format!("unknown repo `{repo}` (not in .ws.json)")));
+        return Err(super::preflight(format!("unknown repo `{repo}` (not in .wsx.json)")));
     }
     // Check locally before any SSH: `wsx new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
     if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
@@ -65,12 +65,12 @@ pub fn run(
     propagate(status)
 }
 
-/// Base `WS_*` env every dispatched command sees. Deliberately does NOT set
-/// `WS_HOOK_NAME` — `wsx exec` isn't a hook, so lying about the event context
+/// Base `WSX_*` env every dispatched command sees. Deliberately does NOT set
+/// `WSX_HOOK_NAME` — `wsx exec` isn't a hook, so lying about the event context
 /// would surprise a script that special-cases lifecycle events.
 ///
 /// Kept in lockstep with `hooks::base_env`; the parity test in this module
-/// asserts they agree on every key except `WS_HOOK_NAME`.
+/// asserts they agree on every key except `WSX_HOOK_NAME`.
 fn build_env<'a>(
     workspace_root: &'a str,
     worktree: &'a str,
@@ -79,10 +79,10 @@ fn build_env<'a>(
     injected: &'a [(String, String)],
 ) -> Vec<(&'a str, &'a str)> {
     let mut env = vec![
-        ("WS_WORKSPACE_ROOT", workspace_root),
-        ("WS_WORKTREE", worktree),
-        ("WS_REPO", repo),
-        ("WS_BRANCH_SANITIZED", branch_sanitized),
+        ("WSX_WORKSPACE_ROOT", workspace_root),
+        ("WSX_WORKTREE", worktree),
+        ("WSX_REPO", repo),
+        ("WSX_BRANCH_SANITIZED", branch_sanitized),
     ];
     env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     env
@@ -178,8 +178,8 @@ fn exit_code(status: &ExitStatus) -> i32 {
 mod tests {
     use super::*;
 
-    /// The parity invariant: every `WS_*` key `hooks::base_env` sets — except
-    /// `WS_HOOK_NAME`, which exec deliberately omits — must appear in
+    /// The parity invariant: every `WSX_*` key `hooks::base_env` sets — except
+    /// `WSX_HOOK_NAME`, which exec deliberately omits — must appear in
     /// `build_env` with the same value. Prevents `wsx exec` from silently
     /// drifting away from the hook env contract when a new key is added.
     #[test]
@@ -189,26 +189,26 @@ mod tests {
         let root_s = root.to_string_lossy();
         let wt_s = wt.to_string_lossy();
         let injected: Vec<(String, String)> = vec![
-            ("WS_PORT_mysql".to_string(), "20001".to_string()),
-            ("WS_RUNTIME".to_string(), "podman".to_string()),
+            ("WSX_PORT_mysql".to_string(), "20001".to_string()),
+            ("WSX_RUNTIME".to_string(), "podman".to_string()),
         ];
 
         let env = build_env(&root_s, &wt_s, "api", "foo", &injected);
         let hook_env = crate::hooks::base_env(root, &wt_s, "api", "foo", "up");
 
         for (k, v) in &hook_env {
-            if k == "WS_HOOK_NAME" {
+            if k == "WSX_HOOK_NAME" {
                 continue;
             }
             let got = env.iter().find(|(ek, _)| *ek == k.as_str()).map(|(_, ev)| *ev);
             assert_eq!(got, Some(v.as_str()), "exec must match hook for {k}");
         }
         assert!(
-            !env.iter().any(|(k, _)| *k == "WS_HOOK_NAME"),
-            "exec must not set WS_HOOK_NAME — it isn't a hook",
+            !env.iter().any(|(k, _)| *k == "WSX_HOOK_NAME"),
+            "exec must not set WSX_HOOK_NAME — it isn't a hook",
         );
         assert_eq!(
-            env.iter().find(|(k, _)| *k == "WS_PORT_mysql").map(|(_, v)| *v),
+            env.iter().find(|(k, _)| *k == "WSX_PORT_mysql").map(|(_, v)| *v),
             Some("20001"),
             "injected env must survive",
         );

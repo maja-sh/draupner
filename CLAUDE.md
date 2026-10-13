@@ -91,7 +91,7 @@ contributed to a commit, the trailer is for humans only.
 
 ### Examples
 
-    compat: Shrink WS_COMPAT_MATRIX parser and add malformed-range tests
+    compat: Shrink WSX_COMPAT_MATRIX parser and add malformed-range tests
 
     ---
 
@@ -123,6 +123,6 @@ contributed to a commit, the trailer is for humans only.
     - `cargo nextest run` — all pass.
 
     Release Notes:
-    - Fix `.ws-hooks/<repo>/<event>` discovery inside shared-repo workspaces.
+    - Fix `.wsx-hooks/<repo>/<event>` discovery inside shared-repo workspaces.
 
     Closes #17

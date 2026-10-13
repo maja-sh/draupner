@@ -5,12 +5,12 @@ use std::path::Path;
 
 fn write_remote(f: &WorkspaceFixture, connection: &str) {
     std::fs::write(
-        f.path().join(".ws.json"),
+        f.path().join(".wsx.json"),
         format!(
             r#"{{"repos":["api"],"remote":{{"connection":"{connection}","workspace_path":"workspace"}}}}"#
         ),
     )
-    .expect("write .ws.json");
+    .expect("write .wsx.json");
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn exposes_ws_env_to_the_command() {
 
     let out = f.run_in(
         ".worktrees/feat-foo/api",
-        &["exec", "api", "--", "sh", "-c", "echo $WS_REPO-$WS_BRANCH_SANITIZED"],
+        &["exec", "api", "--", "sh", "-c", "echo $WSX_REPO-$WSX_BRANCH_SANITIZED"],
     );
     assert!(out.status.success());
     assert!(stdout(&out).contains("api-feat-foo"), "stdout was:\n{}", stdout(&out));
@@ -139,7 +139,7 @@ fn remote_workspace_dispatches_over_ssh() {
         ".worktrees/feat-foo/api",
         &["exec", "api", "--no-flush", "--", "php", "artisan", "migrate"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -151,10 +151,10 @@ fn remote_workspace_dispatches_over_ssh() {
     assert_eq!(lines[lines.len() - 2], "srv", "the connection precedes the script");
     assert_eq!(
         lines[lines.len() - 1],
-        "cd workspace/feat-foo/api && WS_WORKSPACE_ROOT=workspace WS_WORKTREE=workspace/feat-foo/api \
-         WS_REPO=api WS_BRANCH_SANITIZED=feat-foo WS_RUNTIME=podman WS_REMOTE=1 WS_CONNECTION=srv \
+        "cd workspace/feat-foo/api && WSX_WORKSPACE_ROOT=workspace WSX_WORKTREE=workspace/feat-foo/api \
+         WSX_REPO=api WSX_BRANCH_SANITIZED=feat-foo WSX_RUNTIME=podman WSX_REMOTE=1 WSX_CONNECTION=srv \
          exec php artisan migrate",
-        "remote script cds, exports WS_* (incl. workspace/worktree paths, runtime, remoteness), and execs the command"
+        "remote script cds, exports WSX_* (incl. workspace/worktree paths, runtime, remoteness), and execs the command"
     );
     assert!(!f.path().join(".worktrees/feat-foo/api/marker").exists());
 }
@@ -171,7 +171,7 @@ fn local_flag_forces_local_even_when_remote() {
         ".worktrees/feat-foo/api",
         &["exec", "--local", "--", "touch", "marker"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );

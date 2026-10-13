@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Always-200 HTTP stub for `WS_CADDY_ADMIN` so `wsx up`'s route calls exercise the routing path without spinning up a real Caddy; a test overrides the env var to a dead endpoint to drive the failure path.
+/// Always-200 HTTP stub for `WSX_CADDY_ADMIN` so `wsx up`'s route calls exercise the routing path without spinning up a real Caddy; a test overrides the env var to a dead endpoint to drive the failure path.
 struct AdminStub {
     url: String,
     shutdown: Arc<AtomicBool>,
@@ -93,7 +93,7 @@ pub struct WorkspaceFixture {
     pub root: TempDir,
     admin: AdminStub,
     port_base: Option<u16>,
-    /// Every `add_hook`/`add_script` so far, as `(repo, event, command)`. Re-applied after any `.ws.json` write so tests can add hooks and write their config in either order.
+    /// Every `add_hook`/`add_script` so far, as `(repo, event, command)`. Re-applied after any `.wsx.json` write so tests can add hooks and write their config in either order.
     hooks: std::cell::RefCell<Vec<(String, String, String)>>,
 }
 
@@ -185,13 +185,13 @@ impl WorkspaceFixture {
         repo
     }
 
-    /// Write `.ws.json` with `json`; any hooks already registered via `add_hook` are re-applied on top so the two helpers can be called in either order.
+    /// Write `.wsx.json` with `json`; any hooks already registered via `add_hook` are re-applied on top so the two helpers can be called in either order.
     pub fn write_ws_json(&self, json: &str) {
-        std::fs::write(self.path().join(".ws.json"), json).expect("write .ws.json");
+        std::fs::write(self.path().join(".wsx.json"), json).expect("write .wsx.json");
         self.apply_hook_scripts();
     }
 
-    /// Executable bash stub for `WS_SSH`/`WS_MUTAGEN` — e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")` to simulate reachable/unreachable.
+    /// Executable bash stub for `WSX_SSH`/`WSX_MUTAGEN` — e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")` to simulate reachable/unreachable.
     pub fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path().join(name);
         std::fs::write(&path, format!("#!/usr/bin/env bash\n{body}\n")).expect("write stub");
@@ -203,7 +203,7 @@ impl WorkspaceFixture {
         path
     }
 
-    /// Executable stub that appends each argv to `$ARGS_FILE` — point `WS_SSH`/`WS_MUTAGEN` at it to assert the exact command `wsx` would run without a real server.
+    /// Executable stub that appends each argv to `$ARGS_FILE` — point `WSX_SSH`/`WSX_MUTAGEN` at it to assert the exact command `wsx` would run without a real server.
     pub fn arg_recorder(&self, name: &str) -> PathBuf {
         let path = self.path().join(name);
         std::fs::write(
@@ -219,11 +219,11 @@ impl WorkspaceFixture {
         path
     }
 
-    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.ws-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it. A file, not an inline string, so a multi-line body needs no JSON escaping; `wsx` anchors `.ws-hooks/…` to `$WS_WORKSPACE_ROOT` so it resolves from the worktree cwd.
+    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.wsx-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it. A file, not an inline string, so a multi-line body needs no JSON escaping; `wsx` anchors `.wsx-hooks/…` to `$WSX_WORKSPACE_ROOT` so it resolves from the worktree cwd.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
-        let dir = self.path().join(".ws-hooks");
-        std::fs::create_dir_all(&dir).expect("create .ws-hooks");
-        let rel = format!(".ws-hooks/{repo}-{event}.sh");
+        let dir = self.path().join(".wsx-hooks");
+        std::fs::create_dir_all(&dir).expect("create .wsx-hooks");
+        let rel = format!(".wsx-hooks/{repo}-{event}.sh");
         write_exec(
             &self.path().join(&rel),
             &format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
@@ -238,16 +238,16 @@ impl WorkspaceFixture {
         self.apply_hook_scripts();
     }
 
-    /// Merge every registered hook into `.ws.json` as a `scripts` entry, promoting a bare-name repo to an object entry as needed.
+    /// Merge every registered hook into `.wsx.json` as a `scripts` entry, promoting a bare-name repo to an object entry as needed.
     fn apply_hook_scripts(&self) {
         let hooks = self.hooks.borrow();
         if hooks.is_empty() {
             return;
         }
-        let path = self.path().join(".ws.json");
+        let path = self.path().join(".wsx.json");
         let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{\"repos\":[]}".to_string());
-        let mut cfg: serde_json::Value = serde_json::from_str(&raw).expect("parse .ws.json");
-        let repos = cfg["repos"].as_array_mut().expect("repos array in .ws.json");
+        let mut cfg: serde_json::Value = serde_json::from_str(&raw).expect("parse .wsx.json");
+        let repos = cfg["repos"].as_array_mut().expect("repos array in .wsx.json");
         for (repo, event, script) in hooks.iter() {
             let entry = match repos.iter_mut().position(|r| {
                 r.as_str() == Some(repo.as_str()) || r["name"].as_str() == Some(repo.as_str())
@@ -268,8 +268,8 @@ impl WorkspaceFixture {
             }
             entry["scripts"][event] = serde_json::Value::String(script.clone());
         }
-        std::fs::write(&path, serde_json::to_string_pretty(&cfg).expect("serialize .ws.json"))
-            .expect("write .ws.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&cfg).expect("serialize .wsx.json"))
+            .expect("write .wsx.json");
     }
 
     /// Run `ws <args>` from the fixture root; `HOME` and `CLAUDE_SKILLS_DIR` are redirected into the tempdir so an accidental `wsx claude` never clobbers the developer's real `~/.claude/skills`.
@@ -295,11 +295,11 @@ impl WorkspaceFixture {
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(cwd)
-            // XDG_CONFIG_HOME from the dev shell would bypass the HOME redirect below and write into the developer's real `~/.config/ws`.
+            // XDG_CONFIG_HOME from the dev shell would bypass the HOME redirect below and write into the developer's real `~/.config/wsx`.
             .env_remove("XDG_CONFIG_HOME")
             .env("HOME", self.path())
             .env("CLAUDE_SKILLS_DIR", self.path().join("claude-skills"))
-            .env("WS_CADDY_ADMIN", self.admin.url.as_str())
+            .env("WSX_CADDY_ADMIN", self.admin.url.as_str())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "test")
@@ -307,7 +307,7 @@ impl WorkspaceFixture {
             .env("GIT_COMMITTER_NAME", "test")
             .env("GIT_COMMITTER_EMAIL", "test@example.com");
         if let Some(base) = self.port_base {
-            cmd.env("WS_PORT_BASE", base.to_string());
+            cmd.env("WSX_PORT_BASE", base.to_string());
         }
         for (k, v) in extra_env {
             cmd.env(k, v);

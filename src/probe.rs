@@ -80,7 +80,7 @@ fn dns_detail(domain: &str, ok: bool) -> String {
 /// One round-trip, read-only script printing `<key>:<ok|fail>` lines; `runtime` is the configured runtime so we don't probe a binary the server was never meant to have.
 pub fn server_script(workspace_path: &str, runtime: &str, domain: Option<&str>) -> String {
     let wp = remote::shell_quote(workspace_path);
-    // `runtime` comes from a possibly-cloned `.ws.json` and runs in the server's shell.
+    // `runtime` comes from a possibly-cloned `.wsx.json` and runs in the server's shell.
     let rt = remote::shell_quote(runtime);
     let mut lines = vec![
         "command -v mutagen >/dev/null 2>&1 && echo mutagen:ok || echo mutagen:fail".to_string(),

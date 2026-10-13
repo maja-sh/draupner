@@ -1,5 +1,5 @@
 //! Per-service host-port allocation persisted in
-//! `.ws-meta/<len>_<branch>-<len>_<repo>.json`, stable across `up` runs and
+//! `.wsx-meta/<len>_<branch>-<len>_<repo>.json`, stable across `up` runs and
 //! collision-free across parallel worktrees. The length-prefix on each
 //! segment closes a `-`-split ambiguity where `(feat-web, api)` and
 //! `(feat, web-api)` used to share the same filename.
@@ -16,14 +16,14 @@ use crate::remote::Site;
 /// Above common service defaults, below the ephemeral range.
 const RANGE: std::ops::Range<u16> = 20000..40000;
 
-/// Width when `WS_PORT_BASE` relocates the window — smaller than the default
+/// Width when `WSX_PORT_BASE` relocates the window — smaller than the default
 /// because a relocated window serves one workspace, not the whole machine.
 const MOVED_WIDTH: u16 = 500;
 
-/// Scan window for [`free_port`], honouring the `WS_PORT_BASE` seam that gives
+/// Scan window for [`free_port`], honouring the `WSX_PORT_BASE` seam that gives
 /// concurrent test workspaces non-overlapping windows.
 fn range() -> std::ops::Range<u16> {
-    window_from(std::env::var("WS_PORT_BASE").ok().and_then(|v| v.trim().parse().ok()))
+    window_from(std::env::var("WSX_PORT_BASE").ok().and_then(|v| v.trim().parse().ok()))
 }
 
 /// Pure core of [`range`] so the seam's rules are testable without mutating the
@@ -37,13 +37,13 @@ fn window_from(base: Option<u16>) -> std::ops::Range<u16> {
 }
 
 pub fn meta_dir(root: &Path) -> PathBuf {
-    root.join(".ws-meta")
+    root.join(".wsx-meta")
 }
 
 /// Filename stem = `<len>_<branch>-<len>_<repo>`. Length-prefixed segments
 /// so `(feat-web, api)` and `(feat, web-api)` can't collapse to the same
 /// file via the `-` split — bare concatenation had those two tuples both
-/// producing `feat-web-api.json`, so a `.ws-meta` file could be shared
+/// producing `feat-web-api.json`, so a `.wsx-meta` file could be shared
 /// between two live tasks and their port maps would step on each other.
 fn meta_stem(branch_sanitized: &str, repo: &str) -> String {
     format!("{}_{branch_sanitized}-{}_{repo}", branch_sanitized.len(), repo.len())
@@ -112,7 +112,7 @@ pub fn services(root: &Path, branch_sanitized: &str, repo: &str) -> BTreeMap<Str
     read_meta_lossy(&meta_file(root, branch_sanitized, repo)).services
 }
 
-/// Both `ports` and `services` in one read — for callers that need both and would otherwise parse the same `.ws-meta` file twice.
+/// Both `ports` and `services` in one read — for callers that need both and would otherwise parse the same `.wsx-meta` file twice.
 pub fn load_meta(
     root: &Path,
     branch_sanitized: &str,
@@ -185,9 +185,9 @@ pub fn forget(root: &Path, branch_sanitized: &str, repo: &str) {
     let _ = std::fs::remove_file(override_file(root, branch_sanitized, repo));
 }
 
-/// Every port recorded across `.ws-meta`, so parallel worktrees never collide.
+/// Every port recorded across `.wsx-meta`, so parallel worktrees never collide.
 ///
-/// A missing `.ws-meta` dir is fine — no allocations yet. A corrupt peer
+/// A missing `.wsx-meta` dir is fine — no allocations yet. A corrupt peer
 /// file must NOT be treated as empty: that peer's ports would drop off the
 /// used set and the allocator would hand them out again while the peer's
 /// containers are still bound to them.
@@ -240,7 +240,7 @@ pub fn port_free_at(site: &Site, port: u16) -> bool {
     }
 }
 
-/// Best-effort `O_EXCL` lockfile over `.ws-meta`; a full-window wait presumes
+/// Best-effort `O_EXCL` lockfile over `.wsx-meta`; a full-window wait presumes
 /// the holder crashed and steals the stale lock rather than stall forever.
 struct Lock {
     path: PathBuf,

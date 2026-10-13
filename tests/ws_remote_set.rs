@@ -2,7 +2,7 @@ mod common;
 
 use common::{stderr, WorkspaceFixture};
 
-// mutagen/ssh are stubbed via `WS_MUTAGEN`/`WS_SSH`, so these assert the sync lifecycle `wsx` drives, not real syncing.
+// mutagen/ssh are stubbed via `WSX_MUTAGEN`/`WSX_SSH`, so these assert the sync lifecycle `wsx` drives, not real syncing.
 
 fn recorded(args_file: &std::path::Path) -> String {
     std::fs::read_to_string(args_file).unwrap_or_default()
@@ -20,20 +20,20 @@ fn remote_set_writes_the_block_and_backfills_sync_for_existing_worktrees() {
     let out = ws.run_with_env(
         &["remote", "set", "srv"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "remote set failed:\n{}", stderr(&out));
 
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"srv\""), "remote block written:\n{cfg}");
 
     let calls = recorded(&args_file);
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     for repo in ["api", "web"] {
-        assert!(calls.contains(&format!("ws-feat-x-{repo}")), "session for {repo}:\n{calls}");
+        assert!(calls.contains(&format!("wsx-feat-x-{repo}")), "session for {repo}:\n{calls}");
         assert!(
             calls.contains(&format!("srv:{base}/feat-x/{repo}")),
             "beta endpoint for {repo}:\n{calls}"
@@ -57,8 +57,8 @@ fn remote_set_ignores_dep_artifacts_present_in_the_worktree() {
     let out = ws.run_with_env(
         &["remote", "set", "srv"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -87,8 +87,8 @@ fn remote_set_never_ignores_a_git_tracked_vendor_dir() {
     let out = ws.run_with_env(
         &["remote", "set", "srv"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -118,8 +118,8 @@ fn remote_set_fails_the_worktree_when_a_stale_session_wont_terminate() {
     let out = ws.run_with_env(
         &["remote", "set", "srv"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -135,7 +135,7 @@ fn remote_set_treats_an_empty_path_as_absent() {
     // An empty `--path` must fall back to the workspace dir-name default, not anchor at the filesystem root.
     let out = ws.run(&["remote", "set", "srv", "--path", "", "--no-verify"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     let base = ws.path().file_name().unwrap().to_str().unwrap();
     assert!(!cfg.contains("\"workspace_path\": \"\""), "empty path must not be stored:\n{cfg}");
     assert!(cfg.contains(&format!("\"workspace_path\": \"{base}\"")), "{cfg}");
@@ -153,7 +153,7 @@ fn remote_set_keeps_a_pinned_publish_address_across_a_repoint() {
     let out = ws.run(&["remote", "set", "new-host", "--no-verify"]);
     assert!(out.status.success(), "{}", stderr(&out));
 
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"new-host\""), "the re-point must land:\n{cfg}");
     assert!(
         cfg.contains("\"publish_address\": \"100.64.1.3\""),
@@ -177,8 +177,8 @@ fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
     let out = ws.run_with_env(
         &["remote", "set", "new-host"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -191,7 +191,7 @@ fn remote_set_repoints_an_existing_remote_by_recreating_sessions() {
     assert!(terminate < create, "terminate must precede create:\n{calls}");
     assert!(calls.contains("new-host:proj/feat-x/api"), "new endpoint:\n{calls}");
 
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"workspace_path\": \"proj\""), "path kept on re-point:\n{cfg}");
     assert!(cfg.contains("new-host"), "{cfg}");
 }
@@ -208,8 +208,8 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     // isn't host-keyed, so re-pointing must terminate it — otherwise the next `ws
     // up` no-ops on the name collision and `localhost:20000` still reaches
     // old-host while the port-forwards table claims the new one.
-    std::fs::create_dir_all(ws.path().join(".ws-meta")).unwrap();
-    std::fs::write(ws.path().join(".ws-meta/6_feat-x-3_api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
+    std::fs::create_dir_all(ws.path().join(".wsx-meta")).unwrap();
+    std::fs::write(ws.path().join(".wsx-meta/6_feat-x-3_api.json"), r#"{"ports":{"db":20000}}"#).unwrap();
 
     let ok = ws.stub("ok", "exit 0");
     let rec = ws.arg_recorder("mutagen-rec");
@@ -218,18 +218,18 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
     let out = ws.run_with_env(
         &["remote", "set", "new-host"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
     // The recorder writes one argv per line, so this is the exact
-    // `mutagen forward terminate ws-fwd-feat-x-api-20000` invocation.
+    // `mutagen forward terminate wsx-fwd-feat-x-api-20000` invocation.
     let calls = recorded(&args_file);
     assert!(
-        calls.contains("forward\nterminate\nws-fwd-feat-x-api-20000"),
+        calls.contains("forward\nterminate\nwsx-fwd-feat-x-api-20000"),
         "the old host's forward must be terminated on a re-point:\n{calls}"
     );
     // The sync backfill still runs alongside it.
@@ -240,16 +240,16 @@ fn remote_set_terminates_the_old_hosts_port_forwards_on_a_repoint() {
 fn remote_set_writes_domain_and_preserves_extended_repo_config() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
     ws.write_ws_json(
-        r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"http":true,"port":8080}},"scripts":{"up":"serve"},"env":{"APP_URL":"https://${WS_HOST_web}"}}]}"#,
+        r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"http":true,"port":8080}},"scripts":{"up":"serve"},"env":{"APP_URL":"https://${WSX_HOST_web}"}}]}"#,
     );
 
     // No worktrees yet, so no sync backfill and no stubs needed beyond `--no-verify`.
     let out = ws.run(&["remote", "set", "srv", "--domain", "myapp.test", "--no-verify"]);
     assert!(out.status.success(), "{}", stderr(&out));
 
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"domain\": \"myapp.test\""), "top-level domain written:\n{cfg}");
-    for kept in ["\"kind\": \"host\"", "\"http\": true", "\"up\": \"serve\"", "WS_HOST_web"] {
+    for kept in ["\"kind\": \"host\"", "\"http\": true", "\"up\": \"serve\"", "WSX_HOST_web"] {
         assert!(cfg.contains(kept), "extended config lost `{kept}`:\n{cfg}");
     }
 }
@@ -257,18 +257,18 @@ fn remote_set_writes_domain_and_preserves_extended_repo_config() {
 #[test]
 fn remote_set_refuses_an_unreachable_host_and_leaves_config_untouched() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    let before = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let before = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
 
     let ok = ws.stub("ok", "exit 0");
     let bad = ws.stub("bad", "exit 1");
     let out = ws.run_with_env(
         &["remote", "set", "srv"],
-        &[("WS_MUTAGEN", ok.to_str().unwrap()), ("WS_SSH", bad.to_str().unwrap())],
+        &[("WSX_MUTAGEN", ok.to_str().unwrap()), ("WSX_SSH", bad.to_str().unwrap())],
     );
     assert_eq!(out.status.code(), Some(2), "should refuse:\n{}", stderr(&out));
     assert!(stderr(&out).contains("reach"), "{}", stderr(&out));
-    let after = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
-    assert_eq!(before, after, "refusal must leave .ws.json untouched");
+    let after = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
+    assert_eq!(before, after, "refusal must leave .wsx.json untouched");
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn remote_set_rejects_an_option_shaped_host() {
     let out = ws.run(&["remote", "set", "--", "-oProxyCommand=evil"]);
     // An option-shaped host must never reach ssh argv, whether clap or the guard catches it.
     assert!(!out.status.success());
-    assert!(!std::fs::read_to_string(ws.path().join(".ws.json")).unwrap().contains("ProxyCommand"));
+    assert!(!std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap().contains("ProxyCommand"));
 }
 
 #[test]
@@ -287,12 +287,12 @@ fn remote_set_falls_back_to_env_then_global_config_for_the_host() {
 
     let out = ws.run(&["remote", "set", "--no-verify"]);
     assert!(out.status.success(), "global fallback:\n{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("global-host"), "{cfg}");
 
-    let out = ws.run_with_env(&["remote", "set", "--no-verify"], &[("WS_REMOTE_HOST", "env-host")]);
+    let out = ws.run_with_env(&["remote", "set", "--no-verify"], &[("WSX_REMOTE_HOST", "env-host")]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("env-host") && !cfg.contains("global-host"), "env wins:\n{cfg}");
 }
 
@@ -302,7 +302,7 @@ fn remote_set_without_any_host_names_all_three_sources() {
     let out = ws.run(&["remote", "set"]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
-    for hint in ["WS_REMOTE_HOST", "wsx config set remote.host"] {
+    for hint in ["WSX_REMOTE_HOST", "wsx config set remote.host"] {
         assert!(err.contains(hint), "error should mention `{hint}`:\n{err}");
     }
 }
@@ -318,7 +318,7 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
     let out = ws.run_with_env(
         &["remote", "unset"],
         &[
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -326,10 +326,10 @@ fn remote_unset_terminates_sync_and_removes_the_block() {
 
     let calls = recorded(&args_file);
     assert!(
-        calls.contains("terminate") && calls.contains("ws-feat-x-api"),
+        calls.contains("terminate") && calls.contains("wsx-feat-x-api"),
         "session terminated:\n{calls}"
     );
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
 }
 
@@ -347,7 +347,7 @@ fn running_host_workspace() -> WorkspaceFixture {
 
 /// Kill the supervised process directly — `wsx rm` would dispatch to a server the test never had.
 fn kill_host_proc(ws: &WorkspaceFixture) {
-    let Ok(contents) = std::fs::read_to_string(ws.path().join(".ws-run/ws-feat-x-api.pid")) else {
+    let Ok(contents) = std::fs::read_to_string(ws.path().join(".wsx-run/wsx-feat-x-api.pid")) else {
         return;
     };
     if let Some(pid) = contents.lines().next() {
@@ -367,8 +367,8 @@ fn remote_set_refuses_while_a_stack_is_running() {
     assert!(err.contains("still running: feat/x (api)"), "{err}");
     assert!(err.contains("`wsx down feat/x`"), "{err}");
     assert!(err.contains("--force"), "the override must be discoverable:\n{err}");
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
-    assert!(!cfg.contains("srv"), "refusal must leave .ws.json untouched:\n{cfg}");
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
+    assert!(!cfg.contains("srv"), "refusal must leave .wsx.json untouched:\n{cfg}");
 }
 
 #[test]
@@ -381,8 +381,8 @@ fn remote_set_force_flips_past_a_running_stack() {
     let out = ws.run_with_env(
         &["remote", "set", "srv", "--no-verify", "--force"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -393,7 +393,7 @@ fn remote_set_force_flips_past_a_running_stack() {
     assert!(err.contains("--force"), "the override should say what it carried past:\n{err}");
     // The recovery sequence only prints when something was actually left running.
     assert!(err.contains("wsx remote unset"), "recovery sequence expected:\n{err}");
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("\"connection\": \"srv\""), "{cfg}");
 }
 
@@ -443,8 +443,8 @@ fn remote_set_proceeds_when_the_container_stack_is_down() {
     let out = ws.run_with_env(
         &["remote", "set", "srv", "--no-verify"],
         &[
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -469,12 +469,12 @@ fn remote_unset_refuses_when_it_cannot_tell_what_is_running() {
 
     // An unreachable server means an unknowable stack; assuming "nothing running" is how stacks get stranded.
     let bad = ws.stub("bad", "exit 255");
-    let out = ws.run_with_env(&["remote", "unset"], &[("WS_SSH", bad.to_str().unwrap())]);
+    let out = ws.run_with_env(&["remote", "unset"], &[("WSX_SSH", bad.to_str().unwrap())]);
     assert_eq!(out.status.code(), Some(2), "must refuse:\n{}", stderr(&out));
     let err = stderr(&out);
     assert!(err.contains("can't tell whether anything is still running"), "{err}");
     assert!(err.contains("isn't reachable over SSH"), "{err}");
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("srv"), "refusal must leave the remote block in place:\n{cfg}");
 }
 
@@ -495,13 +495,13 @@ fn remote_unset_force_flips_when_liveness_is_unknown() {
     let out = ws.run_with_env(
         &["remote", "unset", "--force"],
         &[
-            ("WS_SSH", bad.to_str().unwrap()),
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_SSH", bad.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "--force must go local anyway:\n{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(!cfg.contains("remote"), "remote block removed:\n{cfg}");
     // Unknown liveness counts as possibly-stranded, so the recovery route is shown.
     assert!(stderr(&out).contains("wsx remote set srv"), "{}", stderr(&out));
@@ -519,7 +519,7 @@ fn remote_set_says_the_wildcard_answer_is_now_stale() {
 
     let out = ws.run_with_env(
         &["remote", "set", "srv", "--no-verify"],
-        &[("WS_SSH", sshg.to_str().unwrap())],
+        &[("WSX_SSH", sshg.to_str().unwrap())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let err = stderr(&out);
@@ -547,7 +547,7 @@ fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
     let out = ws.run_with_env(
         &["remote", "unset"],
         &[
-            ("WS_MUTAGEN", rec.to_str().unwrap()),
+            ("WSX_MUTAGEN", rec.to_str().unwrap()),
             ("ARGS_FILE", args_file.to_str().unwrap()),
         ],
     );
@@ -564,9 +564,9 @@ fn remote_unset_says_the_wildcard_should_point_back_at_loopback() {
 #[test]
 fn remote_unset_on_a_local_workspace_is_a_quiet_no_op() {
     let ws = WorkspaceFixture::with_repos(&["api"]);
-    let before = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let before = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     let out = ws.run_ok(&["remote", "unset"]);
     assert!(stderr(&out).contains("already local"), "{}", stderr(&out));
-    let after = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let after = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert_eq!(before, after, "no rewrite for a no-op");
 }

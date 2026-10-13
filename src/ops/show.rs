@@ -141,7 +141,7 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
             "host"
         };
 
-        // One `.ws-meta` read serves both liveness (never-up short-circuit) and the service list.
+        // One `.wsx-meta` read serves both liveness (never-up short-circuit) and the service list.
         let (port_map, recorded_services) = crate::ports::load_meta(root, &sanitized, name);
 
         let is_running = liveness(
@@ -229,7 +229,7 @@ fn liveness(
     })
 }
 
-/// Services with their allocated port + routing status. `recorded` comes from the `.ws-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.ws.json`-declared set for a not-yet-up worktree.
+/// Services with their allocated port + routing status. `recorded` comes from the `.wsx-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.wsx.json`-declared set for a not-yet-up worktree.
 fn services_for(
     cfg: &WsConfig,
     sanitized: &str,
@@ -311,7 +311,7 @@ Human by default. `--json` emits the same data as a structured object:
                              "worktree_base_absolute": "<server-side path>" },
   "repos": [
     {
-      "name":                  repo name from .ws.json,
+      "name":                  repo name from .wsx.json,
       "kind":                  "host" | "container",
       "worktree_absolute":     absolute path to this repo's worktree,
       "is_running":            true | false | null,
@@ -344,9 +344,9 @@ Semantics tooling should ground on:
 mod tests {
     use super::*;
 
-    /// Build a minimal workspace on disk that `collect` can read against — a `.ws.json`, the target repo as a bare git dir, a `.worktrees/<task>/<repo>` dir, and an optional `.ws-meta/*.json` port record.
+    /// Build a minimal workspace on disk that `collect` can read against — a `.wsx.json`, the target repo as a bare git dir, a `.worktrees/<task>/<repo>` dir, and an optional `.wsx-meta/*.json` port record.
     fn scaffold_workspace(root: &Path, ws_json: &str, sanitized_task: &str, repo: &str, meta: Option<&str>) {
-        std::fs::write(root.join(".ws.json"), ws_json).expect("write .ws.json");
+        std::fs::write(root.join(".wsx.json"), ws_json).expect("write .wsx.json");
         // Bare git repo at <root>/<repo> — worktrees::worktrees() skips repos where is_git_repo is false.
         let repo_dir = root.join(repo);
         std::fs::create_dir_all(repo_dir.join(".git")).expect("mkdir repo/.git");
@@ -355,8 +355,8 @@ mod tests {
         std::fs::create_dir_all(root.join(".worktrees").join(sanitized_task).join(repo))
             .expect("mkdir worktree");
         if let Some(m) = meta {
-            let meta_dir = root.join(".ws-meta");
-            std::fs::create_dir_all(&meta_dir).expect("mkdir .ws-meta");
+            let meta_dir = root.join(".wsx-meta");
+            std::fs::create_dir_all(&meta_dir).expect("mkdir .wsx-meta");
             let fname = crate::ports::override_filename(sanitized_task, repo)
                 .replace(".override.yml", ".json");
             std::fs::write(meta_dir.join(fname), m).expect("write meta");
@@ -450,18 +450,18 @@ mod tests {
             .and_then(|p| p.to_str())
             .expect("host repo carries a log path");
         assert!(
-            log.ends_with("/.ws-run/ws-feat-x-api.log"),
-            "log path should follow the ~/.ws-run/<proc_name>.log convention, got {log}"
+            log.ends_with("/.wsx-run/wsx-feat-x-api.log"),
+            "log path should follow the ~/.wsx-run/<proc_name>.log convention, got {log}"
         );
     }
 
     #[test]
     fn log_path_for_a_remote_workspace_names_the_server_home_not_ours() {
         let site = Site::Remote { connection: "srv".into(), home: "/home/server-user".into() };
-        let got = crate::supervise::log_path(&site, "ws-feat-x-api")
+        let got = crate::supervise::log_path(&site, "wsx-feat-x-api")
             .and_then(|p| p.to_str().map(str::to_owned))
             .expect("remote log path");
-        assert_eq!(got, "/home/server-user/.ws-run/ws-feat-x-api.log");
+        assert_eq!(got, "/home/server-user/.wsx-run/wsx-feat-x-api.log");
     }
 
     #[test]

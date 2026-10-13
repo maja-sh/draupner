@@ -24,7 +24,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     crate::ui::header("wsx-new", &format!("{repos_arg} {branch}"));
 
-    // Create `ws-net` first: a container repo's post-create writes an override that joins it, and any compose invoked there would fail on a missing network.
+    // Create `wsx-net` first: a container repo's post-create writes an override that joins it, and any compose invoked there would fail on a missing network.
     super::ensure_ws_net_if_active(&cfg, &site);
 
     let task_dir = workspace::task_dir(&ws.root, branch);
@@ -42,7 +42,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
     // preflights, rather than from `ctx.command` in the middle of the creation
     // loop. It is a config-plus-`stat` check with no reason to land after
     // worktrees and sync sessions already exist — and the fix it asks for
-    // (declare the script in `.ws.json`) is unreachable while the half-created
+    // (declare the script in `.wsx.json`) is unreachable while the half-created
     // task blocks the re-run.
     crate::hooks::preflight_legacy_hook_files(&cfg, &ws.root, &requested, &["post-create"])
         .map_err(|e| super::preflight(e.to_string()))?;
@@ -69,7 +69,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
 /// Extend a task with worktrees for `requested`: each repo's create → sync → post-create
 /// pipeline, rolled back per-repo (and up to previously-completed repos in this call) on
-/// failure. Task-level preflights — sanitize, ws-net, conflict, legacy hook migration,
+/// failure. Task-level preflights — sanitize, wsx-net, conflict, legacy hook migration,
 /// task-dir creation — are the caller's; this function assumes `task_dir` exists.
 pub(super) fn add_repos(
     ws_root: &Path,
@@ -180,7 +180,7 @@ pub(super) fn add_repos(
                 }
             }
 
-            // Render templates before post-create so one-time setup sees the per-worktree config and `WS_HOST_*`/`WS_PORT_*` values.
+            // Render templates before post-create so one-time setup sees the per-worktree config and `WSX_HOST_*`/`WSX_PORT_*` values.
             let extra_env = inject::prepare(
                 cfg, site, ws_root, &wt_path, sanitized, repo_name, inject::Phase::Activate,
             )?;

@@ -1,4 +1,4 @@
-//! `copy`: untracked dev files (certs/keys/env) named in `.ws.json` are seeded
+//! `copy`: untracked dev files (certs/keys/env) named in `.wsx.json` are seeded
 //! from the main checkout into each new worktree at `wsx new`.
 
 mod common;

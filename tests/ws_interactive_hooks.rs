@@ -4,14 +4,14 @@ use common::{stderr, WorkspaceFixture};
 
 /// Build a workspace with `api` carrying an `interactive: true` up hook that,
 /// if it ever ran, would exit non-zero so we'd notice. The `wsx new` runs with
-/// `WS_NON_INTERACTIVE=1` so post-create (an "echo ready" we attach) doesn't
+/// `WSX_NON_INTERACTIVE=1` so post-create (an "echo ready" we attach) doesn't
 /// itself trip the refusal; `wsx up` runs with the same env override so no-TTY
 /// behavior is deterministic regardless of how `cargo test` was invoked.
 fn fixture_with_interactive_up() -> WorkspaceFixture {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     std::fs::write(
-        f.path().join(".ws.json"),
+        f.path().join(".wsx.json"),
         r#"{
             "repos": [{
                 "name": "api",
@@ -24,7 +24,7 @@ fn fixture_with_interactive_up() -> WorkspaceFixture {
             }]
         }"#,
     )
-    .expect("write .ws.json");
+    .expect("write .wsx.json");
     f
 }
 
@@ -33,7 +33,7 @@ fn ws_up_refuses_interactive_hook_without_a_tty() {
     let f = fixture_with_interactive_up();
     f.run_ok(&["new", "api", "feat/x"]);
 
-    let out = f.run_with_env(&["up", "feat/x"], &[("WS_NON_INTERACTIVE", "1")]);
+    let out = f.run_with_env(&["up", "feat/x"], &[("WSX_NON_INTERACTIVE", "1")]);
     let err = stderr(&out);
 
     assert_eq!(
@@ -57,14 +57,14 @@ fn ws_up_refuses_interactive_hook_without_a_tty() {
 
 #[test]
 fn ws_up_with_env_override_refuses_even_if_tty_present() {
-    // `WS_NON_INTERACTIVE=1` is the forced-non-interactive escape hatch (CI,
+    // `WSX_NON_INTERACTIVE=1` is the forced-non-interactive escape hatch (CI,
     // scripted automation, debugging the refusal path locally). Verifies the
     // env check wins over any `/dev/tty` availability — ws must honor the
     // user's "I'm scripted, don't prompt" promise.
     let f = fixture_with_interactive_up();
     f.run_ok(&["new", "api", "feat/x"]);
 
-    let out = f.run_with_env(&["up", "feat/x"], &[("WS_NON_INTERACTIVE", "1")]);
+    let out = f.run_with_env(&["up", "feat/x"], &[("WSX_NON_INTERACTIVE", "1")]);
     assert_eq!(out.status.code(), Some(3));
 }
 
@@ -78,7 +78,7 @@ fn ws_up_mixes_failed_and_needs_human_as_a_generic_failure() {
     f.add_repo("api");
     f.add_repo("app");
     std::fs::write(
-        f.path().join(".ws.json"),
+        f.path().join(".wsx.json"),
         r#"{
             "repos": [
                 {
@@ -92,10 +92,10 @@ fn ws_up_mixes_failed_and_needs_human_as_a_generic_failure() {
             ]
         }"#,
     )
-    .expect("write .ws.json");
+    .expect("write .wsx.json");
     f.run_ok(&["new", "api,app", "feat/x"]);
 
-    let out = f.run_with_env(&["up", "feat/x"], &[("WS_NON_INTERACTIVE", "1")]);
+    let out = f.run_with_env(&["up", "feat/x"], &[("WSX_NON_INTERACTIVE", "1")]);
     let err = stderr(&out);
 
     assert_eq!(
@@ -109,7 +109,7 @@ fn ws_up_mixes_failed_and_needs_human_as_a_generic_failure() {
 
 #[test]
 fn non_interactive_hook_is_unaffected_by_the_env_override() {
-    // Regression: `WS_NON_INTERACTIVE` only gates the interactive-hook path.
+    // Regression: `WSX_NON_INTERACTIVE` only gates the interactive-hook path.
     // A plain non-interactive hook under the same env must still run — if we
     // ever broaden the check and start refusing non-interactive hooks too,
     // we'd break every CI/Claude invocation of `wsx up`.
@@ -117,7 +117,7 @@ fn non_interactive_hook_is_unaffected_by_the_env_override() {
     f.add_hook("api", "up", "echo ran-non-interactive");
     f.run_ok(&["new", "api", "feat/x"]);
 
-    let out = f.run_with_env(&["up", "feat/x"], &[("WS_NON_INTERACTIVE", "1")]);
-    assert!(out.status.success(), "non-interactive hook must still run under WS_NON_INTERACTIVE");
+    let out = f.run_with_env(&["up", "feat/x"], &[("WSX_NON_INTERACTIVE", "1")]);
+    assert!(out.status.success(), "non-interactive hook must still run under WSX_NON_INTERACTIVE");
     assert!(stderr(&out).contains("ran-non-interactive"));
 }

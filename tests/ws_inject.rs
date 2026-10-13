@@ -16,7 +16,7 @@ fn ws_port_is_allocated_and_injected() {
     f.write_ws_json(
         r#"{"repos":[{"name":"api",
             "services":{"mysql":{"port":3306}},
-            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+            "scripts":{"up":"echo PORT=[$WSX_PORT_mysql]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
 
@@ -25,8 +25,8 @@ fn ws_port_is_allocated_and_injected() {
     let port = port_in(&err);
     assert!((20000..40000).contains(&port), "port {port} out of range:\n{err}");
     assert!(
-        f.path().join(".ws-meta/8_feat-foo-3_api.json").is_file(),
-        "expected .ws-meta record"
+        f.path().join(".wsx-meta/8_feat-foo-3_api.json").is_file(),
+        "expected .wsx-meta record"
     );
 }
 
@@ -37,7 +37,7 @@ fn ws_port_is_stable_across_up_runs() {
     f.write_ws_json(
         r#"{"repos":[{"name":"api",
             "services":{"mysql":{"port":3306}},
-            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+            "scripts":{"up":"echo PORT=[$WSX_PORT_mysql]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
 
@@ -53,7 +53,7 @@ fn distinct_branches_get_distinct_ports() {
     f.write_ws_json(
         r#"{"repos":[{"name":"api",
             "services":{"mysql":{"port":3306}},
-            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+            "scripts":{"up":"echo PORT=[$WSX_PORT_mysql]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/a"]);
     f.run_ok(&["new", "api", "feat/b"]);
@@ -70,7 +70,7 @@ fn ws_host_is_injected_from_domain() {
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api",
             "services":{"app":{"http":"api","port":80}},
-            "scripts":{"up":"echo HOST=$WS_HOST_app"}}]}"#,
+            "scripts":{"up":"echo HOST=$WSX_HOST_app"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
 
@@ -88,7 +88,7 @@ fn declared_env_mapping_is_substituted() {
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api",
             "services":{"app":{"http":"api","port":80}},
-            "env":{"APP_URL":"https://${WS_HOST_app}"},
+            "env":{"APP_URL":"https://${WSX_HOST_app}"},
             "scripts":{"up":"echo URL=$APP_URL"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
@@ -106,7 +106,7 @@ fn workspace_context_is_substitutable_in_declared_env() {
     f.add_repo("api");
     f.write_ws_json(
         r#"{"runtime":"podman","repos":[{"name":"api",
-            "env":{"DOCKER_COMMAND":"${WS_RUNTIME}","MODE":"remote=${WS_REMOTE}"},
+            "env":{"DOCKER_COMMAND":"${WSX_RUNTIME}","MODE":"remote=${WSX_REMOTE}"},
             "scripts":{"up":"echo CMD=$DOCKER_COMMAND MODE=$MODE"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
@@ -114,11 +114,11 @@ fn workspace_context_is_substitutable_in_declared_env() {
     let err = stderr(&f.run_ok(&["up", "feat/foo"]));
     assert!(
         err.contains("CMD=podman"),
-        "WS_RUNTIME must substitute into a declared env value:\n{err}"
+        "WSX_RUNTIME must substitute into a declared env value:\n{err}"
     );
     assert!(
         err.contains("MODE=remote=0"),
-        "WS_REMOTE must substitute too, and mid-string:\n{err}"
+        "WSX_REMOTE must substitute too, and mid-string:\n{err}"
     );
 }
 
@@ -126,10 +126,10 @@ fn workspace_context_is_substitutable_in_declared_env() {
 fn template_is_rendered_into_gitignored_dest() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // `$host` is nginx-style and must survive the WS_ substituter untouched.
+    // `$host` is nginx-style and must survive the WSX_ substituter untouched.
     std::fs::write(
         f.path().join("api/svc.conf.tmpl"),
-        "port ${WS_PORT_mysql};\nserver_name $host;\n",
+        "port ${WSX_PORT_mysql};\nserver_name $host;\n",
     )
     .unwrap();
     f.git("api", &["add", "svc.conf.tmpl"]);
@@ -139,14 +139,14 @@ fn template_is_rendered_into_gitignored_dest() {
         r#"{"repos":[{"name":"api",
             "services":{"mysql":{"port":3306}},
             "templates":[{"src":"svc.conf.tmpl","dest":"svc.conf"}],
-            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+            "scripts":{"up":"echo PORT=[$WSX_PORT_mysql]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
     let port = port_in(&stderr(&f.run_ok(&["up", "feat/foo"])));
 
     let wt = f.path().join(".worktrees/feat-foo/api");
     let rendered = std::fs::read_to_string(wt.join("svc.conf")).expect("rendered dest");
-    assert!(rendered.contains(&format!("port {port};")), "WS_PORT should render:\n{rendered}");
+    assert!(rendered.contains(&format!("port {port};")), "WSX_PORT should render:\n{rendered}");
     assert!(rendered.contains("server_name $host;"), "$host must be untouched:\n{rendered}");
 
     // The rendered dest is git-invisible (info/exclude) — the worktree stays clean.
@@ -163,7 +163,7 @@ fn tracked_template_dest_is_refused() {
     f.add_repo("api");
     // Both the template AND its dest are committed — rendering would dirty a
     // tracked file, so `wsx up` must refuse rather than clobber it.
-    std::fs::write(f.path().join("api/svc.conf.tmpl"), "port ${WS_PORT_mysql};\n").unwrap();
+    std::fs::write(f.path().join("api/svc.conf.tmpl"), "port ${WSX_PORT_mysql};\n").unwrap();
     std::fs::write(f.path().join("api/svc.conf"), "port 3306;\n").unwrap();
     f.git("api", &["add", "svc.conf.tmpl", "svc.conf"]);
     f.git("api", &["commit", "-q", "-m", "add template + tracked dest"]);
@@ -184,7 +184,7 @@ fn tracked_template_dest_is_refused() {
 
 #[test]
 fn template_dest_escaping_the_worktree_is_refused() {
-    // `.ws.json` isn't gitignored, so it arrives with a clone: a hostile
+    // `.wsx.json` isn't gitignored, so it arrives with a clone: a hostile
     // `templates` entry used to write attacker-chosen bytes anywhere the user can
     // write on `wsx new`/`wsx up`, with no `scripts` entry declared. Both spellings
     // of the escape are covered — `..` walks out of the worktree, and an absolute
@@ -255,7 +255,7 @@ fn a_nested_template_dest_still_renders() {
     std::fs::create_dir_all(f.path().join("api/deploy")).unwrap();
     std::fs::write(
         f.path().join("api/deploy/svc.conf.tmpl"),
-        "port ${WS_PORT_mysql};\n",
+        "port ${WSX_PORT_mysql};\n",
     )
     .unwrap();
     f.git("api", &["add", "deploy/svc.conf.tmpl"]);
@@ -265,7 +265,7 @@ fn a_nested_template_dest_still_renders() {
         r#"{"repos":[{"name":"api",
             "services":{"mysql":{"port":3306}},
             "templates":[{"src":"deploy/svc.conf.tmpl","dest":"config/generated/svc.conf"}],
-            "scripts":{"up":"echo PORT=[$WS_PORT_mysql]"}}]}"#,
+            "scripts":{"up":"echo PORT=[$WSX_PORT_mysql]"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
     let port = port_in(&stderr(&f.run_ok(&["up", "feat/foo"])));
@@ -273,7 +273,7 @@ fn a_nested_template_dest_still_renders() {
     let rendered =
         std::fs::read_to_string(f.path().join(".worktrees/feat-foo/api/config/generated/svc.conf"))
             .expect("nested dest rendered");
-    assert!(rendered.contains(&format!("port {port};")), "WS_PORT should render:\n{rendered}");
+    assert!(rendered.contains(&format!("port {port};")), "WSX_PORT should render:\n{rendered}");
 }
 
 #[test]
@@ -287,12 +287,12 @@ fn exec_local_gets_ws_port_env() {
 
     let out = f.run_in(
         ".worktrees/feat-foo/api",
-        &["exec", "api", "--", "sh", "-c", "echo PORT=[$WS_PORT_mysql]"],
+        &["exec", "api", "--", "sh", "-c", "echo PORT=[$WSX_PORT_mysql]"],
     );
     assert!(out.status.success(), "exec failed:\n{}", stderr(&out));
     let combined = format!("{}{}", common::stdout(&out), stderr(&out));
     let port = port_in(&combined);
-    assert!((20000..40000).contains(&port), "exec should inject WS_PORT: {port}");
+    assert!((20000..40000).contains(&port), "exec should inject WSX_PORT: {port}");
 }
 
 fn git_status(wt: &std::path::Path) -> String {

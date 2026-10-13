@@ -6,17 +6,17 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Walk upward from CWD for the nearest `.ws.json`.
+/// Walk upward from CWD for the nearest `.wsx.json`.
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
     loop {
-        if cur.join(".ws.json").is_file() {
+        if cur.join(".wsx.json").is_file() {
             return Ok(Workspace { root: cur.to_path_buf() });
         }
         match cur.parent() {
             Some(p) => cur = p,
-            None => bail!("no `.ws.json` found from {} upward", start.display()),
+            None => bail!("no `.wsx.json` found from {} upward", start.display()),
         }
     }
 }

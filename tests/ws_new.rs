@@ -52,16 +52,16 @@ fn new_on_a_remote_workspace_creates_a_sync_session() {
     let out = f.run_with_env(
         &["new", "api", "feat/foo"],
         &[
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
-            ("WS_SSH", ssh.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "wsx new failed:\n{}", stderr(&out));
 
     let rec = std::fs::read_to_string(&args).expect("mutagen was invoked");
     assert!(rec.contains("create"), "expected `sync create`:\n{rec}");
-    assert!(rec.contains("ws-feat-foo-api"), "expected the session name:\n{rec}");
+    assert!(rec.contains("wsx-feat-foo-api"), "expected the session name:\n{rec}");
     assert!(rec.contains("--ignore-vcs"), "expected --ignore-vcs:\n{rec}");
     // Mutagen's 0600/0700 defaults map to root in a rootless container, leaving the tree unreadable to non-root service users.
     assert!(
@@ -82,7 +82,7 @@ fn new_without_a_remote_block_does_not_sync() {
 
     let out = f.run_with_env(
         &["new", "api", "feat/foo"],
-        &[("WS_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
+        &[("WSX_MUTAGEN", mg.to_str().unwrap()), ("ARGS_FILE", args.to_str().unwrap())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!args.exists(), "no mutagen calls without a remote block");
@@ -150,7 +150,7 @@ fn rev_parse(repo: &std::path::Path, rev: &str) -> String {
 #[test]
 fn happy_path_two_repos() {
     let f = WorkspaceFixture::with_repos(&["api", "app"]);
-    f.add_hook("api", "post-create", "echo \"api-hook: wt=$WS_WORKTREE\"");
+    f.add_hook("api", "post-create", "echo \"api-hook: wt=$WSX_WORKTREE\"");
 
     let out = f.run_ok(&["new", "api,app", "feat/login"]);
     let err = stderr(&out);
@@ -457,27 +457,27 @@ fn ws_env_vars_passed_to_hook() {
     f.add_hook(
         "api",
         "post-create",
-        r#"echo "WS_REPO=$WS_REPO"
-echo "WS_BRANCH_SANITIZED=$WS_BRANCH_SANITIZED"
-echo "WS_HOOK_NAME=$WS_HOOK_NAME"
-echo "WS_WORKSPACE_ROOT=$WS_WORKSPACE_ROOT""#,
+        r#"echo "WSX_REPO=$WSX_REPO"
+echo "WSX_BRANCH_SANITIZED=$WSX_BRANCH_SANITIZED"
+echo "WSX_HOOK_NAME=$WSX_HOOK_NAME"
+echo "WSX_WORKSPACE_ROOT=$WSX_WORKSPACE_ROOT""#,
     );
 
     let out = f.run_ok(&["new", "api", "feat/env"]);
     let err = stderr(&out);
 
-    assert!(err.contains("WS_REPO=api"), "expected WS_REPO=api in:\n{err}");
+    assert!(err.contains("WSX_REPO=api"), "expected WSX_REPO=api in:\n{err}");
     assert!(
-        err.contains("WS_BRANCH_SANITIZED=feat-env"),
-        "expected WS_BRANCH_SANITIZED=feat-env in:\n{err}"
+        err.contains("WSX_BRANCH_SANITIZED=feat-env"),
+        "expected WSX_BRANCH_SANITIZED=feat-env in:\n{err}"
     );
     assert!(
-        err.contains("WS_HOOK_NAME=post-create"),
-        "expected WS_HOOK_NAME=post-create in:\n{err}"
+        err.contains("WSX_HOOK_NAME=post-create"),
+        "expected WSX_HOOK_NAME=post-create in:\n{err}"
     );
     assert!(
-        err.contains("WS_WORKSPACE_ROOT="),
-        "expected WS_WORKSPACE_ROOT in:\n{err}"
+        err.contains("WSX_WORKSPACE_ROOT="),
+        "expected WSX_WORKSPACE_ROOT in:\n{err}"
     );
 }
 

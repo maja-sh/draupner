@@ -9,7 +9,7 @@ fn config_set_get_unset_round_trip() {
     let ws = WorkspaceFixture::empty();
 
     ws.run_ok(&["config", "set", "remote.host", "srv"]);
-    let file = ws.path().join(".config/ws/config.toml");
+    let file = ws.path().join(".config/wsx/config.toml");
     let raw = std::fs::read_to_string(&file).expect("config.toml written");
     assert!(raw.contains("[remote]") && raw.contains("host = \"srv\""), "{raw}");
 
@@ -31,7 +31,7 @@ fn config_set_get_unset_round_trip() {
 fn config_unset_of_unset_key_is_a_quiet_no_op() {
     let ws = WorkspaceFixture::empty();
     ws.run_ok(&["config", "unset", "remote.host"]);
-    assert!(!ws.path().join(".config/ws/config.toml").exists());
+    assert!(!ws.path().join(".config/wsx/config.toml").exists());
 }
 
 #[test]
@@ -55,13 +55,13 @@ fn config_rejects_an_option_shaped_host() {
     let out = ws.run(&["config", "set", "--", "remote.host", "-oProxyCommand=evil"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("unsafe SSH host"), "{}", stderr(&out));
-    assert!(!ws.path().join(".config/ws/config.toml").exists(), "nothing persisted");
+    assert!(!ws.path().join(".config/wsx/config.toml").exists(), "nothing persisted");
 }
 
 #[test]
 fn config_get_reports_a_malformed_file_loudly() {
     let ws = WorkspaceFixture::empty();
-    let dir = ws.path().join(".config/ws");
+    let dir = ws.path().join(".config/wsx");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.toml"), "not [valid toml").unwrap();
 
@@ -79,10 +79,10 @@ fn init_remote_falls_back_to_the_global_default_host() {
 
     let out = ws.run_with_env(
         &["init", "--remote"],
-        &[("WS_SSH", ok.to_str().unwrap()), ("WS_MUTAGEN", ok.to_str().unwrap())],
+        &[("WSX_SSH", ok.to_str().unwrap()), ("WSX_MUTAGEN", ok.to_str().unwrap())],
     );
     assert!(out.status.success(), "init should use the global default:\n{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("global-host"), "global default host expected:\n{cfg}");
 }
 
@@ -96,13 +96,13 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let out = ws.run_with_env(
         &["init", "--remote"],
         &[
-            ("WS_REMOTE_HOST", "env-host"),
-            ("WS_SSH", ok.to_str().unwrap()),
-            ("WS_MUTAGEN", ok.to_str().unwrap()),
+            ("WSX_REMOTE_HOST", "env-host"),
+            ("WSX_SSH", ok.to_str().unwrap()),
+            ("WSX_MUTAGEN", ok.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("env-host") && !cfg.contains("global-host"), "env wins:\n{cfg}");
 
     // Fresh workspace — init refuses to rerun.
@@ -112,13 +112,13 @@ fn env_beats_the_global_default_and_flag_beats_env() {
     let out = ws2.run_with_env(
         &["init", "--remote", "flag-host"],
         &[
-            ("WS_REMOTE_HOST", "env-host"),
-            ("WS_SSH", ok2.to_str().unwrap()),
-            ("WS_MUTAGEN", ok2.to_str().unwrap()),
+            ("WSX_REMOTE_HOST", "env-host"),
+            ("WSX_SSH", ok2.to_str().unwrap()),
+            ("WSX_MUTAGEN", ok2.to_str().unwrap()),
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    let cfg = std::fs::read_to_string(ws2.path().join(".ws.json")).unwrap();
+    let cfg = std::fs::read_to_string(ws2.path().join(".wsx.json")).unwrap();
     assert!(cfg.contains("flag-host") && !cfg.contains("env-host"), "flag wins:\n{cfg}");
 }
 
@@ -129,7 +129,7 @@ fn init_remote_without_any_host_names_all_three_sources() {
     let out = ws.run(&["init", "--remote"]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
-    for hint in ["--remote <host>", "WS_REMOTE_HOST", "wsx config set remote.host"] {
+    for hint in ["--remote <host>", "WSX_REMOTE_HOST", "wsx config set remote.host"] {
         assert!(err.contains(hint), "error should mention `{hint}`:\n{err}");
     }
 }

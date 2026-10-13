@@ -17,7 +17,7 @@ fn host_fixture_in(f: WorkspaceFixture) -> WorkspaceFixture {
     f.write_ws_json(
         r#"{"domain":"myapp.test","repos":[{"name":"api","kind":"host",
             "services":{"web":{"http":"web","port":8080}},
-            "scripts":{"up":"printf '%s %s' \"$WS_HOST_web\" \"$WS_BRANCH_SANITIZED\" > env-marker; exec sleep 40"}}]}"#,
+            "scripts":{"up":"printf '%s %s' \"$WSX_HOST_web\" \"$WSX_BRANCH_SANITIZED\" > env-marker; exec sleep 40"}}]}"#,
     );
     f
 }
@@ -31,7 +31,7 @@ fn alive(pid: &str) -> bool {
 }
 
 fn proc_alive(f: &WorkspaceFixture) -> bool {
-    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
+    let pid_file = f.path().join(".wsx-run/wsx-feat-foo-api.pid");
     let Ok(contents) = std::fs::read_to_string(&pid_file) else { return false };
     // The pid file is two lines — pid then start-time identity; liveness only needs the pid.
     let pid = contents.lines().next().unwrap_or("").trim();
@@ -59,7 +59,7 @@ impl<F: FnMut()> Drop for Teardown<F> {
 
 /// The pid `wsx` recorded for `feat/foo`'s api.
 fn recorded_pid(f: &WorkspaceFixture) -> String {
-    let contents = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid"))
+    let contents = std::fs::read_to_string(f.path().join(".wsx-run/wsx-feat-foo-api.pid"))
         .expect("pid file after up");
     contents.lines().next().unwrap().trim().to_string()
 }
@@ -100,10 +100,10 @@ fn host_up_launches_a_detached_process_with_injected_env() {
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
 
     assert!(proc_alive(&f), "host process should be running after up");
-    // WS_BRANCH_SANITIZED regressed once, producing `https://.api.<domain>` from an empty branch segment.
+    // WSX_BRANCH_SANITIZED regressed once, producing `https://.api.<domain>` from an empty branch segment.
     let marker = f.path().join(".worktrees/feat-foo/api/env-marker");
     let got = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert_eq!(got, "feat-foo.web.myapp.test feat-foo", "host env missing WS_HOST_web or WS_BRANCH_SANITIZED");
+    assert_eq!(got, "feat-foo.web.myapp.test feat-foo", "host env missing WSX_HOST_web or WSX_BRANCH_SANITIZED");
 
     stop(&f);
     assert!(!proc_alive(&f), "host process should be gone after rm");
@@ -214,7 +214,7 @@ fn up_and_list_confirm_a_process_serving_its_allocated_port() {
     f.add_repo("api");
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}},
-            "scripts":{"up":"exec python3 -m http.server \"$WS_PORT_web\" --bind 127.0.0.1"}}]}"#,
+            "scripts":{"up":"exec python3 -m http.server \"$WSX_PORT_web\" --bind 127.0.0.1"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
     // Unlike the `sleep 40` fixtures, this one supervises a real HTTP server that
@@ -255,11 +255,11 @@ fn host_up_is_idempotent_when_already_running() {
     let f = host_fixture();
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
-    let pid1 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+    let pid1 = std::fs::read_to_string(f.path().join(".wsx-run/wsx-feat-foo-api.pid")).unwrap();
 
     // A second up must NOT relaunch — same pid, and it says "already running".
     let out = f.run_ok(&["up", "feat/foo"]);
-    let pid2 = std::fs::read_to_string(f.path().join(".ws-run/ws-feat-foo-api.pid")).unwrap();
+    let pid2 = std::fs::read_to_string(f.path().join(".wsx-run/wsx-feat-foo-api.pid")).unwrap();
     assert_eq!(pid1, pid2, "up must not relaunch a running host process");
     assert!(
         stderr(&out).contains("already running"),
@@ -282,7 +282,7 @@ fn host_up_with_no_up_script_is_skipped() {
     assert!(out.status.success(), "up failed:\n{}", stderr(&out));
     assert!(stderr(&out).contains("no up script"), "expected a skip note:\n{}", stderr(&out));
     assert!(
-        !Path::new(&f.path().join(".ws-run/ws-feat-foo-api.pid")).exists(),
+        !Path::new(&f.path().join(".wsx-run/wsx-feat-foo-api.pid")).exists(),
         "nothing to launch → no pid file"
     );
 }
@@ -292,10 +292,10 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
     // Signalling only the recorded pid used to kill the wrapper shell and leak the real server, reparented to init and still holding its port.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
-    // Wrapper shell backgrounding a child — the shape a dev server takes when started from a `.ws-hooks/` script.
+    // Wrapper shell backgrounding a child — the shape a dev server takes when started from a `.wsx-hooks/` script.
     std::fs::write(
         f.path().join("runner.sh"),
-        "#!/bin/sh\necho $$ > \"$WS_WORKSPACE_ROOT\"/wrapper.pid\nsleep 40 &\necho $! > \"$WS_WORKSPACE_ROOT\"/child.pid\nwait\n",
+        "#!/bin/sh\necho $$ > \"$WSX_WORKSPACE_ROOT\"/wrapper.pid\nsleep 40 &\necho $! > \"$WSX_WORKSPACE_ROOT\"/child.pid\nwait\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -308,7 +308,7 @@ fn host_down_stops_the_real_server_behind_a_wrapper_shell() {
     }
     f.write_ws_json(
         r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}},
-            "scripts":{"up":"\"$WS_WORKSPACE_ROOT\"/runner.sh"}}]}"#,
+            "scripts":{"up":"\"$WSX_WORKSPACE_ROOT\"/runner.sh"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
@@ -355,7 +355,7 @@ fn down_keeps_the_record_of_a_live_process_it_declines_to_kill() {
     f.run_ok(&["new", "api", "feat/foo"]);
     f.run_ok(&["up", "feat/foo"]);
 
-    let pid_file = f.path().join(".ws-run/ws-feat-foo-api.pid");
+    let pid_file = f.path().join(".wsx-run/wsx-feat-foo-api.pid");
     let recorded = std::fs::read_to_string(&pid_file).expect("pid file after up");
     let pid = recorded.lines().next().unwrap().trim().to_string();
 

@@ -4,7 +4,7 @@
 
 use std::process::Command;
 
-const MATRIX: &str = env!("WS_COMPAT_MATRIX");
+const MATRIX: &str = env!("WSX_COMPAT_MATRIX");
 
 pub fn check() {
     if MATRIX == "linux" || MATRIX == "unknown" {

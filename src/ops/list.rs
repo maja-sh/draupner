@@ -143,7 +143,7 @@ fn compute_row(
         })
     };
 
-    // From `.ws-meta` only — no probing; reflects the last `up`.
+    // From `.wsx-meta` only — no probing; reflects the last `up`.
     let services: Vec<(String, u16)> = if managed {
         crate::ports::load(ws_root, &sanitized, repo).into_iter().collect()
     } else {
@@ -240,7 +240,7 @@ pub(super) fn probe_status(
     (status, notes)
 }
 
-/// Not the raw `.ws-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.ws.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
+/// Not the raw `.wsx-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.wsx.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
 fn host_probe_ports(
     cfg: &config::WsConfig,
     site: &crate::remote::Site,
@@ -252,7 +252,7 @@ fn host_probe_ports(
     inject::prepare(cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(k, _)| k.starts_with("WS_PORT_"))
+        .filter(|(k, _)| k.starts_with("WSX_PORT_"))
         .filter_map(|(_, v)| v.parse().ok())
         .collect()
 }
@@ -272,7 +272,7 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
 mod tests {
     use super::*;
 
-    /// The `.ws-meta` state a removed service leaves behind: its port is still in
+    /// The `.wsx-meta` state a removed service leaves behind: its port is still in
     /// `ports` (nothing prunes that map short of teardown) while `services` was
     /// rewritten to the current set by the last `up`.
     #[test]
@@ -280,13 +280,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::write(
-            root.join(".ws.json"),
+            root.join(".wsx.json"),
             r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}}}]}"#,
         )
         .unwrap();
-        std::fs::create_dir_all(root.join(".ws-meta")).unwrap();
+        std::fs::create_dir_all(root.join(".wsx-meta")).unwrap();
         std::fs::write(
-            root.join(".ws-meta/6_feat-x-3_api.json"),
+            root.join(".wsx-meta/6_feat-x-3_api.json"),
             r#"{"ports":{"gone":20001,"web":20002},"services":{"web":{"port":8080}}}"#,
         )
         .unwrap();

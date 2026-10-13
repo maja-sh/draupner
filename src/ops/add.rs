@@ -60,12 +60,12 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 
     // `down → add → up` is the intended order. Anything not classifiable as
     // Stopped — running, crashed, or a probe ws can't read — leaves state
-    // (`.ws-meta` ports, overrides, forwards, live containers) that would
+    // (`.wsx-meta` ports, overrides, forwards, live containers) that would
     // race a new repo's post-create.
     require_task_stopped(&cfg, &site, &ws.root, branch, &sanitized)?;
 
     // Fire the network side-effect only once every preflight has passed —
-    // otherwise a refused op still leaves ws-net created for a stack it
+    // otherwise a refused op still leaves wsx-net created for a stack it
     // never brought up.
     super::ensure_ws_net_if_active(&cfg, &site);
 

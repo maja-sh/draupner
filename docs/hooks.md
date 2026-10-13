@@ -5,18 +5,18 @@ worktrees, ports, hostnames and routing; your scripts do the part only your
 project knowsx about — installing dependencies, seeding a database, starting a dev
 server.
 
-Declare them in `.ws.json` under a repo's `scripts`:
+Declare them in `.wsx.json` under a repo's `scripts`:
 
 ```json
 "scripts": {
   "post-create": "composer install",
-  "up": ".ws-hooks/api-up.sh",
+  "up": ".wsx-hooks/api-up.sh",
   "down": "podman compose down"
 }
 ```
 
 Each value is one shell command or a list run in order, executed with `sh -c`
-from the **worktree directory**. A value beginning `.ws-hooks/` is anchored to
+from the **worktree directory**. A value beginning `.wsx-hooks/` is anchored to
 the workspace root so it resolves wherever it runs; any other relative path is
 not resolved for you.
 
@@ -45,7 +45,7 @@ place to stage anything that only exists on your machine: a dump of your main
 checkout's database, a local dev CA, credentials that aren't in git. Whatever it
 writes into the worktree rides the sync.
 
-Because it sees `WS_REMOTE`, one script can branch — dump-for-sync when
+Because it sees `WSX_REMOTE`, one script can branch — dump-for-sync when
 offloaded, a same-host copy when not.
 
 ### `status` is special
@@ -81,44 +81,44 @@ So a plain compose project frequently needs no `scripts` block at all.
 
 | Variable | Value |
 |---|---|
-| `WS_WORKSPACE_ROOT` | The workspace root **at the execution site** |
-| `WS_WORKTREE` | This repo's worktree path at the execution site |
-| `WS_REPO` | The repo name |
-| `WS_BRANCH_SANITIZED` | The branch as one path/DNS-safe label (`feat/x` → `feat-x`) |
-| `WS_HOOK_NAME` | The event being run |
-| `WS_RUNTIME` | The configured container runtime (`podman` / `docker`) |
-| `WS_REMOTE` | `1` when the workspace is offloaded, else `0` |
-| `WS_CONNECTION` | The SSH host when offloaded, else empty |
+| `WSX_WORKSPACE_ROOT` | The workspace root **at the execution site** |
+| `WSX_WORKTREE` | This repo's worktree path at the execution site |
+| `WSX_REPO` | The repo name |
+| `WSX_BRANCH_SANITIZED` | The branch as one path/DNS-safe label (`feat/x` → `feat-x`) |
+| `WSX_HOOK_NAME` | The event being run |
+| `WSX_RUNTIME` | The configured container runtime (`podman` / `docker`) |
+| `WSX_REMOTE` | `1` when the workspace is offloaded, else `0` |
+| `WSX_CONNECTION` | The SSH host when offloaded, else empty |
 
 "At the execution site" matters: for an offloaded workspace these are the
 *server's* paths, because that's where the script runs. A script referencing
-`$WS_WORKSPACE_ROOT/.ws-hooks/…` therefore resolves in both worlds.
+`$WSX_WORKSPACE_ROOT/.wsx-hooks/…` therefore resolves in both worlds.
 
-`WS_RUNTIME` exists so a shared script can call `$WS_RUNTIME compose …` instead
-of hardcoding a runtime. `WS_CONNECTION` exists so a client-side `prepare` can
-reach the server without a hostname duplicated out of `.ws.json`.
+`WSX_RUNTIME` exists so a shared script can call `$WSX_RUNTIME compose …` instead
+of hardcoding a runtime. `WSX_CONNECTION` exists so a client-side `prepare` can
+reach the server without a hostname duplicated out of `.wsx.json`.
 
 ### Per-service, when the repo declares or derives services
 
 | Variable | Value |
 |---|---|
-| `WS_HOST_<service>` | The routed hostname, `<branch>.<subdomain>.<domain>` (HTTP services, needs a `domain`) |
-| `WS_PORT_<service>` | The allocated host port (raw-TCP services; for a `kind: host` repo, every service) |
+| `WSX_HOST_<service>` | The routed hostname, `<branch>.<subdomain>.<domain>` (HTTP services, needs a `domain`) |
+| `WSX_PORT_<service>` | The allocated host port (raw-TCP services; for a `kind: host` repo, every service) |
 
-Plus every mapping you declared in the repo's `env` block, with `${WS_*}` tokens
+Plus every mapping you declared in the repo's `env` block, with `${WSX_*}` tokens
 substituted. See [configuration.md](configuration.md#getting-values-into-your-app).
 
-A `kind: host` repo gets a `WS_PORT_*` for *every* service including HTTP ones,
+A `kind: host` repo gets a `WSX_PORT_*` for *every* service including HTTP ones,
 because the process has to bind something — the routed hostname then points at
 it. Bind exactly the port you were given:
 
 ```json
-"scripts": { "up": "exec vite --port \"$WS_PORT_web\"" }
+"scripts": { "up": "exec vite --port \"$WSX_PORT_web\"" }
 ```
 
 ### `wsxx exec`
 
-Commands run through `wsxx exec` receive `WS_REPO`, `WS_BRANCH_SANITIZED`, and the
+Commands run through `wsxx exec` receive `WSX_REPO`, `WSX_BRANCH_SANITIZED`, and the
 same injected service variables — identical on the local and remote paths, so a
 command doesn't need to know where it landed.
 
@@ -168,19 +168,19 @@ redirects stdin but leaves /dev/tty available).
 
 ### Overriding from the shell
 
-`WS_NON_INTERACTIVE=1` forces the refusal path even when a terminal is
+`WSX_NON_INTERACTIVE=1` forces the refusal path even when a terminal is
 available — useful for CI that happens to run under a pty, scripted
 automation, or debugging the refusal UX from a real shell.
 
 ### Branching inside a hook
 
-wsx exports `WS_INTERACTIVE=1` to every hook iff the current invocation can
+wsx exports `WSX_INTERACTIVE=1` to every hook iff the current invocation can
 prompt. A hook that wants to handle non-interactive invocation itself
 (custom message, custom exit) can branch:
 
 ```bash
 #!/usr/bin/env bash
-if [ -z "${WS_INTERACTIVE:-}" ]; then
+if [ -z "${WSX_INTERACTIVE:-}" ]; then
   echo "needs interactive terminal; run from your shell" >&2
   exit 1
 fi
@@ -192,7 +192,7 @@ the escape hatch is there if you want to customize.
 
 ### What's not supported (yet)
 
-- **Interactive on `status`** — refused at `.ws.json` load. `status` fans
+- **Interactive on `status`** — refused at `.wsx.json` load. `status` fans
   out in parallel from `wsxx list`, and an interactive status probe would
   collide with every other repo's probe for the one terminal.
 - **Interactive hooks on a remote workspace** — refused at load. There's no
@@ -207,7 +207,7 @@ its PID and start time, and returns rather than blocking. So the script should
 run the server in the foreground — `exec` into it where you can, so the process
 `wsxx` tracks is the server itself.
 
-- Output goes to `~/.ws-run/<name>.log` at the site, PID to `~/.ws-run/<name>.pid`.
+- Output goes to `~/.wsx-run/<name>.log` at the site, PID to `~/.wsx-run/<name>.pid`.
 - A process that dies immediately fails the `up` loudly, with the tail of its log.
 - After launch, `wsxx` checks that something is listening on the port it allocated
   and that it belongs to the process it started. A different process holding that
@@ -224,19 +224,19 @@ are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 
 ---
 
-## The `.ws-hooks/` directory
+## The `.wsx-hooks/` directory
 
 Anything longer than a line belongs in a shell file rather than inline JSON.
-`.ws-hooks/` at the workspace root is where those live — `wsxx init` scaffolds a
-starter `.ws-hooks/<repo>-<event>.sh` per event, and `wsxx` pushes the whole
+`.wsx-hooks/` at the workspace root is where those live — `wsxx init` scaffolds a
+starter `.wsx-hooks/<repo>-<event>.sh` per event, and `wsxx` pushes the whole
 directory to the server on each `up`, so a shared script works the same in both
 places. Point a `scripts` entry at one:
 
 ```json
-"scripts": { "up": ".ws-hooks/api-up.sh" }
+"scripts": { "up": ".wsx-hooks/api-up.sh" }
 ```
 
-Nothing in `.ws-hooks/` runs unless a `scripts` entry names it. The scaffolded
+Nothing in `.wsx-hooks/` runs unless a `scripts` entry names it. The scaffolded
 files are inert until you declare one.
 
 Scripts must be executable. `wsxx` restores the executable bit on the copy it
@@ -245,17 +245,17 @@ rewrote to `644` will fail with a bare `Permission denied` — `chmod +x` it.
 
 ### Upgrading from hook files (pre-0.6)
 
-`wsxx` used to *discover* an executable `.ws-hooks/<repo>/<event>` and run it with
+`wsxx` used to *discover* an executable `.wsx-hooks/<repo>/<event>` and run it with
 no `scripts` entry at all. That mechanism is gone; a leftover file now fails the
 repo with the line to paste rather than silently doing nothing:
 
 ```json
-"scripts": { "up": ".ws-hooks/api/up" }
+"scripts": { "up": ".wsx-hooks/api/up" }
 ```
 
 The file itself keeps working, but its contract changed with the move — it now
 runs with **cwd = the worktree** instead of the workspace root, and the worktree
-path arrives as **`$WS_WORKTREE`** instead of `$1`. So `grep -n '\$1' .ws-hooks/`
-and fix those, and prefix a `cd "$WS_WORKSPACE_ROOT"` anywhere the script relied
+path arrives as **`$WSX_WORKTREE`** instead of `$1`. So `grep -n '\$1' .wsx-hooks/`
+and fix those, and prefix a `cd "$WSX_WORKSPACE_ROOT"` anywhere the script relied
 on running from the root. In exchange the hook becomes remote-capable: a declared
 script runs on an offloaded workspace, which a discovered file never could.

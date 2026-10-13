@@ -76,12 +76,12 @@ wsx init --domain myapp.test
 `wsx init` detects the repos, derives what it can from each one's compose file,
 and writes three things:
 
-- **`.ws.json`** — the workspace config. Yours to edit.
-- **`.ws.schema.json`** — a JSON Schema for it, generated from the code, so your
+- **`.wsx.json`** — the workspace config. Yours to edit.
+- **`.wsx.schema.json`** — a JSON Schema for it, generated from the code, so your
   editor completes and validates every field. Regenerate after an upgrade with
   `wsx init --refresh-schema`.
-- **`.ws-hooks/`** — starter scripts for the lifecycle events you want to fill
-  in. Each is inert until a repo's `scripts` block in `.ws.json` names it.
+- **`.wsx-hooks/`** — starter scripts for the lifecycle events you want to fill
+  in. Each is inert until a repo's `scripts` block in `.wsx.json` names it.
 
 Then work a task:
 
@@ -100,7 +100,7 @@ the ones that are merged and clean.
 
 ## The model
 
-**Workspace** — a directory holding your repo clones plus `.ws.json`. The clones
+**Workspace** — a directory holding your repo clones plus `.wsx.json`. The clones
 stay on their default branch and `wsx` never commits in them; it reads them and
 creates worktrees from them.
 
@@ -155,7 +155,7 @@ space this fills.
 
 | Command | What it does |
 |---|---|
-| `wsx init` | Scaffold `.ws.json`, `.ws.schema.json`, `.ws-hooks/` from the repos found here |
+| `wsx init` | Scaffold `.wsx.json`, `.wsx.schema.json`, `.wsx-hooks/` from the repos found here |
 | `wsx new <repos> <branch>` | Create worktrees for a task (comma-separated repos); `--up` to start immediately |
 | `wsx up <branch>` | Bring the task's stacks up, install routes, report ports |
 | `wsx down <branch>` | Stop the stacks, leave the files |
@@ -167,7 +167,7 @@ space this fills.
 | `wsx setup` | Ready this machine for routing; reports the gaps it can't close itself |
 | `wsx remote check` | Read-only health check of the offload server (or of local routing) |
 | `wsx remote set/unset` | Move this workspace to a server, or bring it back; refuses while a stack is running |
-| `wsx config get/set/unset` | Machine-global defaults in `~/.config/ws/config.toml` |
+| `wsx config get/set/unset` | Machine-global defaults in `~/.config/wsx/config.toml` |
 | `wsx claude` | Install Claude Code skills for the `wsx` workflow |
 
 Every command takes `--help`.
@@ -176,11 +176,11 @@ Every command takes `--help`.
 
 ## Documentation
 
-- **[docs/configuration.md](docs/configuration.md)** — `.ws.json`: services and
+- **[docs/configuration.md](docs/configuration.md)** — `.wsx.json`: services and
   routing, how compose derivation works, and the precedence rules. The field
-  list lives in `.ws.schema.json`; this covers what a schema can't say.
+  list lives in `.wsx.schema.json`; this covers what a schema can't say.
 - **[docs/hooks.md](docs/hooks.md)** — the lifecycle events, where each one runs,
-  and the full `WS_*` environment contract your scripts receive.
+  and the full `WSX_*` environment contract your scripts receive.
 - **[docs/offload.md](docs/offload.md)** — running the stacks on a server while
   you edit locally.
 - **[server-setup/](server-setup/)** — the one-time privileged host setup.
@@ -193,20 +193,20 @@ Read by `wsx`:
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `WS_REMOTE_HOST` | — | Default SSH host for a bare `wsx init --remote` / `wsx remote set`. Precedence: explicit argument > this > `wsx config` `remote.host` |
-| `WS_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH` |
-| `WS_MUTAGEN` | `mutagen` | Override the `mutagen` binary |
+| `WSX_REMOTE_HOST` | — | Default SSH host for a bare `wsx init --remote` / `wsx remote set`. Precedence: explicit argument > this > `wsx config` `remote.host` |
+| `WSX_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH` |
+| `WSX_MUTAGEN` | `mutagen` | Override the `mutagen` binary |
 | `CLAUDE_SKILLS_DIR` | `~/.claude/skills` | Where `wsx claude` installs skill files |
 
-`HOME` is read to resolve `~/.config/ws` and the default skills directory.
+`HOME` is read to resolve `~/.config/wsx` and the default skills directory.
 
 `git` is deliberately **not** overridable: `ssh`/`mutagen` get an override seam
 because they're the network and sync tools the out-of-process test suite has to
 stub; `git` always runs against real repositories.
 
 Two more exist as escape hatches rather than everyday settings.
-`WS_HTTPS_PORT` overrides the port Caddy serves on for one invocation (the
-durable way is `wsx setup --port`). `WS_CADDY_ADMIN` points `wsx` at an admin API
+`WSX_HTTPS_PORT` overrides the port Caddy serves on for one invocation (the
+durable way is `wsx setup --port`). `WSX_CADDY_ADMIN` points `wsx` at an admin API
 you manage yourself, which also stops it from creating the network or running a
 Caddy container at all — bring-your-own routing.
 

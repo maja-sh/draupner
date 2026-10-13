@@ -1,4 +1,4 @@
-//! A `WS_SSH` stub drives remote `up`/`down`/teardown deterministically; the real
+//! A `WSX_SSH` stub drives remote `up`/`down`/teardown deterministically; the real
 //! podman+Caddy end-to-end lives in the self-SSH-to-localhost smoke, which needs
 //! a live box and so isn't a unit test.
 
@@ -7,7 +7,7 @@ mod common;
 use common::{stderr, WorkspaceFixture};
 use std::path::{Path, PathBuf};
 
-/// `WS_SSH` stub whose branches feed each probe (`$HOME`, `ss`, `kill -0`, pid-file)
+/// `WSX_SSH` stub whose branches feed each probe (`$HOME`, `ss`, `kill -0`, pid-file)
 /// what `supervise::up` expects so a full remote `up`/`down` proceeds without a server.
 fn ssh_stub(f: &WorkspaceFixture) -> PathBuf {
     f.stub(
@@ -28,13 +28,13 @@ esac"#,
 /// The env pairs `run_with_env` needs to point ws at the ssh/mutagen stubs and record argv.
 fn remote_env<'a>(ssh: &'a Path, mg: &'a Path, args: &'a Path) -> [(&'a str, &'a str); 3] {
     [
-        ("WS_SSH", ssh.to_str().unwrap()),
-        ("WS_MUTAGEN", mg.to_str().unwrap()),
+        ("WSX_SSH", ssh.to_str().unwrap()),
+        ("WSX_MUTAGEN", mg.to_str().unwrap()),
         ("ARGS_FILE", args.to_str().unwrap()),
     ]
 }
 
-/// A no-op `WS_MUTAGEN` stub (mutagen isn't installed on CI; sync is best-effort).
+/// A no-op `WSX_MUTAGEN` stub (mutagen isn't installed on CI; sync is best-effort).
 fn mutagen_noop(f: &WorkspaceFixture) -> PathBuf {
     f.stub("fake-mutagen", "exit 0")
 }
@@ -53,8 +53,8 @@ fn new_remote(f: &WorkspaceFixture, repo: &str, ssh: &Path, mg: &Path) {
     let out = f.run_with_env(
         &["new", repo, "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", f.path().join("new-ssh.txt").to_str().unwrap()),
         ],
     );
@@ -74,8 +74,8 @@ fn up_runs_the_script_on_the_server_over_ssh() {
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -86,18 +86,18 @@ fn up_runs_the_script_on_the_server_over_ssh() {
         .lines()
         .find(|l| l.contains("exec sh -c 'echo starting'"))
         .unwrap_or_else(|| panic!("up script not dispatched over ssh:\n{rec}"));
-    // A relative base leaves WS_WORKSPACE_ROOT relative and breaks `$WS_WORKSPACE_ROOT/…` in a hook.
+    // A relative base leaves WSX_WORKSPACE_ROOT relative and breaks `$WSX_WORKSPACE_ROOT/…` in a hook.
     assert!(line.contains("cd /home/test/ws/feat-foo/api &&"), "wrong server dir:\n{line}");
-    assert!(line.contains("WS_WORKSPACE_ROOT=/home/test/ws"), "WS_WORKSPACE_ROOT not absolute:\n{line}");
-    assert!(line.contains("WS_REPO=api"), "missing WS_REPO:\n{line}");
-    assert!(line.contains("WS_PORT_mysql="), "missing allocated port env:\n{line}");
-    // A shared hook branches on WS_REMOTE/WS_RUNTIME (synced dump vs same-host copy; docker vs podman).
-    assert!(line.contains("WS_REMOTE=1"), "missing WS_REMOTE=1 on the server:\n{line}");
-    assert!(line.contains("WS_RUNTIME="), "missing WS_RUNTIME:\n{line}");
+    assert!(line.contains("WSX_WORKSPACE_ROOT=/home/test/ws"), "WSX_WORKSPACE_ROOT not absolute:\n{line}");
+    assert!(line.contains("WSX_REPO=api"), "missing WSX_REPO:\n{line}");
+    assert!(line.contains("WSX_PORT_mysql="), "missing allocated port env:\n{line}");
+    // A shared hook branches on WSX_REMOTE/WSX_RUNTIME (synced dump vs same-host copy; docker vs podman).
+    assert!(line.contains("WSX_REMOTE=1"), "missing WSX_REMOTE=1 on the server:\n{line}");
+    assert!(line.contains("WSX_RUNTIME="), "missing WSX_RUNTIME:\n{line}");
 }
 
 /// A workspace whose service name carries a dash — `redis-cache` is ordinary
-/// compose naming, and it makes `WS_PORT_redis-cache`, which is *not* a valid
+/// compose naming, and it makes `WSX_PORT_redis-cache`, which is *not* a valid
 /// shell name. Declared here rather than derived so the test doesn't need a
 /// compose binary; the env key is byte-identical either way.
 fn dashed_service_ws() -> &'static str {
@@ -110,9 +110,9 @@ fn dashed_service_ws() -> &'static str {
 
 #[test]
 fn a_dashed_service_name_keeps_the_up_script_runnable() {
-    // `WS_PORT_redis-cache=20001` as a bare assignment word isn't an assignment to
+    // `WSX_PORT_redis-cache=20001` as a bare assignment word isn't an assignment to
     // the shell — it's the command. The whole remote script used to die with
-    // `WS_PORT_redis-cache=20001: not found` (exit 127, reported as `up script
+    // `WSX_PORT_redis-cache=20001: not found` (exit 127, reported as `up script
     // exited 127`) and the hook never ran, on a workspace that works locally.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
@@ -133,7 +133,7 @@ fn a_dashed_service_name_keeps_the_up_script_runnable() {
     // The pairs go through `env`, which accepts any name — as the local path's
     // `Command::env` does.
     assert!(line.contains("exec env "), "env pairs not handed to `env`:\n{line}");
-    assert!(line.contains("WS_PORT_redis-cache="), "dashed port var not injected:\n{line}");
+    assert!(line.contains("WSX_PORT_redis-cache="), "dashed port var not injected:\n{line}");
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn a_dashed_service_name_keeps_the_status_probe_runnable() {
         .find(|l| l.contains("timeout 5 sh -c 'docker compose ps'"))
         .unwrap_or_else(|| panic!("status not run on the server:\n{rec}"));
     assert!(line.contains("&& env "), "env pairs not handed to `env`:\n{line}");
-    assert!(line.contains("WS_PORT_redis-cache="), "dashed port var not injected:\n{line}");
+    assert!(line.contains("WSX_PORT_redis-cache="), "dashed port var not injected:\n{line}");
     // …and the server's answer still reaches the listing.
     let shown = format!("{}{}", common::stdout(&out), stderr(&out));
     assert!(shown.contains("running"), "status not surfaced in the listing:\n{shown}");
@@ -177,8 +177,8 @@ fn down_runs_the_script_on_the_server_over_ssh() {
     let out = f.run_with_env(
         &["down", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -211,8 +211,8 @@ fn down_degrades_to_local_cleanup_when_the_server_is_unreachable() {
     let out = f.run_with_env(
         &["down", "feat/foo"],
         &[
-            ("WS_SSH", bad.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", bad.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
         ],
     );
 
@@ -243,8 +243,8 @@ fn list_runs_status_on_the_server_for_a_remote_workspace() {
     let out = f.run_with_env(
         &["list"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -267,7 +267,7 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
     f.write_ws_json(
         r#"{
             "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
-                      "scripts":{"up":"run --port $WS_PORT_web"}}],
+                      "scripts":{"up":"run --port $WSX_PORT_web"}}],
             "remote":{"connection":"srv","workspace_path":"ws"}
         }"#,
     );
@@ -279,8 +279,8 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -292,18 +292,18 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
         rec.contains("cd /home/test/ws/feat-foo/svc"),
         "launched from the server worktree:\n{rec}"
     );
-    assert!(rec.contains("ws-feat-foo-svc.pid"), "pid not recorded under ~/.ws-run:\n{rec}");
-    assert!(rec.contains("WS_PORT_web="), "allocated port not injected:\n{rec}");
-    assert!(rec.contains("sh -c 'run --port $WS_PORT_web'"), "up cmd not via sh -c:\n{rec}");
+    assert!(rec.contains("wsx-feat-foo-svc.pid"), "pid not recorded under ~/.wsx-run:\n{rec}");
+    assert!(rec.contains("WSX_PORT_web="), "allocated port not injected:\n{rec}");
+    assert!(rec.contains("sh -c 'run --port $WSX_PORT_web'"), "up cmd not via sh -c:\n{rec}");
     // Without the harvested login PATH on the supervisor path, a `#!/usr/bin/env node` shebang dies in the log after the step reported green.
     assert!(
         rec.contains("PATH=/harvested/bin:/usr/bin"),
         "harvested login PATH not passed to the detached host process:\n{rec}"
     );
-    // WS_WORKSPACE_ROOT anchors `.ws-hooks/…` paths, so it must name the server's root, not the client's.
+    // WSX_WORKSPACE_ROOT anchors `.wsx-hooks/…` paths, so it must name the server's root, not the client's.
     assert!(
-        rec.contains("WS_WORKSPACE_ROOT=/home/test/ws"),
-        "WS_WORKSPACE_ROOT must be the server-side root for a detached host process:\n{rec}"
+        rec.contains("WSX_WORKSPACE_ROOT=/home/test/ws"),
+        "WSX_WORKSPACE_ROOT must be the server-side root for a detached host process:\n{rec}"
     );
 }
 
@@ -315,7 +315,7 @@ fn a_host_process_that_dies_on_launch_fails_the_step_and_shows_its_log() {
     f.write_ws_json(
         r#"{
             "repos":[{"name":"svc","kind":"host","services":{"web":{"port":8080}},
-                      "scripts":{"up":"run --port $WS_PORT_web"}}],
+                      "scripts":{"up":"run --port $WSX_PORT_web"}}],
             "remote":{"connection":"srv","workspace_path":"ws"}
         }"#,
     );
@@ -340,8 +340,8 @@ esac"#,
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -355,7 +355,7 @@ esac"#,
     // The reason is the entire content of this failure — it belongs on screen.
     assert!(
         err.contains("No such file or directory"),
-        "the log tail must be surfaced, not left in ~/.ws-run:\n{err}"
+        "the log tail must be surfaced, not left in ~/.wsx-run:\n{err}"
     );
 }
 
@@ -365,7 +365,7 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(remote_container_ws());
-    f.add_hook("api", "prepare", "echo staged > \"$WS_WORKTREE/prepared.txt\"");
+    f.add_hook("api", "prepare", "echo staged > \"$WSX_WORKTREE/prepared.txt\"");
     let ssh = ssh_stub(&f);
     let mg = mutagen_noop(&f);
     new_remote(&f, "api", &ssh, &mg);
@@ -374,8 +374,8 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -391,12 +391,12 @@ fn prepare_runs_on_the_client_while_up_dispatches_to_the_server() {
 
 #[test]
 fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
-    // A workspace-root `.ws-hooks/` lives outside the repos and can't ride the worktree sync, so `wsx` pushes it so a hook can reference `$WS_WORKSPACE_ROOT/.ws-hooks/…` there.
+    // A workspace-root `.wsx-hooks/` lives outside the repos and can't ride the worktree sync, so `wsx` pushes it so a hook can reference `$WSX_WORKSPACE_ROOT/.wsx-hooks/…` there.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     f.write_ws_json(remote_container_ws());
-    std::fs::create_dir_all(f.path().join(".ws-hooks")).unwrap();
-    std::fs::write(f.path().join(".ws-hooks/up.sh"), "#!/usr/bin/env bash\necho hi\n").unwrap();
+    std::fs::create_dir_all(f.path().join(".wsx-hooks")).unwrap();
+    std::fs::write(f.path().join(".wsx-hooks/up.sh"), "#!/usr/bin/env bash\necho hi\n").unwrap();
     let ssh = ssh_stub(&f);
     let mg = mutagen_noop(&f);
     new_remote(&f, "api", &ssh, &mg);
@@ -405,8 +405,8 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
     let out = f.run_with_env(
         &["up", "feat/foo"],
         &[
-            ("WS_SSH", ssh.to_str().unwrap()),
-            ("WS_MUTAGEN", mg.to_str().unwrap()),
+            ("WSX_SSH", ssh.to_str().unwrap()),
+            ("WSX_MUTAGEN", mg.to_str().unwrap()),
             ("ARGS_FILE", args.to_str().unwrap()),
         ],
     );
@@ -415,7 +415,7 @@ fn ws_hooks_are_pushed_to_the_server_before_a_remote_hook() {
     let rec = std::fs::read_to_string(&args).expect("ssh was invoked");
     assert!(
         rec.lines().any(|l| l.contains("tar -C /home/test/ws") && l.contains("-xpf -")),
-        "expected a .ws-hooks push (tar extract) over ssh:\n{rec}"
+        "expected a .wsx-hooks push (tar extract) over ssh:\n{rec}"
     );
     // `-xpf` preserves mode, so a hook rewritten as 644 would land unrunnable and fail at hook time with a bare `Permission denied` (exit 126).
     assert!(

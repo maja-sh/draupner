@@ -10,17 +10,17 @@ use crate::workspace;
 
 /// Per-worktree process name, matching the mutagen session naming.
 pub fn proc_name(branch: &str, repo: &str) -> String {
-    format!("ws-{}-{}", workspace::sanitize_branch(branch), repo)
+    format!("wsx-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
-/// Absolute log path at the *site* where the process runs — `~/.ws-run/<name>.log` expands against the local `$HOME` for a local site and the remote's captured `$HOME` for a remote one, so a caller printing the path never advertises a client path for a server-side log. `None` when the local `$HOME` isn't set.
+/// Absolute log path at the *site* where the process runs — `~/.wsx-run/<name>.log` expands against the local `$HOME` for a local site and the remote's captured `$HOME` for a remote one, so a caller printing the path never advertises a client path for a server-side log. `None` when the local `$HOME` isn't set.
 pub fn log_path(site: &Site, name: &str) -> Option<std::path::PathBuf> {
     match site {
         Site::Local => {
             let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
-            Some(std::path::PathBuf::from(home).join(".ws-run").join(format!("{name}.log")))
+            Some(std::path::PathBuf::from(home).join(".wsx-run").join(format!("{name}.log")))
         }
-        Site::Remote { .. } => site.home_path(&format!(".ws-run/{name}.log")).map(std::path::PathBuf::from),
+        Site::Remote { .. } => site.home_path(&format!(".wsx-run/{name}.log")).map(std::path::PathBuf::from),
     }
 }
 
@@ -30,9 +30,9 @@ const STRANGER_MARKER: &str = "__WS_HOST_STRANGER__";
 /// The basename is `shell_quote`d because `name` is untrusted and `$(…)` still
 /// expands inside double quotes.
 fn paths(name: &str) -> (String, String, String) {
-    let pid = format!("\"$HOME/.ws-run/\"{}", shell_quote(&format!("{name}.pid")));
-    let log = format!("\"$HOME/.ws-run/\"{}", shell_quote(&format!("{name}.log")));
-    ("\"$HOME/.ws-run\"".to_string(), pid, log)
+    let pid = format!("\"$HOME/.wsx-run/\"{}", shell_quote(&format!("{name}.pid")));
+    let log = format!("\"$HOME/.wsx-run/\"{}", shell_quote(&format!("{name}.log")));
+    ("\"$HOME/.wsx-run\"".to_string(), pid, log)
 }
 
 fn read_pidfile(pid: &str) -> String {
@@ -113,7 +113,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         for line in tail.lines().map(str::trim).filter(|l| !l.is_empty()) {
             crate::ui::hook_line(name, line, true);
         }
-        bail!("exited immediately — see ~/.ws-run/{name}.log");
+        bail!("exited immediately — see ~/.wsx-run/{name}.log");
     }
     Ok(true)
 }
@@ -161,7 +161,7 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
     if String::from_utf8_lossy(&out.stdout).contains(STRANGER_MARKER) {
         crate::ui::note(&format!(
             "{name}: a process is recorded but its identity doesn't match — left running. \
-             Check `~/.ws-run/{name}.pid` and stop it by hand if it's stale."
+             Check `~/.wsx-run/{name}.pid` and stop it by hand if it's stale."
         ));
     }
     // The script always exits 0, so a non-zero status is transport failure.
@@ -373,7 +373,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("ws-supervise-{tag}-{}-{uniq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wsx-supervise-{tag}-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
     }
@@ -402,15 +402,15 @@ mod tests {
 
     #[test]
     fn proc_name_sanitizes_branch() {
-        assert_eq!(proc_name("feat/foo", "api"), "ws-feat-foo-api");
-        assert_eq!(proc_name("plain", "web"), "ws-plain-web");
+        assert_eq!(proc_name("feat/foo", "api"), "wsx-feat-foo-api");
+        assert_eq!(proc_name("plain", "web"), "wsx-plain-web");
     }
 
     #[test]
     fn paths_quote_a_hostile_name() {
-        let (_, pid, _) = paths("ws-feat-x$(touch owned)-api");
-        assert!(pid.contains("'ws-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
-        assert!(pid.starts_with("\"$HOME/.ws-run/\""), "home must still expand: {pid}");
+        let (_, pid, _) = paths("wsx-feat-x$(touch owned)-api");
+        assert!(pid.contains("'wsx-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
+        assert!(pid.starts_with("\"$HOME/.wsx-run/\""), "home must still expand: {pid}");
     }
 
     #[test]

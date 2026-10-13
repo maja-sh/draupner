@@ -20,7 +20,7 @@ The shape of it:
 individual repo. Every repo in a workspace goes to the same place.
 
 If you want an API on a server and a frontend on your laptop, that's two
-workspace roots, each with its own `.ws.json`. (Cross-root service references
+workspace roots, each with its own `.wsx.json`. (Cross-root service references
 and shared routing are not solved today.)
 
 ---
@@ -57,7 +57,7 @@ For one that already exists:
 wsxx remote set my-server
 ```
 
-Either writes a `remote` block to `.ws.json` and verifies the host is reachable
+Either writes a `remote` block to `.wsx.json` and verifies the host is reachable
 first, refusing rather than writing a config that can't work (`--no-verify` to
 skip). `wsxx remote set` also backfills sync sessions for every worktree you
 already have.
@@ -69,7 +69,7 @@ wsxx config set remote.host my-server
 wsxx remote set              # picks it up
 ```
 
-Precedence is: the argument you passed > `$WS_REMOTE_HOST` > the global config.
+Precedence is: the argument you passed > `$WSX_REMOTE_HOST` > the global config.
 
 ### 3. Check it
 
@@ -110,8 +110,8 @@ one server don't collide), resolved against the SSH login home. Override it with
 `--path` on `set`, or `workspace_path` in the config, and use an absolute path if
 you want it outside the home directory.
 
-Shared scripts in `.ws-hooks/` are pushed to the server on each `up`, which is
-what lets a `scripts` entry like `".ws-hooks/api-up.sh"` resolve in both places.
+Shared scripts in `.wsx-hooks/` are pushed to the server on each `up`, which is
+what lets a `scripts` entry like `".wsx-hooks/api-up.sh"` resolve in both places.
 
 `wsxx` also keeps one multiplexed SSH connection per server rather than
 handshaking for every small command.
@@ -157,7 +157,7 @@ send requests to a host you thought you'd stopped using.
 `kind: host` repo — a dev server running directly on the box, proxying `/api` to
 a routed container. A pure container stack never needs it: containers reach each
 other by compose service name, and Caddy reaches them by container name on
-`ws-net`, so the server is never a client of its own routing. Step 2b of
+`wsx-net`, so the server is never a client of its own routing. Step 2b of
 `server-setup/debian.sh` wires it.
 
 The server-side half is the one that breaks quietly. `/etc/resolv.conf` belongs
@@ -195,11 +195,11 @@ same port number on both ends, so nothing downstream has to know it moved.
 | `prepare` | **client**, before the sync — stage local-only data here |
 | `post-create`, `up`, `down`, `post-remove`, `status` | server |
 | `wsxx exec` | server (`--local` to force otherwise) |
-| Port allocation bookkeeping | client (`.ws-meta` is the record) |
+| Port allocation bookkeeping | client (`.wsx-meta` is the record) |
 | Port *freeness* probe | server — the port must be free where it's published |
 
-Your scripts see `WS_REMOTE=1` and `WS_CONNECTION`, and their `WS_WORKSPACE_ROOT`
-/ `WS_WORKTREE` are the server's paths. See [hooks.md](hooks.md).
+Your scripts see `WSX_REMOTE=1` and `WSX_CONNECTION`, and their `WSX_WORKSPACE_ROOT`
+/ `WSX_WORKTREE` are the server's paths. See [hooks.md](hooks.md).
 
 ---
 
@@ -218,7 +218,7 @@ running" is how a stack ends up somewhere nothing will look for it. `--force`
 overrides either refusal, and prints the recovery sequence (flip back, `wsxx down`,
 flip again) for whatever it left behind.
 
-**`wsxx remote set/unset` rewrites `.ws.json`** through its own types, so any keys
+**`wsxx remote set/unset` rewrites `.wsx.json`** through its own types, so any keys
 it doesn't model are dropped. Everything documented in the schema round-trips.
 
 **`ss` is required on the server.** Without it every port reads as busy and

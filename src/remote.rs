@@ -1,6 +1,6 @@
 //! SSH plumbing and the [`Site`] abstraction that lets stack subsystems run
 //! either locally or on a remote server without branching on which. The SSH
-//! binary is resolved through `WS_SSH` so tests can substitute a fake.
+//! binary is resolved through `WSX_SSH` so tests can substitute a fake.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
@@ -147,7 +147,7 @@ impl Site {
 }
 
 fn ssh_bin() -> String {
-    std::env::var("WS_SSH").unwrap_or_else(|_| "ssh".to_string())
+    std::env::var("WSX_SSH").unwrap_or_else(|_| "ssh".to_string())
 }
 
 /// Fail on password prompt and cap the connect wait; a dead host can't stall the caller.
@@ -169,7 +169,7 @@ fn ssh_fast(connection: &str) -> Command {
     c
 }
 
-/// Blocks argument injection (CWE-88, scp/git CVE-2017-1000117) from a hostile `connection` in a cloned `.ws.json`.
+/// Blocks argument injection (CWE-88, scp/git CVE-2017-1000117) from a hostile `connection` in a cloned `.wsx.json`.
 /// Defense-in-depth against SSH arg injection — rejects `-…` (option-shaped) and control chars (terminal escapes).
 pub fn connection_looks_safe(connection: &str) -> bool {
     !connection.is_empty()
@@ -240,39 +240,39 @@ fn resolve_to_ip(host: &str) -> Option<String> {
     Some(pick.ip().to_string())
 }
 
-/// Ships repo-invisible `.ws-hooks/` (which the worktree sync doesn't cover) as
+/// Ships repo-invisible `.wsx-hooks/` (which the worktree sync doesn't cover) as
 /// `tar | ssh 'tar -x'` with mode bits preserved so `+x` survives.
 pub fn push_ws_hooks(site: &Site, ws_root: &Path, base: &str) -> Result<()> {
     let Site::Remote { connection, .. } = site else { return Ok(()) };
-    if !ws_root.join(".ws-hooks").is_dir() {
+    if !ws_root.join(".wsx-hooks").is_dir() {
         return Ok(());
     }
     // `--warning=no-unknown-keyword` silences GNU tar's noise about the
     // `com.apple.provenance` xattr headers macOS `tar` stamps in.
     let mut tar = Command::new("tar")
-        .args(["-C", &ws_root.to_string_lossy(), "-cf", "-", ".ws-hooks"])
+        .args(["-C", &ws_root.to_string_lossy(), "-cf", "-", ".wsx-hooks"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .context("spawn tar for the .ws-hooks push")?;
+        .context("spawn tar for the .wsx-hooks push")?;
     let archive = tar.stdout.take().expect("tar stdout was piped");
     // Restore `+x` on shebanged files (a client-side editor may have dropped it),
     // leaving `.sql` seeds and sourced `lib/` fragments alone. Trailing `exit 0`
     // so the loop's last `grep` miss doesn't fail the whole chain.
     let remote = format!(
         "mkdir -p {b} && tar -C {b} --warning=no-unknown-keyword -xpf - && \
-         find {b}/.ws-hooks -type f -exec sh -c \
+         find {b}/.wsx-hooks -type f -exec sh -c \
          'for f do head -c2 \"$f\" | grep -q \"^#!\" && chmod +x \"$f\"; done; exit 0' _ {{}} +",
         b = shell_quote(base)
     );
     let out = ssh_command(connection, &remote, false)
         .stdin(Stdio::from(archive))
         .output()
-        .context("ssh for the .ws-hooks push")?;
+        .context("ssh for the .wsx-hooks push")?;
     let _ = tar.wait();
     if !out.status.success() {
         bail!(
-            "couldn't push .ws-hooks to {connection}: {}",
+            "couldn't push .wsx-hooks to {connection}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -401,7 +401,7 @@ struct EnvPrefix {
     via_env: bool,
 }
 
-/// A key like `WS_PORT_redis-cache` (from a dashed service) isn't a shell name, so bare `K=V` becomes the command word — remote script exits 127 while local works fine (`Command::env` accepts any name). Hand such pairs to `env` with each `K=V` shell-quoted, same shape `supervise::up` already uses. Also closes an injection: a key with `;` in bare form ran attacker code on the server.
+/// A key like `WSX_PORT_redis-cache` (from a dashed service) isn't a shell name, so bare `K=V` becomes the command word — remote script exits 127 while local works fine (`Command::env` accepts any name). Hand such pairs to `env` with each `K=V` shell-quoted, same shape `supervise::up` already uses. Also closes an injection: a key with `;` in bare form ran attacker code on the server.
 fn env_prefix(env: &[(&str, &str)]) -> EnvPrefix {
     let via_env = env.iter().any(|(k, _)| !is_shell_name(k));
     let mut words = if via_env { String::from("env ") } else { String::new() };
@@ -428,8 +428,8 @@ pub fn remote_script(dir: &str, env: &[(&str, &str)], command: &[String]) -> Str
     }
 }
 
-/// Remote analogue of [`crate::hooks`]; `WS_WORKSPACE_ROOT` is the synced-worktrees base
-/// (no `.ws.json` root on the server). Caller flushes the mutagen sync first.
+/// Remote analogue of [`crate::hooks`]; `WSX_WORKSPACE_ROOT` is the synced-worktrees base
+/// (no `.wsx.json` root on the server). Caller flushes the mutagen sync first.
 pub fn run_event(
     connection: &str,
     worktree_base: &str,
@@ -441,11 +441,11 @@ pub fn run_event(
 ) -> Result<std::process::ExitStatus> {
     let dir = worktree_path(worktree_base, task, repo);
     let mut env: Vec<(&str, &str)> = vec![
-        ("WS_REPO", repo),
-        ("WS_BRANCH_SANITIZED", task),
-        ("WS_HOOK_NAME", event),
-        ("WS_WORKTREE", &dir),
-        ("WS_WORKSPACE_ROOT", worktree_base),
+        ("WSX_REPO", repo),
+        ("WSX_BRANCH_SANITIZED", task),
+        ("WSX_HOOK_NAME", event),
+        ("WSX_WORKTREE", &dir),
+        ("WSX_WORKSPACE_ROOT", worktree_base),
     ];
     env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     // A repo that declares its own PATH still wins over the harvested one.
@@ -480,16 +480,16 @@ pub fn capture_status(
 ) -> Option<String> {
     let dir = worktree_path(base, task, repo);
     let mut env: Vec<(&str, &str)> = vec![
-        ("WS_REPO", repo),
-        ("WS_BRANCH_SANITIZED", task),
-        ("WS_HOOK_NAME", "status"),
-        ("WS_WORKTREE", &dir),
-        ("WS_WORKSPACE_ROOT", base),
+        ("WSX_REPO", repo),
+        ("WSX_BRANCH_SANITIZED", task),
+        ("WSX_HOOK_NAME", "status"),
+        ("WSX_WORKTREE", &dir),
+        ("WSX_WORKSPACE_ROOT", base),
     ];
     env.extend(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 
     // Same env-word rule as `remote_script` (see `env_prefix`): a key that isn't a
-    // shell name — `WS_PORT_redis-cache` from a dashed compose service — would be
+    // shell name — `WSX_PORT_redis-cache` from a dashed compose service — would be
     // run as a command instead of set, and the failure is silent here, since
     // `ssh_capture` turns the non-zero exit into `None` and `wsx list` just shows a
     // dash forever.
@@ -569,9 +569,9 @@ mod tests {
 
     #[test]
     fn site_home_path_is_remote_only() {
-        assert_eq!(Site::Local.home_path(".config/ws"), None);
+        assert_eq!(Site::Local.home_path(".config/wsx"), None);
         let site = Site::Remote { connection: "srv".into(), home: "/home/u/".into() };
-        assert_eq!(site.home_path(".config/ws").as_deref(), Some("/home/u/.config/ws"));
+        assert_eq!(site.home_path(".config/wsx").as_deref(), Some("/home/u/.config/wsx"));
     }
 
     #[test]
@@ -622,8 +622,8 @@ mod tests {
     #[test]
     fn remote_script_cds_exports_and_execs() {
         let cmd = vec!["php".to_string(), "artisan".to_string(), "migrate".to_string()];
-        let s = remote_script("workspace/feat-foo/api", &[("WS_REPO", "api")], &cmd);
-        assert_eq!(s, "cd workspace/feat-foo/api && WS_REPO=api exec php artisan migrate");
+        let s = remote_script("workspace/feat-foo/api", &[("WSX_REPO", "api")], &cmd);
+        assert_eq!(s, "cd workspace/feat-foo/api && WSX_REPO=api exec php artisan migrate");
     }
 
     #[test]
@@ -635,26 +635,26 @@ mod tests {
 
     #[test]
     fn remote_script_routes_a_non_name_env_key_through_env() {
-        // `WS_PORT_<svc>` carries the compose service name verbatim, so an ordinary
-        // `redis-cache` service gives `WS_PORT_redis-cache` — not a shell name. As a
+        // `WSX_PORT_<svc>` carries the compose service name verbatim, so an ordinary
+        // `redis-cache` service gives `WSX_PORT_redis-cache` — not a shell name. As a
         // bare assignment word the server shell runs it as a *command*, so the whole
-        // script died with `WS_PORT_redis-cache=20001: not found` (exit 127) and the
+        // script died with `WSX_PORT_redis-cache=20001: not found` (exit 127) and the
         // hook never ran, on a workspace that works locally.
         let cmd = vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()];
         let s = remote_script(
             "/w/t/api",
-            &[("WS_REPO", "api"), ("WS_PORT_redis-cache", "20001")],
+            &[("WSX_REPO", "api"), ("WSX_PORT_redis-cache", "20001")],
             &cmd,
         );
         assert_eq!(
             s,
-            "cd /w/t/api && exec env WS_REPO=api WS_PORT_redis-cache=20001 sh -c 'echo hi'"
+            "cd /w/t/api && exec env WSX_REPO=api WSX_PORT_redis-cache=20001 sh -c 'echo hi'"
         );
     }
 
     #[test]
     fn remote_script_quotes_a_hostile_env_key() {
-        // A declared `env` key from `.ws.json` is untrusted (the file rides along in
+        // A declared `env` key from `.wsx.json` is untrusted (the file rides along in
         // a clone). Unquoted, its `;` ended the assignment prefix and ran the rest as
         // its own command — which also escapes the `cd`-failure short-circuit.
         let cmd = vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()];
@@ -664,11 +664,11 @@ mod tests {
 
     #[test]
     fn shell_name_check_matches_the_shell() {
-        assert!(is_shell_name("WS_REPO"));
+        assert!(is_shell_name("WSX_REPO"));
         assert!(is_shell_name("_x9"));
         assert!(!is_shell_name(""));
         assert!(!is_shell_name("9lives")); // can't start with a digit
-        assert!(!is_shell_name("WS_PORT_redis-cache"));
+        assert!(!is_shell_name("WSX_PORT_redis-cache"));
         assert!(!is_shell_name("X; touch /tmp/ws-pwned; Y"));
     }
 

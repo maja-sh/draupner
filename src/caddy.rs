@@ -1,11 +1,11 @@
-//! Containerized Caddy on the shared `ws-net`, driven by its admin API.
+//! Containerized Caddy on the shared `wsx-net`, driven by its admin API.
 //!
 //! Caddy runs as a container (rootless host Caddy can't resolve container DNS)
 //! and dials worktree containers by `<project>-<service>-1`; host processes via
 //! `host.containers.internal`. Route CRUD is scoped by `@id` — never `/load` —
 //! so parallel `wsx` processes with distinct ids don't race. The admin API is
 //! published on a host-loopback TCP port (a unix socket can't cross the macOS
-//! podman-machine VM boundary). `WS_CADDY_ADMIN` treats Caddy + `ws-net` as
+//! podman-machine VM boundary). `WSX_CADDY_ADMIN` treats Caddy + `wsx-net` as
 //! externally managed (BYO / test stub).
 
 use anyhow::{bail, Context, Result};
@@ -13,10 +13,10 @@ use std::path::PathBuf;
 
 use crate::remote::Site;
 
-pub const WS_NET: &str = "ws-net";
+pub const WSX_NET: &str = "wsx-net";
 pub const CADDY_CONTAINER: &str = "ws-caddy";
 const CADDY_IMAGE: &str = "docker.io/library/caddy:2";
-const SERVER: &str = "ws";
+const SERVER: &str = "wsx";
 /// Non-privileged so Caddy binds with no setup; `:443` needs the sysctl.
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 const SOCK_MOUNT: &str = "/sock";
@@ -32,7 +32,7 @@ pub const HOST_ALIAS: &str = "host.containers.internal";
 
 fn admin_args(_site: &Site, path: &str) -> Vec<String> {
     // `_site` unused: for remote, `curl` runs on the server (see `curl`).
-    if let Ok(url) = std::env::var("WS_CADDY_ADMIN") {
+    if let Ok(url) = std::env::var("WSX_CADDY_ADMIN") {
         vec![format!("{}{}", url.trim_end_matches('/'), path)]
     } else {
         vec![format!("http://127.0.0.1:{}{path}", admin_port())]
@@ -40,12 +40,12 @@ fn admin_args(_site: &Site, path: &str) -> Vec<String> {
 }
 
 pub fn externally_managed() -> bool {
-    std::env::var_os("WS_CADDY_ADMIN").is_some()
+    std::env::var_os("WSX_CADDY_ADMIN").is_some()
 }
 
 pub fn https_port() -> u16 {
     // A `0` (truncated file / bad env) would publish port 0 — fall through instead.
-    if let Some(p) = std::env::var("WS_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+    if let Some(p) = std::env::var("WSX_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
         if p != 0 {
             return p;
         }
@@ -108,7 +108,7 @@ pub fn set_https_port(port: u16) -> Result<()> {
 }
 
 pub fn admin_port() -> u16 {
-    if let Some(p) = std::env::var("WS_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+    if let Some(p) = std::env::var("WSX_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
         if p != 0 {
             return p;
         }
@@ -132,7 +132,7 @@ pub fn set_admin_port(port: u16) -> Result<()> {
 ///
 /// Each segment is length-prefixed (`<len>_<value>`) so `(feat-web, api, x)`
 /// and `(feat, web-api, x)` can't collapse to the same id via the `-` split —
-/// bare concatenation had those two tuples producing `ws-feat-web-api-x` and
+/// bare concatenation had those two tuples producing `wsx-feat-web-api-x` and
 /// the second worktree silently clobbered the first's route.
 pub fn route_id(branch_sanitized: &str, repo: &str, service: &str) -> String {
     let a = id_part(branch_sanitized);
@@ -141,7 +141,7 @@ pub fn route_id(branch_sanitized: &str, repo: &str, service: &str) -> String {
     format!("ws-{}_{a}-{}_{b}-{}_{c}", a.len(), b.len(), c.len())
 }
 
-/// The id becomes one segment of the admin API path, and `.ws.json` (attacker-controlled) supplies `repo`/`service`; a slash or `..` in either would let curl's dot-segment normalisation retarget the request.
+/// The id becomes one segment of the admin API path, and `.wsx.json` (attacker-controlled) supplies `repo`/`service`; a slash or `..` in either would let curl's dot-segment normalisation retarget the request.
 fn id_part(s: &str) -> String {
     s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "-")
 }
@@ -167,7 +167,7 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     }
     runtime_available(site, runtime)?;
     let out = site
-        .command(&[runtime, "network", "create", WS_NET])
+        .command(&[runtime, "network", "create", WSX_NET])
         .output()
         .with_context(|| format!("spawn `{runtime} network create`"))?;
     if out.status.success() {
@@ -179,7 +179,7 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     if lower.contains("already") || lower.contains("exists") {
         return Ok(());
     }
-    bail!("create {WS_NET}: {}", err.trim());
+    bail!("create {WSX_NET}: {}", err.trim());
 }
 
 /// Race-safe: never removes a running container (peer's live routes); only stale
@@ -310,7 +310,7 @@ pub fn port_bindable(site: &Site, port: u16) -> bool {
 
 /// Fatal on infra failure: the override drops HTTP host-ports, so "up" without Caddy would be a lie.
 pub fn ensure_routing(site: &Site, runtime: &str, domain: &str, publish_addr: &str) -> Result<Dns> {
-    ensure_net(site, runtime).with_context(|| format!("routing needs the `{WS_NET}` network"))?;
+    ensure_net(site, runtime).with_context(|| format!("routing needs the `{WSX_NET}` network"))?;
     ensure_running(site, runtime, publish_addr)
         .context("caddy must be running to route HTTP services")?;
     Ok(resolve_domain(site, domain, expected_answer(publish_addr).as_deref()))
@@ -379,7 +379,7 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
     let config_vol = format!("{CONFIG_VOLUME}:/config");
     let config_json = format!("{SOCK_MOUNT}/caddy.json");
     let mut args = vec![
-        runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WS_NET, "--restart", "always",
+        runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WSX_NET, "--restart", "always",
     ];
     args.extend(host_alias_args(runtime));
     args.extend([
@@ -480,13 +480,13 @@ pub fn root_ca_pem(site: &Site) -> Result<String> {
         .context("no root_certificate in /pki/ca/local response")
 }
 
-/// Written to `~/.config/ws/` (0600), not `$TMPDIR`, to close the predictable-path clobber/symlink window before `sudo` reads it.
+/// Written to `~/.config/wsx/` (0600), not `$TMPDIR`, to close the predictable-path clobber/symlink window before `sudo` reads it.
 pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     // Fetched at `site` where Caddy runs, written to the HOST dir — CA is trusted in the client's store.
     let pem = root_ca_pem(site)?;
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join("ws-caddy-root.crt");
+    let path = dir.join("wsx-caddy-root.crt");
     crate::config::write_atomic(&path, pem.as_bytes())?;
     #[cfg(unix)]
     {
@@ -516,7 +516,7 @@ fn config_dir_at(site: &Site) -> Result<PathBuf> {
             Ok(std::fs::canonicalize(&dir).unwrap_or(dir))
         }
         Site::Remote { .. } => {
-            Ok(PathBuf::from(site.home_path(".config/ws").expect("remote site carries a home")))
+            Ok(PathBuf::from(site.home_path(".config/wsx").expect("remote site carries a home")))
         }
     }
 }
@@ -614,7 +614,7 @@ fn delete_id(site: &Site, id: &str) {
     let _ = curl(site, &args);
 }
 
-/// Under `WS_CADDY_ADMIN` the request always runs locally regardless of `site` — that URL is a host endpoint, not the server's admin port.
+/// Under `WSX_CADDY_ADMIN` the request always runs locally regardless of `site` — that URL is a host endpoint, not the server's admin port.
 fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
     let local = Site::Local;
     let effective = if externally_managed() { &local } else { site };
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn route_id_does_not_collide_across_dash_split() {
         // Bare concatenation collapsed these two tuples onto the same id
-        // (`ws-feat-web-api-x`), and Caddy's `@id`-keyed CRUD meant the second
+        // (`wsx-feat-web-api-x`), and Caddy's `@id`-keyed CRUD meant the second
         // worktree silently overwrote the first's route in the admin config.
         // Length-prefixed segments are provably unique per tuple.
         let a = route_id("feat-web", "api", "x");
@@ -727,21 +727,21 @@ mod tests {
 
     #[test]
     fn route_id_cannot_escape_its_admin_path_segment() {
-        // A cloned `.ws.json` names a service `/../../config`: interpolated raw,
+        // A cloned `.wsx.json` names a service `/../../config`: interpolated raw,
         // `/id/<id>/` becomes a path curl normalizes down to `/config/`, so the
         // best-effort route delete would wipe the whole running Caddy config.
         let id = route_id("feat-foo", "api", "/../../config");
         assert!(!id.contains('/'), "id must stay one path segment: {id}");
         assert!(!id.contains(".."), "id must carry no dot segments: {id}");
-        // Same for a hostile repo name, the other `.ws.json`-controlled part.
+        // Same for a hostile repo name, the other `.wsx.json`-controlled part.
         let id = route_id("feat-foo", "../../..", "web");
         assert!(!id.contains('/') && !id.contains(".."), "{id}");
     }
 
     #[test]
     fn route_json_matches_host_and_proxies_upstream() {
-        let r = route("ws-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80", false);
-        assert_eq!(r["@id"], "ws-feat-foo-web");
+        let r = route("wsx-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80", false);
+        assert_eq!(r["@id"], "wsx-feat-foo-web");
         assert_eq!(r["match"][0]["host"][0], "feat-foo.web.myapp.test");
         assert_eq!(r["match"][0]["host"].as_array().unwrap().len(), 1);
         assert_eq!(r["handle"][0]["handler"], "reverse_proxy");
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn wildcard_route_matches_the_base_and_every_tenant_subdomain() {
-        let r = route("ws-feat-foo-app", "feat-foo.app.myapp.test", "host.containers.internal:20001", true);
+        let r = route("wsx-feat-foo-app", "feat-foo.app.myapp.test", "host.containers.internal:20001", true);
         let hosts: Vec<&str> =
             r["match"][0]["host"].as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
         // `*.foo` alone would NOT match bare `foo`, so both must be present.
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn boot_config_has_on_demand_internal_tls_and_the_catch_all() {
-        // Hold the port-env lock so a concurrent `WS_HTTPS_PORT` mutation can't
+        // Hold the port-env lock so a concurrent `WSX_HTTPS_PORT` mutation can't
         // change it between the two reads.
         let _g = env_guard();
         let port = https_port();
@@ -788,9 +788,9 @@ mod tests {
     #[test]
     fn https_port_env_overrides_the_default() {
         let _g = env_guard();
-        std::env::set_var("WS_HTTPS_PORT", "443");
+        std::env::set_var("WSX_HTTPS_PORT", "443");
         assert_eq!(https_port(), 443);
-        std::env::remove_var("WS_HTTPS_PORT");
+        std::env::remove_var("WSX_HTTPS_PORT");
         assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
     }
 
@@ -803,19 +803,19 @@ mod tests {
     #[test]
     fn https_port_ignores_a_zero_value() {
         let _g = env_guard();
-        std::env::set_var("WS_HTTPS_PORT", "0");
+        std::env::set_var("WSX_HTTPS_PORT", "0");
         assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
-        std::env::remove_var("WS_HTTPS_PORT");
+        std::env::remove_var("WSX_HTTPS_PORT");
     }
 
     #[test]
     fn admin_port_seam_wins_and_zero_falls_through() {
         let _g = env_guard();
-        std::env::set_var("WS_CADDY_ADMIN_PORT", "2020");
+        std::env::set_var("WSX_CADDY_ADMIN_PORT", "2020");
         assert_eq!(admin_port(), 2020);
-        std::env::set_var("WS_CADDY_ADMIN_PORT", "0");
+        std::env::set_var("WSX_CADDY_ADMIN_PORT", "0");
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
-        std::env::remove_var("WS_CADDY_ADMIN_PORT");
+        std::env::remove_var("WSX_CADDY_ADMIN_PORT");
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
     }
 
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn admin_args_hit_the_loopback_admin_port() {
-        // Holds the env guard so a concurrent `WS_CADDY_ADMIN_PORT` mutation
+        // Holds the env guard so a concurrent `WSX_CADDY_ADMIN_PORT` mutation
         // can't make the two `admin_port()` reads disagree.
         let _g = env_guard();
         let args = admin_args(&Site::Local, "/config/");

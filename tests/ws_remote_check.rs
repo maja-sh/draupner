@@ -30,7 +30,7 @@ fn remote_check_all_green_reports_ready() {
 
     let out = f.run_with_env(
         &["remote", "check"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert!(out.status.success(), "healthy remote must exit 0:\n{err}");
@@ -51,7 +51,7 @@ fn remote_check_flags_a_failing_server_probe() {
 
     let out = f.run_with_env(
         &["remote", "check"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "a failing probe must exit 1:\n{err}");
@@ -70,7 +70,7 @@ fn remote_check_flags_a_server_that_cannot_resolve_its_own_domain() {
 
     let out = f.run_with_env(
         &["remote", "check"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "unresolvable domain must exit 1:\n{err}");
@@ -92,7 +92,7 @@ fn remote_check_without_a_domain_omits_the_dns_probe() {
 
     let out = f.run_with_env(
         &["remote", "check"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert!(out.status.success(), "a domainless remote must still pass:\n{err}");
@@ -109,7 +109,7 @@ fn remote_check_unreachable_ssh_skips_server_probes() {
 
     let out = f.run_with_env(
         &["remote", "check"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "unreachable remote must exit 1:\n{err}");
@@ -127,7 +127,7 @@ fn remote_check_host_flag_overrides_and_defaults_the_path() {
 
     let out = f.run_with_env(
         &["remote", "check", "--host", "otherbox"],
-        &[("WS_SSH", ssh.to_str().unwrap()), ("WS_MUTAGEN", mutagen.to_str().unwrap())],
+        &[("WSX_SSH", ssh.to_str().unwrap()), ("WSX_MUTAGEN", mutagen.to_str().unwrap())],
     );
     let err = stderr(&out);
     assert!(out.status.success(), "--host healthy check must pass:\n{err}");
@@ -142,7 +142,7 @@ fn remote_check_local_mode_reports_gaps() {
     f.write_ws_json(r#"{"domain":"myapp.test","repos":["api"]}"#);
 
     // Point the Caddy admin at a dead endpoint so the CA probe fails cleanly.
-    let out = f.run_with_env(&["remote", "check"], &[("WS_CADDY_ADMIN", "http://127.0.0.1:1")]);
+    let out = f.run_with_env(&["remote", "check"], &[("WSX_CADDY_ADMIN", "http://127.0.0.1:1")]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(1), "local gaps must exit 1:\n{err}");
     assert!(err.contains("wildcard DNS"), "expected the local DNS status line:\n{err}");

@@ -61,7 +61,7 @@ fn setup_port_443_persists_and_flags_the_sysctl_gap() {
     assert!(err.contains("HTTPS port set to 443"), "port opt-in should be persisted:\n{err}");
     assert!(err.contains("privileged port"), "expected the privileged-port status line:\n{err}");
     assert!(
-        f.path().join(".config/ws/https_port").exists(),
-        "https_port must be persisted under ~/.config/ws"
+        f.path().join(".config/wsx/https_port").exists(),
+        "https_port must be persisted under ~/.config/wsx"
     );
 }

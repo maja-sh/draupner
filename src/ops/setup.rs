@@ -44,7 +44,7 @@ fn routing_address(cfg: &crate::config::WsConfig) -> Result<String> {
     crate::remote::routing_address(&remote.connection).ok_or_else(|| {
         crate::ops::op_failure(format!(
             "couldn't work out an address for the server `{}` — `ssh -G` didn't report a \
-             resolvable hostname. Set `remote.publish_address` in .ws.json to the address \
+             resolvable hostname. Set `remote.publish_address` in .wsx.json to the address \
              this machine reaches the server at.",
             remote.connection
         ))
