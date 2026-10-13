@@ -90,7 +90,7 @@ fn aggregate_short_row(key: &str, rows: &[(ListRow, Option<String>)]) -> ListSho
         .collect();
     let total = kinds.len();
     let healthy = kinds.iter().filter(|k| **k == Some(StatusKind::Healthy)).count();
-    let crashed = kinds.iter().any(|k| *k == Some(StatusKind::Crashed));
+    let crashed = kinds.contains(&Some(StatusKind::Crashed));
     let stopped = kinds.iter().all(|k| *k == Some(StatusKind::Stopped));
     let all_healthy = kinds.iter().all(|k| *k == Some(StatusKind::Healthy));
 
