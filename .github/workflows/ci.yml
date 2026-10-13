@@ -17,12 +17,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       # Warnings-as-errors matches the local release-build discipline.
       - name: Build
         run: cargo build --release
         env:
           RUSTFLAGS: "-D warnings"
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
       # Debug profile on purpose: the release profile sets `panic = "abort"`,
       # which the test harness can't use. Container-dependent integration tests
       # skip themselves when no runtime is present, so this is green without one.
