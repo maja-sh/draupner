@@ -54,16 +54,47 @@ jobs:
     permissions:
       contents: write   # create the release + upload assets
     steps:
+      # Full history so we can extract Release Notes trailers between tags.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true   # flatten all artifacts into dist/
+      # Pull the `Release Notes:` block out of each commit between the previous
+      # tag and this one. Skips N/A entries. See CLAUDE.md for the convention.
+      - name: Compile release notes
+        run: |
+          prev_tag=$(git describe --tags --abbrev=0 "${{ github.ref_name }}^" 2>/dev/null || true)
+          range="${prev_tag:+$prev_tag..}${{ github.ref_name }}"
+          {
+            git log --format=%B "$range" | awk '
+              /^Release Notes:/ { in_notes=1; next }
+              in_notes && /^$/ { in_notes=0; next }
+              in_notes && !/^[[:space:]]*-[[:space:]]*N\/A[[:space:]]*$/ { print }
+            '
+            if [ -n "$prev_tag" ]; then
+              echo
+              echo "---"
+              echo
+              echo "**Full changelog**: ${{ github.server_url }}/${{ github.repository }}/compare/${prev_tag}...${{ github.ref_name }}"
+            fi
+          } > release-notes.md
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            dist/*
+          if [ -s release-notes.md ]; then
+            gh release create "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" \
+              --title "${{ github.ref_name }}" \
+              --notes-file release-notes.md \
+              dist/*
+          else
+            gh release create "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" \
+              --title "${{ github.ref_name }}" \
+              --generate-notes \
+              dist/*
+          fi
