@@ -14,7 +14,7 @@ so the underlying mechanisms are cross-platform; what's missing:
 - Surface the `Platform::Linux` paths currently gated off in `src/setup.rs`.
 - Add `x86_64-unknown-linux-gnu` back to the release matrix in
   `.github/workflows/release.yml` — the matrix shape was kept for exactly this.
-- Exercise the routing and DNS pieces that only run on the mac client today.
+- Exercise the routing and DNS pieces that only run on the macOS client today.
 
 ---
 

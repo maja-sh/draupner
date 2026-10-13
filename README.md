@@ -1,9 +1,9 @@
-# ws
+# wsx
 
-Multi-repo worktree orchestration.
+Multi-repo worktree orchestration — the `ws` command.
 
 > **Platform:** macOS is the only supported platform today. Linux support is
-> on the roadmap.
+> on the roadmap; Windows users can run via WSL once that lands.
 
 One command creates a git worktree for the same branch across several repos,
 brings each repo's stack up in isolation — its own containers, its own ports, its
@@ -126,6 +126,28 @@ allocated host port, recorded so it stays stable across `up` runs. An HTTP
 service instead gets a *hostname* — `<branch>.<subdomain>.<domain>` — routed by a
 shared Caddy, so any number of branches share one HTTPS port. That split is why
 `ws` cares whether a service is HTTP: hostnames multiplex, raw TCP can't.
+
+---
+
+## Where `wsx` fits
+
+Related tools solve related but different problems:
+
+- **Monorepo build tools** (Nx, Turborepo, Rush) — great at caching and task
+  orchestration *inside one repo*. `wsx` is about running N branches × N
+  separate repos side by side; the orchestration seam is "which branch" and
+  "which services," not "which build graph."
+- **Devcontainers / dip / Lando** — reproducible environments for one checkout.
+  `wsx` assumes you already have those and solves what happens when you want
+  several of them running at the same time without them fighting over ports,
+  container names, and database volumes.
+- **Docker Compose profiles** — a lightweight way to run subsets of services.
+  `wsx` sits *above* compose and generates per-branch overrides so the same
+  compose file can run multiple times without collision.
+
+If any of those already solve your problem, you don't need `wsx` on top. If you
+keep running into the "second branch wants a second stack" wall, that's the
+space this fills.
 
 ---
 
