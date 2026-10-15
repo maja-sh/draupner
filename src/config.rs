@@ -10,7 +10,7 @@ pub struct WsConfig {
     /// Private TLD for per-worktree hostnames, e.g. `myapp.test`; top-level because routing applies to local and remote alike.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub domain: Option<String>,
-    /// Container runtime for `wsx`'s own calls; absent → detected on this machine's PATH (see `runtime`).
+    /// Container runtime for `drup`'s own calls; absent → detected on this machine's PATH (see `runtime`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub runtime: Option<String>,
     /// Remote-offload block; absent → the workspace runs locally.
@@ -28,7 +28,7 @@ pub struct RemoteConfig {
     /// Parent dir on the server holding the synced worktrees; relative paths resolve against the SSH login home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
-    /// Address the server's Caddy publishes on; omitted → all interfaces, since offload's point is that another machine reaches it. Only read when Caddy is created; changing it recreates the container on the next `wsx up`.
+    /// Address the server's Caddy publishes on; omitted → all interfaces, since offload's point is that another machine reaches it. Only read when Caddy is created; changing it recreates the container on the next `drup up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_address: Option<String>,
 }
@@ -45,10 +45,10 @@ impl RemoteConfig {
     }
 }
 
-/// Rewrite a `.wsx-hooks/`-prefixed command to run under `$WSX_WORKSPACE_ROOT` so it resolves the same locally and on the server; the var is quoted to survive spaces.
-pub fn anchor_ws_hooks(cmd: &str) -> String {
-    match cmd.strip_prefix(".wsx-hooks/") {
-        Some(rest) => format!("\"$WSX_WORKSPACE_ROOT\"/.wsx-hooks/{rest}"),
+/// Rewrite a `.drup-hooks/`-prefixed command to run under `$DRUP_WORKSPACE_ROOT` so it resolves the same locally and on the server; the var is quoted to survive spaces.
+pub fn anchor_drup_hooks(cmd: &str) -> String {
+    match cmd.strip_prefix(".drup-hooks/") {
+        Some(rest) => format!("\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/{rest}"),
         None => cmd.to_string(),
     }
 }
@@ -78,16 +78,16 @@ pub struct RepoConfig {
     /// Routing + per-service ports; auto-derived from `<runtime> compose config` for a compose repo (this is the override layer), required for a host repo.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub services: BTreeMap<String, ServiceConfig>,
-    /// Lifecycle commands keyed by event; supersedes `.wsx-hooks/`. Most run where the stack lives; `prepare` runs on the client even when offloading so it can stage local-only data before the up flush carries it to the server. `BTreeMap` for deterministic rewrites — `.wsx.json` isn't gitignored.
+    /// Lifecycle commands keyed by event; supersedes `.drup-hooks/`. Most run where the stack lives; `prepare` runs on the client even when offloading so it can stage local-only data before the up flush carries it to the server. `BTreeMap` for deterministic rewrites — `.drup.json` isn't gitignored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scripts: BTreeMap<String, Script>,
-    /// Env-var injection: your var name → a `${WSX_*}` template. A sibling's `${WSX_HOST_<repo>.<svc>}` from an unbuilt peer leaves the token literal. `BTreeMap` for deterministic injection order.
+    /// Env-var injection: your var name → a `${DRUP_*}` template. A sibling's `${DRUP_HOST_<repo>.<svc>}` from an unbuilt peer leaves the token literal. `BTreeMap` for deterministic injection order.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// Format-blind config templates: committed `src` rendered to gitignored `dest` with `${WSX_*}` tokens substituted.
+    /// Format-blind config templates: committed `src` rendered to gitignored `dest` with `${DRUP_*}` tokens substituted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<Template>,
-    /// Untracked files seeded verbatim from the main checkout into each new worktree at `wsx new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
+    /// Untracked files seeded verbatim from the main checkout into each new worktree at `drup new`, before post-create and any remote sync. No-clobber; unmatched sources are skipped. The lane for dev certs/keys/env not in git.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
     /// Per-worktree git-exclude entries appended to <wt>/.git/info/exclude.
@@ -100,13 +100,13 @@ pub struct RepoConfig {
 pub enum RepoKind {
     /// Compose stack; N copies de-conflicted via a generated compose override.
     Container,
-    /// Host process supervised as a detached `wsx`-owned process — no systemd/launchd.
+    /// Host process supervised as a detached `drup`-owned process — no systemd/launchd.
     Host,
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 pub struct ServiceConfig {
-    /// A string is the subdomain (`"api"` → `<branch>.api.<domain>`); `true` uses the service name; absent/`false` means raw TCP with an allocated `WSX_PORT_<service>`.
+    /// A string is the subdomain (`"api"` → `<branch>.api.<domain>`); `true` uses the service name; absent/`false` means raw TCP with an allocated `DRUP_PORT_<service>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpDecl>,
     pub port: u16,
@@ -173,9 +173,9 @@ pub enum Script {
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RichScript {
     pub cmd: String,
-    /// `true` → ws runs this hook with inherited stdio so a `sudo` prompt
+    /// `true` → drup runs this hook with inherited stdio so a `sudo` prompt
     /// (or any other `read -p`-style interaction) reaches the user. Under a
-    /// non-TTY invoker (Claude Code / CI / `nohup`) ws refuses to run the
+    /// non-TTY invoker (Claude Code / CI / `nohup`) drup refuses to run the
     /// hook with exit code 3; see docs/hooks.md.
     #[serde(default, skip_serializing_if = "is_false")]
     pub interactive: bool,
@@ -190,9 +190,9 @@ impl Script {
         }
     }
 
-    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.wsx-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
+    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.drup-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
     pub fn joined(&self) -> String {
-        self.commands().iter().map(|c| anchor_ws_hooks(c)).collect::<Vec<_>>().join(" && ")
+        self.commands().iter().map(|c| anchor_drup_hooks(c)).collect::<Vec<_>>().join(" && ")
     }
 
     pub fn is_interactive(&self) -> bool {
@@ -210,10 +210,10 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Runtimes `wsx` drives, in detection-preference order.
+/// Runtimes `drup` drives, in detection-preference order.
 pub const RUNTIMES: [&str; 2] = ["docker", "podman"];
 
-/// Runtime used when detection finds nothing — the value `.wsx.json` carried before detection existed, and what `server-setup` installs.
+/// Runtime used when detection finds nothing — the value `.drup.json` carried before detection existed, and what `server-setup` installs.
 const RUNTIME_FALLBACK: &str = "podman";
 
 /// Container runtime on this machine's PATH (docker first). Probed once per process — PATH can't meaningfully change underneath a single run.
@@ -222,7 +222,7 @@ pub fn detect_runtime() -> Option<&'static str> {
     *DETECTED.get_or_init(|| RUNTIMES.into_iter().find(|r| on_path(r)))
 }
 
-/// Deliberately not a preflight — flows that never spawn a runtime (e.g. `wsx setup` with no `domain`) must stay a no-op. Called at the actual spawn sites, so a bare `No such file or directory` becomes a real explanation.
+/// Deliberately not a preflight — flows that never spawn a runtime (e.g. `drup setup` with no `domain`) must stay a no-op. Called at the actual spawn sites, so a bare `No such file or directory` becomes a real explanation.
 pub fn ensure_available(runtime: &str) -> Result<()> {
     if on_path(runtime) {
         return Ok(());
@@ -230,13 +230,13 @@ pub fn ensure_available(runtime: &str) -> Result<()> {
     // The two cases want different advice: nothing installed → "install one"; a pin naming something absent → "fix the pin".
     match detect_runtime() {
         None => anyhow::bail!(
-            "no container runtime found — `wsx` drives {}. Install one, or set \
-             `runtime` in .wsx.json if yours is under another name.",
+            "no container runtime found — `drup` drives {}. Install one, or set \
+             `runtime` in .drup.json if yours is under another name.",
             RUNTIMES.join(" or ")
         ),
         Some(found) => anyhow::bail!(
             "`{runtime}` isn't on PATH, but `{found}` is. Either install `{runtime}` \
-             or change `runtime` in .wsx.json."
+             or change `runtime` in .drup.json."
         ),
     }
 }
@@ -339,7 +339,7 @@ impl RepoEntry {
     }
 }
 
-/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `wsx`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `WSX_KEEP_IMAGES=1` / `WSX_KEEP_VOLUMES=1` opt out of the image and volume drops respectively — the escape hatches `wsx rm --keep-images` and `wsx rm --keep-volumes` set. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.wsx.json`.
+/// Compose-lifecycle fallback for a container repo with no declared script; `post-remove` drops both worktree-scoped volumes and the compose project's built images, since both are `drup`-namespaced and orphan otherwise (recreating the branch would silently reuse stale data, or leak image layers indefinitely). `DRUP_KEEP_IMAGES=1` / `DRUP_KEEP_VOLUMES=1` opt out of the image and volume drops respectively — the escape hatches `drup rm --keep-images` and `drup rm --keep-volumes` set. `runtime` is `shell_quote`d because these run via `sh -c` from a possibly-cloned `.drup.json`.
 pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     let args = match event {
         "up" => "compose up -d",
@@ -351,7 +351,7 @@ pub fn default_script(runtime: &str, event: &str) -> Option<String> {
     Some(format!("{} {args}", crate::remote::shell_quote(runtime)))
 }
 
-/// Output vocabulary matches [`crate::supervise::Health::label`] so `wsx list`'s glyph classifier lights up the same way for host and container repos. The ratio is running/declared, not running/last-known-created — a service pulled from `.wsx.json` shouldn't inflate the denominator.
+/// Output vocabulary matches [`crate::supervise::Health::label`] so `drup list`'s glyph classifier lights up the same way for host and container repos. The ratio is running/declared, not running/last-known-created — a service pulled from `.drup.json` shouldn't inflate the denominator.
 fn status_script(runtime: &str) -> String {
     format!(
         "r=$({r} compose ps -q 2>/dev/null | wc -l | tr -d ' '); \
@@ -363,16 +363,16 @@ fn status_script(runtime: &str) -> String {
     )
 }
 
-/// Untag this compose project's built images (by name, never by id) after `down`, then prune dangling build-cache leaves. Using names lets podman's ref-count decide: a sibling worktree whose build cached to the same image ID keeps its own tag and the shared image survives — a force-rm by id would take the sibling's containers along with the image. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name. `WSX_KEEP_IMAGES=1` skips both the untag and the dangling prune.
+/// Untag this compose project's built images (by name, never by id) after `down`, then prune dangling build-cache leaves. Using names lets podman's ref-count decide: a sibling worktree whose build cached to the same image ID keeps its own tag and the shared image survives — a force-rm by id would take the sibling's containers along with the image. Reference filter naturally excludes pulled bases (`postgres:16`, `redis:7`, …) since compose names built images `<project>-<service>` while pulled ones keep their upstream repo name. `DRUP_KEEP_IMAGES=1` skips both the untag and the dangling prune.
 fn post_remove_script(runtime: &str) -> String {
     format!(
-        r#"v="-v"; [ -n "$WSX_KEEP_VOLUMES" ] && v=""
+        r#"v="-v"; [ -n "$DRUP_KEEP_VOLUMES" ] && v=""
 imgs=""
-[ -z "$WSX_KEEP_IMAGES" ] && imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null | grep -v '<none>' | sort -u)
+[ -z "$DRUP_KEEP_IMAGES" ] && imgs=$({r} images --filter reference="${{COMPOSE_PROJECT_NAME}}*" --format '{{{{.Repository}}}}:{{{{.Tag}}}}' 2>/dev/null | grep -v '<none>' | sort -u)
 {r} compose down $v
 status=$?
 [ -n "$imgs" ] && {r} rmi $imgs >/dev/null 2>&1
-[ -z "$WSX_KEEP_IMAGES" ] && {r} image prune -f >/dev/null 2>&1
+[ -z "$DRUP_KEEP_IMAGES" ] && {r} image prune -f >/dev/null 2>&1
 exit $status
 "#,
         r = crate::remote::shell_quote(runtime),
@@ -381,12 +381,12 @@ exit $status
 
 /// Whether `runtime` is safe to hand to the process spawner as a program name.
 ///
-/// `.wsx.json` isn't gitignored, so this value arrives with a clone, and it is
+/// `.drup.json` isn't gitignored, so this value arrives with a clone, and it is
 /// executed directly — `Site::command` / the compose calls pass it as `argv[0]`,
 /// and Rust runs any program string containing `/` as a path **relative to the
 /// process cwd**, i.e. the very workspace the hostile config came in. A clone
-/// carrying `{"runtime": ".wsx-hooks/helper"}` plus a committed, executable
-/// `.wsx-hooks/helper` would run it on the first `wsx setup` / `wsx remote check`,
+/// carrying `{"runtime": ".drup-hooks/helper"}` plus a committed, executable
+/// `.drup-hooks/helper` would run it on the first `drup setup` / `drup remote check`,
 /// before any prompt. `shell_quote` is no defence: the value *is* the program,
 /// not a shell word.
 ///
@@ -414,16 +414,16 @@ fn runtime_looks_safe(runtime: &str) -> bool {
         && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != "..")
 }
 
-/// Load a workspace config from `<workspace-root>/.wsx.json`.
+/// Load a workspace config from `<workspace-root>/.drup.json`.
 pub fn load(root: &Path) -> Result<WsConfig> {
-    let path = root.join(".wsx.json");
+    let path = root.join(".drup.json");
     let cfg: WsConfig = read_json(&path)?;
     refuse_legacy_hooks_field(&path)?;
-    // Reject a dangerous SSH destination at the choke point every op shares — `.wsx.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
+    // Reject a dangerous SSH destination at the choke point every op shares — `.drup.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
         if !crate::remote::connection_looks_safe(&r.connection) {
             anyhow::bail!(
-                "refusing an unsafe remote.connection `{}` in .wsx.json — an SSH host \
+                "refusing an unsafe remote.connection `{}` in .drup.json — an SSH host \
                  must not start with `-` (it would be parsed as an ssh option)",
                 r.connection
             );
@@ -432,11 +432,11 @@ pub fn load(root: &Path) -> Result<WsConfig> {
         if let Some(a) = r.publish_address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
             match a.parse::<std::net::IpAddr>() {
                 Ok(ip) if ip.is_multicast() => anyhow::bail!(
-                    "remote.publish_address `{a}` in .wsx.json is a multicast address — \
+                    "remote.publish_address `{a}` in .drup.json is a multicast address — \
                      give an address of the server itself"
                 ),
                 Err(_) => anyhow::bail!(
-                    "remote.publish_address `{a}` in .wsx.json is not an IP address — \
+                    "remote.publish_address `{a}` in .drup.json is not an IP address — \
                      give the server's tailnet/LAN address, or omit it to publish on all"
                 ),
                 Ok(_) => {}
@@ -444,11 +444,11 @@ pub fn load(root: &Path) -> Result<WsConfig> {
         }
     }
     // Same choke point, same reason as `remote.connection`: the value comes from
-    // a possibly-cloned `.wsx.json` and is executed. See `runtime_looks_safe`.
+    // a possibly-cloned `.drup.json` and is executed. See `runtime_looks_safe`.
     if let Some(rt) = cfg.runtime.as_deref() {
         if !runtime_looks_safe(rt) {
             anyhow::bail!(
-                "refusing an unsafe runtime `{rt}` in .wsx.json — the container runtime must \
+                "refusing an unsafe runtime `{rt}` in .drup.json — the container runtime must \
                  be a bare program name (`podman`, `docker`) or an absolute path to one; a \
                  relative path would run a program out of the repo this config arrived in"
             );
@@ -472,7 +472,7 @@ fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
             if event == "status" {
                 anyhow::bail!(
                     "`{}`.scripts.{event} is `interactive: true` — `status` runs in \
-                     parallel from `wsx list`, so an interactive status probe would \
+                     parallel from `drup list`, so an interactive status probe would \
                      collide across repos. `status` must never prompt.",
                     rc.name,
                 );
@@ -492,13 +492,13 @@ fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
 }
 
 // Migration shim: DELETE with `hooks::refuse_legacy_hook_file`. `RepoConfig.hooks`
-// was silently parseable and would be dropped on the next `wsx remote set` rewrite;
+// was silently parseable and would be dropped on the next `drup remote set` rewrite;
 // name it at load instead so a leftover block can't erase a user's config.
 
-/// Refuse a `.wsx.json` still carrying a repo's `hooks` override map.
+/// Refuse a `.drup.json` still carrying a repo's `hooks` override map.
 fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
     let raw = std::fs::read_to_string(path).unwrap_or_default();
-    // Cheap gate — `".wsx-hooks/…"` script values don't have the bare-key quote pattern, so the reparse stays rare.
+    // Cheap gate — `".drup-hooks/…"` script values don't have the bare-key quote pattern, so the reparse stays rare.
     if !raw.contains("\"hooks\"") {
         return Ok(());
     }
@@ -521,37 +521,37 @@ fn refuse_legacy_hooks_field(path: &Path) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "`hooks` in {} ({}) points at the hook-file mechanism removed in ws 0.6 — move each \
+        "`hooks` in {} ({}) points at the hook-file mechanism removed in drup 0.6 — move each \
          entry into that repo's `scripts` block instead. The contract changed with it: a script \
          runs with cwd = the worktree (not the workspace root), and the worktree path arrives as \
-         $WSX_WORKTREE (not $1).",
+         $DRUP_WORKTREE (not $1).",
         path.display(),
         stale.join(", "),
     )
 }
 
-/// Machine-global `wsx` config dir: `$XDG_CONFIG_HOME/wsx/` or `~/.config/wsx/`.
+/// Machine-global `drup` config dir: `$XDG_CONFIG_HOME/drup/` or `~/.config/drup/`.
 ///
 /// Errors when neither `XDG_CONFIG_HOME` nor `HOME` is set — falling back to `.`
-/// would let a hostile clone's `./.config/wsx/config.toml` be trusted as global config.
+/// would let a hostile clone's `./.config/drup/config.toml` be trusted as global config.
 pub fn global_dir() -> Result<PathBuf> {
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
         if !x.is_empty() {
-            return Ok(PathBuf::from(x).join("wsx"));
+            return Ok(PathBuf::from(x).join("drup"));
         }
     }
     let home = std::env::var("HOME").map_err(|_| {
         anyhow::anyhow!(
-            "cannot locate global wsx config: neither $XDG_CONFIG_HOME nor $HOME is set"
+            "cannot locate global drup config: neither $XDG_CONFIG_HOME nor $HOME is set"
         )
     })?;
     if home.is_empty() {
-        anyhow::bail!("cannot locate global wsx config: $HOME is empty");
+        anyhow::bail!("cannot locate global drup config: $HOME is empty");
     }
-    Ok(PathBuf::from(home).join(".config").join("wsx"))
+    Ok(PathBuf::from(home).join(".config").join("drup"))
 }
 
-/// Cross-workspace defaults at `~/.config/wsx/config.toml`. `deny_unknown_fields` because `wsx config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `wsx` wrote before a downgrade) would be silently dropped on next write.
+/// Cross-workspace defaults at `~/.config/drup/config.toml`. `deny_unknown_fields` because `drup config set` rewrites the whole file — a silently-parsed unknown key (typo, or a section a newer `drup` wrote before a downgrade) would be silently dropped on next write.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
@@ -566,7 +566,7 @@ struct GlobalRemote {
     host: Option<String>,
 }
 
-/// Every key `wsx config` understands.
+/// Every key `drup config` understands.
 pub const GLOBAL_KEYS: &[&str] = &["remote.host"];
 
 fn unknown_key(key: &str) -> anyhow::Error {
@@ -607,7 +607,7 @@ impl GlobalConfig {
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "remote.host" => {
-                // Same guard as `.wsx.json`'s remote.connection — this value lands as an ssh argv element.
+                // Same guard as `.drup.json`'s remote.connection — this value lands as an ssh argv element.
                 crate::remote::ensure_connection_safe(value)?;
                 self.remote.get_or_insert_with(Default::default).host = Some(value.to_string());
             }
@@ -674,7 +674,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `wsx` writes.
+/// Pretty JSON with a trailing newline — the single home for the on-disk JSON style `drup` writes.
 pub fn write_json_pretty<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value)?;
     write_atomic(path, format!("{s}\n").as_bytes())
@@ -690,20 +690,20 @@ fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::anchor_ws_hooks;
+    use super::anchor_drup_hooks;
 
     #[test]
-    fn anchor_ws_hooks_prefixes_only_a_ws_hooks_reference() {
+    fn anchor_drup_hooks_prefixes_only_a_drup_hooks_reference() {
         assert_eq!(
-            anchor_ws_hooks(".wsx-hooks/up.sh"),
-            "\"$WSX_WORKSPACE_ROOT\"/.wsx-hooks/up.sh"
+            anchor_drup_hooks(".drup-hooks/up.sh"),
+            "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/up.sh"
         );
         assert_eq!(
-            anchor_ws_hooks(".wsx-hooks/db/seed.sh --fresh"),
-            "\"$WSX_WORKSPACE_ROOT\"/.wsx-hooks/db/seed.sh --fresh"
+            anchor_drup_hooks(".drup-hooks/db/seed.sh --fresh"),
+            "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/db/seed.sh --fresh"
         );
-        assert_eq!(anchor_ws_hooks("podman compose up -d"), "podman compose up -d");
-        assert_eq!(anchor_ws_hooks("echo .wsx-hooks/x"), "echo .wsx-hooks/x");
+        assert_eq!(anchor_drup_hooks("podman compose up -d"), "podman compose up -d");
+        assert_eq!(anchor_drup_hooks("echo .drup-hooks/x"), "echo .drup-hooks/x");
     }
 
     #[test]
@@ -742,8 +742,8 @@ mod tests {
         let s = default_script("podman", "post-remove").expect("post-remove default");
         assert!(s.contains("podman compose down $v"), "compose down must gate volumes on $v: {s}");
         assert!(
-            s.contains(r#"[ -n "$WSX_KEEP_VOLUMES" ]"#),
-            "must branch on $WSX_KEEP_VOLUMES to toggle the -v flag: {s}"
+            s.contains(r#"[ -n "$DRUP_KEEP_VOLUMES" ]"#),
+            "must branch on $DRUP_KEEP_VOLUMES to toggle the -v flag: {s}"
         );
         // Enumerate by tag name, not `-q` (image id): siblings whose builds cached to
         // the same id share the underlying image, and force-removing by id would take
@@ -762,8 +762,8 @@ mod tests {
             "must also drop dangling build-cache leaves so per-worktree churn doesn't need manual pruning: {s}"
         );
         assert!(
-            s.contains(r#"[ -z "$WSX_KEEP_IMAGES" ]"#),
-            "must branch on $WSX_KEEP_IMAGES before enumerating images: {s}"
+            s.contains(r#"[ -z "$DRUP_KEEP_IMAGES" ]"#),
+            "must branch on $DRUP_KEEP_IMAGES before enumerating images: {s}"
         );
         assert!(s.contains("exit $status"), "must exit with compose down's status, not rmi's: {s}");
     }
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn load_refuses_interactive_on_status() {
-        // Status probes fan out in parallel from `wsx list`; an interactive status
+        // Status probes fan out in parallel from `drup list`; an interactive status
         // would collide with every other repo's probe. Refuse at load time.
         let dir = tempfile::tempdir().unwrap();
         write_cfg(
@@ -872,7 +872,7 @@ mod tests {
     }
 
     fn write_cfg(dir: &Path, json: &str) {
-        std::fs::write(dir.join(".wsx.json"), json).unwrap();
+        std::fs::write(dir.join(".drup.json"), json).unwrap();
     }
 
     #[test]
@@ -909,19 +909,19 @@ mod tests {
     }
 
     /// The migration shim (delete with it): a leftover `hooks` override map must
-    /// be named, not parsed away — `wsx remote set` rewrites this file, so a
+    /// be named, not parsed away — `drup remote set` rewrites this file, so a
     /// silently-ignored block would be silently deleted.
     #[test]
     fn load_refuses_a_leftover_hooks_override_map() {
         let dir = tempfile::tempdir().unwrap();
-        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".wsx-hooks/api/up"}}]}"#);
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","hooks":{"up":".drup-hooks/api/up"}}]}"#);
         let err = load(dir.path()).err().expect("a `hooks` block must be refused").to_string();
         assert!(err.contains("`hooks`") && err.contains("api"), "{err}");
-        assert!(err.contains("$WSX_WORKTREE"), "the new worktree contract must be named: {err}");
+        assert!(err.contains("$DRUP_WORKTREE"), "the new worktree contract must be named: {err}");
 
-        // A `.wsx-hooks/…` *script* value is the supported lane — never mistaken
+        // A `.drup-hooks/…` *script* value is the supported lane — never mistaken
         // for the removed field by the cheap substring gate.
-        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".wsx-hooks/api/up"}}]}"#);
+        write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#);
         assert!(load(dir.path()).is_ok());
     }
 
@@ -937,7 +937,7 @@ mod tests {
     fn parses_top_level_domain_runtime_and_remote() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".wsx.json"),
+            dir.path().join(".drup.json"),
             r#"{"domain":"myapp.test","repos":["api"],"remote":{"connection":"srv","workspace_path":"workspace"}}"#,
         )
         .unwrap();
@@ -952,10 +952,10 @@ mod tests {
 
     #[test]
     fn load_rejects_an_option_shaped_remote_connection() {
-        // A hostile `.wsx.json` can arrive via a clone (not gitignored).
+        // A hostile `.drup.json` can arrive via a clone (not gitignored).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".wsx.json"),
+            dir.path().join(".drup.json"),
             r#"{"remote":{"connection":"-oProxyCommand=touch /tmp/pwned"},"repos":[]}"#,
         )
         .unwrap();
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn runtime_override_is_read() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".wsx.json"), r#"{"runtime":"docker","repos":[]}"#).unwrap();
+        std::fs::write(dir.path().join(".drup.json"), r#"{"runtime":"docker","repos":[]}"#).unwrap();
         assert_eq!(load(dir.path()).unwrap().runtime(), "docker");
     }
 
@@ -978,7 +978,7 @@ mod tests {
     fn detection_prefers_docker() {
         assert_eq!(RUNTIMES, ["docker", "podman"]);
         if let Some(found) = detect_runtime() {
-            assert!(RUNTIMES.contains(&found), "detected {found}, which ws can't drive");
+            assert!(RUNTIMES.contains(&found), "detected {found}, which drup can't drive");
         }
     }
 
@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn an_absent_runtime_detects_locally_but_not_remotely() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".wsx.json");
+        let path = dir.path().join(".drup.json");
 
         std::fs::write(&path, r#"{"repos":[]}"#).unwrap();
         assert_eq!(load(dir.path()).unwrap().runtime(), detect_runtime().unwrap_or("podman"));
@@ -1002,25 +1002,25 @@ mod tests {
         match detect_runtime() {
             Some(found) => {
                 assert!(err.contains(found), "should name the runtime that IS here: {err}");
-                assert!(err.contains(".wsx.json"), "should point at the pin: {err}");
+                assert!(err.contains(".drup.json"), "should point at the pin: {err}");
             }
             None => assert!(err.contains("no container runtime found"), "{err}"),
         }
-        // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `wsx` command.
+        // `git` stands in for a present binary — which runtimes exist is exactly the CI variable this test can't pin down, and `git` is a hard requirement of every `drup` command.
         assert!(ensure_available("git").is_ok());
     }
 
     #[test]
     fn load_refuses_a_runtime_that_isnt_a_program_name() {
-        // The value is executed as `argv[0]`, and a cloned `.wsx.json` can name a
-        // program *inside the clone* — `.wsx-hooks/helper` next to a committed,
-        // executable helper runs on the first `wsx setup`, before any prompt.
+        // The value is executed as `argv[0]`, and a cloned `.drup.json` can name a
+        // program *inside the clone* — `.drup-hooks/helper` next to a committed,
+        // executable helper runs on the first `drup setup`, before any prompt.
         for bad in [
-            ".wsx-hooks/setup-helper",
+            ".drup-hooks/setup-helper",
             "./payload",
             "../evil/podman",
             "sub/dir/podman",
-            "/proc/self/cwd/.wsx-hooks/setup-helper",
+            "/proc/self/cwd/.drup-hooks/setup-helper",
             "/usr/bin/../../tmp/payload",
             "-oProxyCommand=x",
             "podman --remote",
@@ -1055,12 +1055,12 @@ mod tests {
     fn parses_extended_repo_with_services_scripts_env_templates() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".wsx.json"),
+            dir.path().join(".drup.json"),
             r#"{"repos":[{
                 "name":"api","kind":"container",
                 "services":{"app":{"http":"api","port":80},"mysql":{"port":3306},"redis":{"port":6379,"shared":true}},
                 "scripts":{"post-create":["composer install","php artisan migrate"],"up":"docker compose up -d"},
-                "env":{"APP_URL":"https://${WSX_HOST_app}"},
+                "env":{"APP_URL":"https://${DRUP_HOST_app}"},
                 "templates":[{"src":"nginx.conf.tmpl","dest":"nginx.conf"}]
             }]}"#,
         )
@@ -1078,7 +1078,7 @@ mod tests {
 
         assert!(matches!(repo.scripts["post-create"], Script::Many(ref v) if v.len() == 2));
         assert!(matches!(repo.scripts["up"], Script::One(ref s) if s == "docker compose up -d"));
-        assert_eq!(repo.env["APP_URL"], "https://${WSX_HOST_app}");
+        assert_eq!(repo.env["APP_URL"], "https://${DRUP_HOST_app}");
         assert_eq!(repo.templates[0].src, "nginx.conf.tmpl");
         assert_eq!(repo.templates[0].dest, "nginx.conf");
     }
@@ -1087,7 +1087,7 @@ mod tests {
     fn http_true_and_bare_name_repo() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join(".wsx.json"),
+            dir.path().join(".drup.json"),
             r#"{"repos":["web",{"name":"api","services":{"app":{"http":true,"port":8080}}}]}"#,
         )
         .unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
         let back: GlobalConfig = toml::from_str(&toml_s).unwrap();
         assert_eq!(back.remote_host(), Some("srv"));
 
-        // A typo'd hand-edit must refuse at parse — `save` rewrites the whole file, so a silently-ignored key would be silently dropped by the next `wsx config set`.
+        // A typo'd hand-edit must refuse at parse — `save` rewrites the whole file, so a silently-ignored key would be silently dropped by the next `drup config set`.
         let e = toml::from_str::<GlobalConfig>("[remote]\nhosst = \"x\"\n")
             .map(|_| ())
             .expect_err("unknown TOML key must be refused");

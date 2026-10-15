@@ -27,7 +27,7 @@ pub fn run(short: bool) -> Result<()> {
     // `None` = unreachable remote; the listing still renders, just without status.
     let site = crate::remote::Site::resolve(&cfg).ok();
 
-    crate::ui::header("wsx-list", "");
+    crate::ui::header("drup-list", "");
 
     // Shared with `remote set` and `clean` so the ops can never disagree.
     let worktrees = workspace::worktrees(&ws.root, &cfg);
@@ -82,7 +82,7 @@ pub fn run(short: bool) -> Result<()> {
     Ok(())
 }
 
-/// Roll a task's repo rows up to `(worst-of glyph, running/total label)`. Any crashed repo dominates; a mix of healthy and stopped reads as degraded, not stopped, because "some up" is different from "none up". A row whose status ws couldn't classify counts against the numerator but not for the glyph — the visible ratio tells the truth about what ws knows.
+/// Roll a task's repo rows up to `(worst-of glyph, running/total label)`. Any crashed repo dominates; a mix of healthy and stopped reads as degraded, not stopped, because "some up" is different from "none up". A row whose status drup couldn't classify counts against the numerator but not for the glyph — the visible ratio tells the truth about what drup knows.
 fn aggregate_short_row(key: &str, rows: &[(ListRow, Option<String>)]) -> ListShortRow {
     let kinds: Vec<Option<StatusKind>> = rows
         .iter()
@@ -143,7 +143,7 @@ fn compute_row(
         })
     };
 
-    // From `.wsx-meta` only — no probing; reflects the last `up`.
+    // From `.drup-meta` only — no probing; reflects the last `up`.
     let services: Vec<(String, u16)> = if managed {
         crate::ports::load(ws_root, &sanitized, repo).into_iter().collect()
     } else {
@@ -154,7 +154,7 @@ fn compute_row(
     RowJob { task_key, row, branch, notes }
 }
 
-/// Classify a task-managed worktree's stack: host-supervised health first (ws
+/// Classify a task-managed worktree's stack: host-supervised health first (drup
 /// alone can report a crashed process), otherwise the declared `status` script
 /// (locally, or over SSH for a remote workspace). Diagnostic notes are returned
 /// separately so a parallel caller can serialize them without interleaving into
@@ -162,7 +162,7 @@ fn compute_row(
 ///
 /// **Precondition:** `wt_path` names a task-managed worktree (`.worktrees/<task>/<repo>`)
 /// on this workspace's `branch`. Unmanaged worktrees and out-of-tree checkouts
-/// have no ws lifecycle — the supervise/inject probes would run against paths
+/// have no drup lifecycle — the supervise/inject probes would run against paths
 /// they were never meant to know about. `compute_row` and `add::require_task_stopped`
 /// both filter to managed worktrees before calling this; new callers must too.
 pub(super) fn probe_status(
@@ -176,7 +176,7 @@ pub(super) fn probe_status(
 ) -> (Option<String>, Vec<String>) {
     let mut notes: Vec<String> = Vec::new();
 
-    // Only ws can report a crashed host process; a `status` script assumes the server is running.
+    // Only drup can report a crashed host process; a `status` script assumes the server is running.
     let host_health = cfg
         .is_host_repo(repo)
         .then(|| {
@@ -187,7 +187,7 @@ pub(super) fn probe_status(
         })
         .flatten();
 
-    // Lazy — skipped when ws already has bad news about a host process.
+    // Lazy — skipped when drup already has bad news about a host process.
     let mut declared = || -> Option<String> {
         if let Some(r) = cfg.remote.as_ref() {
             // Remote workspace: run the declared `status` script ON THE SERVER; skip when unreachable — remote status isn't knowable from here.
@@ -208,7 +208,7 @@ pub(super) fn probe_status(
                 _ => None,
             }
         } else {
-            // Local status; Inspect phase — no allocation or derivation from a status probe. `wsx list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
+            // Local status; Inspect phase — no allocation or derivation from a status probe. `drup list` is read-only, so a repo still on the removed hook-file mechanism gets the migration text as a note plus a short status label, never a silent blank or an aborted listing.
             let cmd = match hooks::resolve(
                 cfg, ws_root, repo, "status", cfg.is_container_repo(repo, wt_path),
             ) {
@@ -230,7 +230,7 @@ pub(super) fn probe_status(
         }
     };
 
-    // ws's crash beats the script; a healthy process defers to the script for detail.
+    // drup's crash beats the script; a healthy process defers to the script for detail.
     let status = match host_health {
         Some(h) if !h.is_ok() => Some(h.label()),
         Some(h) => declared().or_else(|| Some(h.label())),
@@ -240,7 +240,7 @@ pub(super) fn probe_status(
     (status, notes)
 }
 
-/// Not the raw `.wsx-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.wsx.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
+/// Not the raw `.drup-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.drup.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
 fn host_probe_ports(
     cfg: &config::WsConfig,
     site: &crate::remote::Site,
@@ -252,7 +252,7 @@ fn host_probe_ports(
     inject::prepare(cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(k, _)| k.starts_with("WSX_PORT_"))
+        .filter(|(k, _)| k.starts_with("DRUP_PORT_"))
         .filter_map(|(_, v)| v.parse().ok())
         .collect()
 }
@@ -272,7 +272,7 @@ fn group_label(key: &str, rows: &[(ListRow, Option<String>)]) -> String {
 mod tests {
     use super::*;
 
-    /// The `.wsx-meta` state a removed service leaves behind: its port is still in
+    /// The `.drup-meta` state a removed service leaves behind: its port is still in
     /// `ports` (nothing prunes that map short of teardown) while `services` was
     /// rewritten to the current set by the last `up`.
     #[test]
@@ -280,13 +280,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::write(
-            root.join(".wsx.json"),
+            root.join(".drup.json"),
             r#"{"repos":[{"name":"api","kind":"host","services":{"web":{"port":8080}}}]}"#,
         )
         .unwrap();
-        std::fs::create_dir_all(root.join(".wsx-meta")).unwrap();
+        std::fs::create_dir_all(root.join(".drup-meta")).unwrap();
         std::fs::write(
-            root.join(".wsx-meta/6_feat-x-3_api.json"),
+            root.join(".drup-meta/6_feat-x-3_api.json"),
             r#"{"ports":{"gone":20001,"web":20002},"services":{"web":{"port":8080}}}"#,
         )
         .unwrap();

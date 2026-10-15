@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in `wsx`! A few things to know before you open a PR.
+Thanks for your interest in `drup`! A few things to know before you open a PR.
 
 ## Build and test
 

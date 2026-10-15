@@ -390,7 +390,7 @@ pub enum StatusKind {
     Crashed,
 }
 
-/// Prefix-based so a script following the "running [N/M]"/"stopped"/"crashed" vocabulary lights up without ws having to know its exact wording. `None` when the string doesn't match a known state — the row still renders its raw text, just without a glyph.
+/// Prefix-based so a script following the "running [N/M]"/"stopped"/"crashed" vocabulary lights up without drup having to know its exact wording. `None` when the string doesn't match a known state — the row still renders its raw text, just without a glyph.
 pub fn classify_status(status: &str) -> Option<StatusKind> {
     let s = status.trim();
     if let Some(rest) = s.strip_prefix("running") {
@@ -474,7 +474,7 @@ pub fn clean_empty() {
     }
 }
 
-/// stdout is the one channel scripts consume (`wsx config get`); everything human-facing goes to stderr, and this line is never styled.
+/// stdout is the one channel scripts consume (`drup config get`); everything human-facing goes to stderr, and this line is never styled.
 pub fn value(text: &str) {
     println!("{text}");
 }
@@ -589,7 +589,7 @@ fn format_timing(d: Duration) -> String {
     }
 }
 
-/// Stops hooks from clearing the terminal, faking op status lines, or otherwise scribbling on ws's own output.
+/// Stops hooks from clearing the terminal, faking op status lines, or otherwise scribbling on drup's own output.
 fn strip_control(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();

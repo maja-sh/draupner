@@ -1,4 +1,4 @@
-//! Shared driver for `wsx up` and `wsx down` — run one hook event across every worktree of a branch, isolating per-repo failures.
+//! Shared driver for `drup up` and `drup down` — run one hook event across every worktree of a branch, isolating per-repo failures.
 
 use anyhow::Result;
 
@@ -8,7 +8,7 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
-/// Window for a launched host process to bind its allocated port before `wsx up` qualifies the line — long enough for an interpreted dev server, short enough not to stall on a compiled one. Missing it costs a note, not a failure.
+/// Window for a launched host process to bind its allocated port before `drup up` qualifies the line — long enough for an interpreted dev server, short enough not to stall on a compiled one. Missing it costs a note, not a failure.
 const BIND_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Outcome of a sweep, for the caller to render its own summary from.
@@ -67,14 +67,14 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
     if targets.is_empty() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `wsx new` first"
+            "no worktrees for {branch}; run `drup new` first"
         )));
     }
 
     // Resolving a remote site fetches the server `$HOME`, so this doubles as
     // reachability probe. `down` degrades to local-only cleanup when the
     // server is out of reach — the local mutagen forwards would otherwise
-    // leak (`wsx rm` already handles this the same way). Every other event
+    // leak (`drup rm` already handles this the same way). Every other event
     // still hard-fails: `up` without a reachable site would silently skip
     // half its work.
     let site = match Site::resolve(&cfg) {
@@ -107,7 +107,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     // `up` allocates; `down` only reads what's already allocated.
     let phase = if event == "up" { inject::Phase::Activate } else { inject::Phase::Inspect };
 
-    // Best-effort: a sweep of only raw-TCP repos needs neither Caddy nor `wsx-net`, so a broken infra shouldn't block it; failure surfaces later where routing is load-bearing (HTTP container's own `compose up`, or the demote below).
+    // Best-effort: a sweep of only raw-TCP repos needs neither Caddy nor `drup-net`, so a broken infra shouldn't block it; failure surfaces later where routing is load-bearing (HTTP container's own `compose up`, or the demote below).
     if event == "up" {
         if let Some(domain) = cfg.domain.as_deref().filter(|_| cfg.routing_active()) {
             // `ensure_routing` probes DNS; reuse its verdict for the auto-offer below rather than resolving twice.
@@ -117,7 +117,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             if site.is_remote() && configured.is_none() {
                 crate::ui::note(
                     "server Caddy binds every interface — worktree HTTP is exposed on all of \
-                     the server's networks; pin one with `remote.publish_address` in .wsx.json",
+                     the server's networks; pin one with `remote.publish_address` in .drup.json",
                 );
             }
             let dns = match crate::caddy::ensure_routing(&site, cfg.runtime(), domain, &publish) {
@@ -133,7 +133,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                     crate::caddy::Dns::Unresolved
                 }
             };
-            // Nudge to run `wsx setup` when a privileged bit (DNS/CA/:443) is missing. Remote nudges on DNS alone — the full probe would dial the server.
+            // Nudge to run `drup setup` when a privileged bit (DNS/CA/:443) is missing. Remote nudges on DNS alone — the full probe would dial the server.
             if !crate::caddy::externally_managed() {
                 let incomplete = if site.is_remote() {
                     !dns.is_ok()
@@ -143,7 +143,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
                 };
                 if incomplete {
                     crate::ui::nudge(
-                        "`wsx setup` — some routing setup (DNS / CA trust) is incomplete",
+                        "`drup setup` — some routing setup (DNS / CA trust) is incomplete",
                     );
                 }
             }
@@ -158,7 +158,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
             continue;
         }
 
-        // Host processes are supervised as a detached `wsx`-owned process, not run as a blocking hook.
+        // Host processes are supervised as a detached `drup`-owned process, not run as a blocking hook.
         if cfg.is_host_repo(repo) {
             sweep_host(&cfg, &site, &ws.root, wt, branch, &sanitized, repo, event, phase, &mut result);
             continue;
@@ -391,7 +391,7 @@ fn sweep_host(
         let step = crate::ui::step(repo, "stop");
         result.record(repo, step, crate::supervise::down(site, &name));
         if cfg.routing_active() {
-            // Best-effort (unlike a container): a host service keeps its real `WSX_PORT`, so a route sync failure doesn't strand it.
+            // Best-effort (unlike a container): a host service keeps its real `DRUP_PORT`, so a route sync failure doesn't strand it.
             let _ = sync_routes(cfg, site, root, sanitized, repo, "down");
         }
         sync_forwards(cfg, root, branch, sanitized, repo, "down");
@@ -413,14 +413,14 @@ fn sweep_host(
         }
     };
 
-    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `WSX_WORKSPACE_ROOT` is what a `.wsx-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
+    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `DRUP_WORKSPACE_ROOT` is what a `.drup-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
     let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
             let base = site.abs_base(&r.worktree_base(root));
-            // Ship `.wsx-hooks/` so a host `up` referencing `$WSX_WORKSPACE_ROOT/.wsx-hooks/…` resolves on the server.
+            // Ship `.drup-hooks/` so a host `up` referencing `$DRUP_WORKSPACE_ROOT/.drup-hooks/…` resolves on the server.
             if event == "up" {
-                if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
+                if let Err(e) = crate::remote::push_drup_hooks(site, root, &base) {
                     crate::ui::step(repo, &format!("{event} host")).fail(&format!("{e}"));
                     result.failed.push(repo.to_string());
                     return;
@@ -431,17 +431,17 @@ fn sweep_host(
         None => (wt.to_string_lossy().into_owned(), root.to_string_lossy().into_owned()),
     };
 
-    // The detached path bypasses the `Command`-based hook runner, so apply the base `WSX_*` contract here — otherwise `$WSX_BRANCH_SANITIZED` & friends come out empty. Third time this path has been caught missing what `remote::run_event` already does; they are overdue for a shared owner.
+    // The detached path bypasses the `Command`-based hook runner, so apply the base `DRUP_*` contract here — otherwise `$DRUP_BRANCH_SANITIZED` & friends come out empty. Third time this path has been caught missing what `remote::run_event` already does; they are overdue for a shared owner.
     let mut proc_env =
         crate::hooks::base_env(std::path::Path::new(&site_root), &worktree, repo, sanitized, event);
     proc_env.extend(extra_env.iter().cloned());
     match crate::supervise::up(site, &name, &worktree, &cmd, &proc_env) {
         Ok(started) => {
-            let label = if started { "start" } else { "already running (wsx down to apply changes)" };
+            let label = if started { "start" } else { "already running (drup down to apply changes)" };
             // A host service has no hostname to show — the bound port is the only user-visible handle. Sorted for stable output.
             let mut ports: Vec<String> = extra_env
                 .iter()
-                .filter_map(|(k, v)| k.strip_prefix("WSX_PORT_").map(|svc| format!("{svc}:{v}")))
+                .filter_map(|(k, v)| k.strip_prefix("DRUP_PORT_").map(|svc| format!("{svc}:{v}")))
                 .collect();
             ports.sort();
             let step = crate::ui::step(repo, label);
@@ -449,7 +449,7 @@ fn sweep_host(
             // Post-condition: `supervise::up` proves a process launched and survived half a second, not that it's serving the allocated port. Missed cases (server that bound a different port after finding this one busy, orphan still holding it) surfaced later as opaque failures.
             let allocated: Vec<u16> = extra_env
                 .iter()
-                .filter(|(k, _)| k.starts_with("WSX_PORT_"))
+                .filter(|(k, _)| k.starts_with("DRUP_PORT_"))
                 .filter_map(|(_, v)| v.parse().ok())
                 .collect();
             let health = crate::supervise::health_settled(site, &name, &allocated, BIND_GRACE);
@@ -459,15 +459,15 @@ fn sweep_host(
             match &health {
                 // Died after launch = failed `up`, not a green line with caveats.
                 Some(crate::supervise::Health::Crashed) => {
-                    step.fail(&format!("exited after launch — see ~/.wsx-run/{name}.log"));
+                    step.fail(&format!("exited after launch — see ~/.drup-run/{name}.log"));
                 }
                 // Alive but nothing on the port yet is genuinely ambiguous — `cargo watch` compiles before it listens — so qualify rather than fail.
                 Some(crate::supervise::Health::Silent(_)) => {
                     step.ok_with(&format!("{} — not listening yet", ports.join(", ")));
                     crate::ui::note(&format!(
-                        "{repo}: nothing is listening on the port wsx allocated yet. If it's still \
-                         starting this resolves itself — `wsx list` will say. Otherwise check \
-                         `~/.wsx-run/{name}.log`."
+                        "{repo}: nothing is listening on the port drup allocated yet. If it's still \
+                         starting this resolves itself — `drup list` will say. Otherwise check \
+                         `~/.drup-run/{name}.log`."
                     ));
                 }
                 // A stranger on the port is unambiguous: whatever just started can't have it.
@@ -495,7 +495,7 @@ fn sweep_host(
             }
             result.ran.push(repo.to_string());
             if cfg.routing_active() {
-                // Best-effort (see the `down` arm): a host service keeps its bound `WSX_PORT`.
+                // Best-effort (see the `down` arm): a host service keeps its bound `DRUP_PORT`.
                 let _ = sync_routes(cfg, site, root, sanitized, repo, "up");
             }
             // A squatted port belongs to some other process; forwarding `localhost:<port>` there would silently tunnel client traffic to the squatter.

@@ -10,17 +10,17 @@ use crate::workspace;
 
 /// Per-worktree process name, matching the mutagen session naming.
 pub fn proc_name(branch: &str, repo: &str) -> String {
-    format!("wsx-{}-{}", workspace::sanitize_branch(branch), repo)
+    format!("drup-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
-/// Absolute log path at the *site* where the process runs — `~/.wsx-run/<name>.log` expands against the local `$HOME` for a local site and the remote's captured `$HOME` for a remote one, so a caller printing the path never advertises a client path for a server-side log. `None` when the local `$HOME` isn't set.
+/// Absolute log path at the *site* where the process runs — `~/.drup-run/<name>.log` expands against the local `$HOME` for a local site and the remote's captured `$HOME` for a remote one, so a caller printing the path never advertises a client path for a server-side log. `None` when the local `$HOME` isn't set.
 pub fn log_path(site: &Site, name: &str) -> Option<std::path::PathBuf> {
     match site {
         Site::Local => {
             let home = std::env::var("HOME").ok().filter(|s| !s.is_empty())?;
-            Some(std::path::PathBuf::from(home).join(".wsx-run").join(format!("{name}.log")))
+            Some(std::path::PathBuf::from(home).join(".drup-run").join(format!("{name}.log")))
         }
-        Site::Remote { .. } => site.home_path(&format!(".wsx-run/{name}.log")).map(std::path::PathBuf::from),
+        Site::Remote { .. } => site.home_path(&format!(".drup-run/{name}.log")).map(std::path::PathBuf::from),
     }
 }
 
@@ -30,9 +30,9 @@ const STRANGER_MARKER: &str = "__WS_HOST_STRANGER__";
 /// The basename is `shell_quote`d because `name` is untrusted and `$(…)` still
 /// expands inside double quotes.
 fn paths(name: &str) -> (String, String, String) {
-    let pid = format!("\"$HOME/.wsx-run/\"{}", shell_quote(&format!("{name}.pid")));
-    let log = format!("\"$HOME/.wsx-run/\"{}", shell_quote(&format!("{name}.log")));
-    ("\"$HOME/.wsx-run\"".to_string(), pid, log)
+    let pid = format!("\"$HOME/.drup-run/\"{}", shell_quote(&format!("{name}.pid")));
+    let log = format!("\"$HOME/.drup-run/\"{}", shell_quote(&format!("{name}.log")));
+    ("\"$HOME/.drup-run\"".to_string(), pid, log)
 }
 
 fn read_pidfile(pid: &str) -> String {
@@ -59,7 +59,7 @@ fn tree_fn() -> &'static str {
 }
 
 /// Start `cmd` as a detached process named `name`. Idempotent: an already-running
-/// process returns `Ok(false)`. Changed `cmd`/`env` only takes effect after `wsx down`.
+/// process returns `Ok(false)`. Changed `cmd`/`env` only takes effect after `drup down`.
 pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, String)]) -> Result<bool> {
     if is_active(site, name) {
         return Ok(false);
@@ -113,7 +113,7 @@ pub fn up(site: &Site, name: &str, worktree: &str, cmd: &str, env: &[(String, St
         for line in tail.lines().map(str::trim).filter(|l| !l.is_empty()) {
             crate::ui::hook_line(name, line, true);
         }
-        bail!("exited immediately — see ~/.wsx-run/{name}.log");
+        bail!("exited immediately — see ~/.drup-run/{name}.log");
     }
     Ok(true)
 }
@@ -147,7 +147,7 @@ fn down_script(pid: &str) -> String {
     )
 }
 
-/// Stop a host process and drop its pid file. `TERM` then `KILL` — dead on return. A live pid whose identity doesn't match is left running *and reported*; silently forgetting would leak servers on the next `wsx up`.
+/// Stop a host process and drop its pid file. `TERM` then `KILL` — dead on return. A live pid whose identity doesn't match is left running *and reported*; silently forgetting would leak servers on the next `drup up`.
 pub fn down(site: &Site, name: &str) -> Result<()> {
     let (_, pid, _) = paths(name);
     let script = down_script(&pid);
@@ -161,7 +161,7 @@ pub fn down(site: &Site, name: &str) -> Result<()> {
     if String::from_utf8_lossy(&out.stdout).contains(STRANGER_MARKER) {
         crate::ui::note(&format!(
             "{name}: a process is recorded but its identity doesn't match — left running. \
-             Check `~/.wsx-run/{name}.pid` and stop it by hand if it's stale."
+             Check `~/.drup-run/{name}.pid` and stop it by hand if it's stale."
         ));
     }
     // The script always exits 0, so a non-zero status is transport failure.
@@ -191,7 +191,7 @@ pub fn is_active(site: &Site, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Liveness plus whether ws's allocated ports are held *by this process tree*
+/// Liveness plus whether drup's allocated ports are held *by this process tree*
 /// (vite may silently pick another port; an orphan may hold ours).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {
@@ -373,7 +373,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("wsx-supervise-{tag}-{}-{uniq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("drup-supervise-{tag}-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
     }
@@ -402,15 +402,15 @@ mod tests {
 
     #[test]
     fn proc_name_sanitizes_branch() {
-        assert_eq!(proc_name("feat/foo", "api"), "wsx-feat-foo-api");
-        assert_eq!(proc_name("plain", "web"), "wsx-plain-web");
+        assert_eq!(proc_name("feat/foo", "api"), "drup-feat-foo-api");
+        assert_eq!(proc_name("plain", "web"), "drup-plain-web");
     }
 
     #[test]
     fn paths_quote_a_hostile_name() {
-        let (_, pid, _) = paths("wsx-feat-x$(touch owned)-api");
-        assert!(pid.contains("'wsx-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
-        assert!(pid.starts_with("\"$HOME/.wsx-run/\""), "home must still expand: {pid}");
+        let (_, pid, _) = paths("drup-feat-x$(touch owned)-api");
+        assert!(pid.contains("'drup-feat-x$(touch owned)-api.pid'"), "name not quoted: {pid}");
+        assert!(pid.starts_with("\"$HOME/.drup-run/\""), "home must still expand: {pid}");
     }
 
     #[test]
@@ -456,11 +456,11 @@ mod tests {
     fn the_probe_script_runs_and_reports_a_process_that_was_never_started() {
         // Exercises the real shell script — parser testing can't catch syntax.
         assert_eq!(
-            health(&Site::Local, "ws-no-such-worktree-probe-test", &[]),
+            health(&Site::Local, "drup-no-such-worktree-probe-test", &[]),
             Some(Health::NotStarted)
         );
         assert_eq!(
-            health(&Site::Local, "ws-no-such-worktree-probe-test", &[20000]),
+            health(&Site::Local, "drup-no-such-worktree-probe-test", &[20000]),
             Some(Health::NotStarted)
         );
     }
@@ -471,7 +471,7 @@ mod tests {
         // (`Site::shell`), which is zsh on macOS and on plenty of Linux dev boxes.
         // zsh word-splits unquoted command substitution but not unquoted parameter
         // expansion, so `kill -TERM $victims` passed one "1234 5678" argument,
-        // signalled nothing, and fell through to `rm -f` on the pid file: `wsx down`
+        // signalled nothing, and fell through to `rm -f` on the pid file: `drup down`
         // reported success while leaking the tree and discarding the record of it.
         if !have("zsh") {
             eprintln!("skipping: no `zsh` to stand in for a non-POSIX login shell");
@@ -574,7 +574,7 @@ mod tests {
         // `ws_owner`'s two pid lists used to be iterated as bare `$pids`/`$2`, which
         // a login shell that doesn't split parameters (zsh) hands over as a single
         // word — so a healthy host process with more than one pid never matched and
-        // `wsx list` reported "held by another process" for its own server.
+        // `drup list` reported "held by another process" for its own server.
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch_dir("owner");
         let bin = dir.join("bin");
@@ -598,7 +598,7 @@ mod tests {
             }
             let verdict = |port: &str, tree: &str| {
                 let out = std::process::Command::new(shell)
-                    .args(["-c", script.as_str(), "ws-owner-test", port, tree])
+                    .args(["-c", script.as_str(), "drup-owner-test", port, tree])
                     .env("PATH", &path)
                     .stdin(Stdio::null())
                     .output()

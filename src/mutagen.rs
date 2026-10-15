@@ -1,5 +1,5 @@
-//! Thin wrapper over the `mutagen` CLI; the `ws-…` session naming is a documented
-//! stable contract. Binary resolved through `WSX_MUTAGEN` so tests can substitute a fake.
+//! Thin wrapper over the `mutagen` CLI; the `drup-…` session naming is a documented
+//! stable contract. Binary resolved through `DRUP_MUTAGEN` so tests can substitute a fake.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -7,12 +7,12 @@ use std::process::{Command, Stdio};
 
 use crate::workspace;
 
-/// Mutagen binary to invoke; overridable via `WSX_MUTAGEN` for tests.
+/// Mutagen binary to invoke; overridable via `DRUP_MUTAGEN` for tests.
 fn mutagen_bin() -> String {
-    std::env::var("WSX_MUTAGEN").unwrap_or_else(|_| "mutagen".to_string())
+    std::env::var("DRUP_MUTAGEN").unwrap_or_else(|_| "mutagen".to_string())
 }
 
-/// Cheap PATH check so `wsx init --remote` fails early instead of at `wsx new`.
+/// Cheap PATH check so `drup init --remote` fails early instead of at `drup new`.
 pub fn installed() -> bool {
     Command::new(mutagen_bin())
         .arg("version")
@@ -24,15 +24,15 @@ pub fn installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Canonical sync-session name; a stable contract users may target with `mutagen sync pause wsx-…`.
+/// Canonical sync-session name; a stable contract users may target with `mutagen sync pause drup-…`.
 pub fn session_name(branch: &str, repo: &str) -> String {
-    format!("wsx-{}-{}", workspace::sanitize_branch(branch), repo)
+    format!("drup-{}-{}", workspace::sanitize_branch(branch), repo)
 }
 
 /// Forwarding-session name, keyed by port and distinct from the sync name so
 /// operations on one kind never touch the other.
 pub fn forward_session_name(branch: &str, repo: &str, port: u16) -> String {
-    format!("wsx-fwd-{}-{repo}-{port}", workspace::sanitize_branch(branch))
+    format!("drup-fwd-{}-{repo}-{port}", workspace::sanitize_branch(branch))
 }
 
 /// Forward server-side `localhost:<port>` to the same address on this machine so
@@ -100,7 +100,7 @@ pub fn sync_ignores(configured: &[String], worktree: &Path) -> Vec<String> {
     ignores
 }
 
-/// The `beta` endpoint mutagen syncs to; `remote_path` matches what `wsx exec` uses so both agree on layout.
+/// The `beta` endpoint mutagen syncs to; `remote_path` matches what `drup exec` uses so both agree on layout.
 fn beta_endpoint(connection: &str, remote_path: &str) -> String {
     format!("{connection}:{remote_path}")
 }
@@ -233,14 +233,14 @@ mod tests {
 
     #[test]
     fn session_name_sanitizes_branch() {
-        assert_eq!(session_name("feat/foo", "api"), "wsx-feat-foo-api");
-        assert_eq!(session_name("bug/nested/x", "web"), "wsx-bug-nested-x-web");
-        assert_eq!(session_name("plain", "api"), "wsx-plain-api");
+        assert_eq!(session_name("feat/foo", "api"), "drup-feat-foo-api");
+        assert_eq!(session_name("bug/nested/x", "web"), "drup-bug-nested-x-web");
+        assert_eq!(session_name("plain", "api"), "drup-plain-api");
     }
 
     #[test]
     fn forward_session_name_is_per_port_and_distinct_from_sync() {
-        assert_eq!(forward_session_name("feat/foo", "app", 20000), "wsx-fwd-feat-foo-app-20000");
+        assert_eq!(forward_session_name("feat/foo", "app", 20000), "drup-fwd-feat-foo-app-20000");
         assert_ne!(
             forward_session_name("feat", "api", 20000),
             forward_session_name("feat", "api", 20001)

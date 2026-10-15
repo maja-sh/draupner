@@ -1,4 +1,4 @@
-//! Per-repo lifecycle execution: declarative `scripts` in `.wsx.json`, dispatched
+//! Per-repo lifecycle execution: declarative `scripts` in `.drup.json`, dispatched
 //! via `resolve` / `run_command`. Streamed output goes through `ui::hook_line`.
 
 use anyhow::{bail, Context, Result};
@@ -25,7 +25,7 @@ pub struct ResolvedScript {
     pub interactive: bool,
 }
 
-/// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `.wsx-hooks/…` anchoring and `Many`-join happen in `cfg.script_command` so `capture_command` can't drift from `run_command`.
+/// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `.drup-hooks/…` anchoring and `Many`-join happen in `cfg.script_command` so `capture_command` can't drift from `run_command`.
 pub fn resolve(
     cfg: &WsConfig,
     workspace_root: &Path,
@@ -53,10 +53,10 @@ pub fn resolve(
 pub const INTERACTIVE_REFUSED_PREFIX: &str = "interactive hook refused: ";
 
 /// `true` iff there is a controlling terminal reachable AND the user hasn't
-/// forced non-interactive mode via `WSX_NON_INTERACTIVE`. Matches sudo's own
+/// forced non-interactive mode via `DRUP_NON_INTERACTIVE`. Matches sudo's own
 /// check — opens `/dev/tty` with `O_RDWR`; closed on scope exit.
 pub fn can_prompt_user() -> bool {
-    if std::env::var("WSX_NON_INTERACTIVE")
+    if std::env::var("DRUP_NON_INTERACTIVE")
         .map(|v| !v.is_empty())
         .unwrap_or(false)
     {
@@ -69,15 +69,15 @@ pub fn can_prompt_user() -> bool {
         .is_ok()
 }
 
-/// Base `WSX_*` env every hook/script receives, returned as owned pairs so both
+/// Base `DRUP_*` env every hook/script receives, returned as owned pairs so both
 /// the `Command` runner and the detached supervisor (`supervise::up`, which
 /// never touches a `Command`) apply the identical set.
 ///
-/// `WSX_INTERACTIVE=1` is set iff ws is being invoked with a controlling
-/// terminal reachable (and the user hasn't forced `WSX_NON_INTERACTIVE`), so a
-/// hook can branch its own behavior: `[ -n "$WSX_INTERACTIVE" ] || { echo
+/// `DRUP_INTERACTIVE=1` is set iff drup is being invoked with a controlling
+/// terminal reachable (and the user hasn't forced `DRUP_NON_INTERACTIVE`), so a
+/// hook can branch its own behavior: `[ -n "$DRUP_INTERACTIVE" ] || { echo
 /// 'needs human'; exit 1; }`. The variable is absent (not `0`) when the hook
-/// can't prompt, so `[ -n "$WSX_INTERACTIVE" ]` reads straightforwardly.
+/// can't prompt, so `[ -n "$DRUP_INTERACTIVE" ]` reads straightforwardly.
 pub fn base_env(
     workspace_root: &Path,
     worktree: &str,
@@ -86,14 +86,14 @@ pub fn base_env(
     event: &str,
 ) -> Vec<(String, String)> {
     let mut env = vec![
-        ("WSX_WORKSPACE_ROOT".to_string(), workspace_root.to_string_lossy().into_owned()),
-        ("WSX_WORKTREE".to_string(), worktree.to_string()),
-        ("WSX_REPO".to_string(), repo.to_string()),
-        ("WSX_BRANCH_SANITIZED".to_string(), branch_sanitized.to_string()),
-        ("WSX_HOOK_NAME".to_string(), event.to_string()),
+        ("DRUP_WORKSPACE_ROOT".to_string(), workspace_root.to_string_lossy().into_owned()),
+        ("DRUP_WORKTREE".to_string(), worktree.to_string()),
+        ("DRUP_REPO".to_string(), repo.to_string()),
+        ("DRUP_BRANCH_SANITIZED".to_string(), branch_sanitized.to_string()),
+        ("DRUP_HOOK_NAME".to_string(), event.to_string()),
     ];
     if can_prompt_user() {
-        env.push(("WSX_INTERACTIVE".to_string(), "1".to_string()));
+        env.push(("DRUP_INTERACTIVE".to_string(), "1".to_string()));
     }
     env
 }
@@ -114,7 +114,7 @@ fn apply_env(
     }
 }
 
-/// Build `sh -c <cmd>` in the worktree with the `WSX_*` env; stdio left to caller.
+/// Build `sh -c <cmd>` in the worktree with the `DRUP_*` env; stdio left to caller.
 fn script_command(
     workspace_root: &Path,
     worktree_path: &Path,
@@ -196,7 +196,7 @@ pub fn stream_and_wait(mut child: Child, tag: &str) -> Result<ExitStatus> {
     Ok(status)
 }
 
-/// Run a `status`-style command and capture its first non-empty stdout line, giving up after `timeout`; used by `wsx list`.
+/// Run a `status`-style command and capture its first non-empty stdout line, giving up after `timeout`; used by `drup list`.
 #[allow(clippy::too_many_arguments)]
 pub fn capture_command(
     workspace_root: &Path,
@@ -277,21 +277,21 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
 }
 
 // Migration shim: DELETE a release after 0.6, together with its test. A leftover
-// executable `.wsx-hooks/<repo>/<event>` would silently become a no-op — or the
+// executable `.drup-hooks/<repo>/<event>` would silently become a no-op — or the
 // compose default for a container repo — so it fails loudly instead. This is a
 // diagnostic; `resolve` only reaches it where the old mechanism would have won.
 
-/// Fail when an executable `.wsx-hooks/<repo>/<event>` is left over from the
+/// Fail when an executable `.drup-hooks/<repo>/<event>` is left over from the
 /// removed hook-file mechanism, naming the `scripts` entry that replaces it and
 /// the two contract changes that come with the move.
 /// Raise the migration refusal for every `(repo, event)` an op is about to
 /// dispatch, **before** it does anything. The check is purely static — config
 /// plus one `stat` — so there is no reason for it to surface halfway through.
 ///
-/// It surfaced through `resolve` inside `wsx new`'s per-repo loop, which meant a
+/// It surfaced through `resolve` inside `drup new`'s per-repo loop, which meant a
 /// leftover hook file aborted the op after `git worktree add`, seeding and
 /// mutagen session creation had already happened for that repo and any repo
-/// before it. Worse, the message asks the user to edit `.wsx.json` and re-run,
+/// before it. Worse, the message asks the user to edit `.drup.json` and re-run,
 /// and the re-run then fails on the worktrees the aborted attempt left behind.
 ///
 /// Mirrors `resolve`'s condition exactly: a declared `scripts` entry wins, so a
@@ -313,16 +313,16 @@ pub fn preflight_legacy_hook_files(
 }
 
 fn refuse_legacy_hook_file(workspace_root: &Path, repo: &str, event: &str) -> Result<()> {
-    let rel = format!(".wsx-hooks/{repo}/{event}");
+    let rel = format!(".drup-hooks/{repo}/{event}");
     if !is_executable(&workspace_root.join(&rel)) {
         return Ok(());
     }
     bail!(
         "{rel} is an executable hook file, but hook files discovered by convention were \
-         removed in ws 0.6 — declare it instead: add \"scripts\": {{\"{event}\": \"{rel}\"}} \
-         to {repo}'s entry in .wsx.json. The contract changed with it: the script now runs \
+         removed in drup 0.6 — declare it instead: add \"scripts\": {{\"{event}\": \"{rel}\"}} \
+         to {repo}'s entry in .drup.json. The contract changed with it: the script now runs \
          with cwd = the worktree (not the workspace root), and the worktree path arrives as \
-         $WSX_WORKTREE (not $1)."
+         $DRUP_WORKTREE (not $1)."
     )
 }
 
@@ -388,15 +388,15 @@ mod tests {
 
     #[test]
     fn a_declared_script_resolves_to_one_anchored_command() {
-        // The `Many`-join and `.wsx-hooks/…` anchoring live in `config::script_command`; deferring either to the dispatch site is what once let `capture_command` join without anchoring.
+        // The `Many`-join and `.drup-hooks/…` anchoring live in `config::script_command`; deferring either to the dispatch site is what once let `capture_command` join without anchoring.
         let cfg: WsConfig = serde_json::from_str(
-            r#"{"repos":[{"name":"api","scripts":{"status":[".wsx-hooks/status.sh","echo ok"]}}]}"#,
+            r#"{"repos":[{"name":"api","scripts":{"status":[".drup-hooks/status.sh","echo ok"]}}]}"#,
         )
         .expect("parse config");
         let script = resolve(&cfg, Path::new("/ws"), "api", "status", false)
             .expect("resolve")
             .expect("a declared script must resolve to a command");
-        assert_eq!(script.cmd, "\"$WSX_WORKSPACE_ROOT\"/.wsx-hooks/status.sh && echo ok");
+        assert_eq!(script.cmd, "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/status.sh && echo ok");
         assert!(!script.interactive, "a plain declared script defaults to non-interactive");
     }
 
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn a_leftover_executable_hook_file_fails_with_the_scripts_entry_to_paste() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let hooks = dir.path().join(".wsx-hooks").join("api");
+        let hooks = dir.path().join(".drup-hooks").join("api");
         std::fs::create_dir_all(&hooks).expect("mkdir");
         let file = hooks.join("up");
         std::fs::write(&file, "#!/bin/sh\necho hi\n").expect("write hook");
@@ -444,20 +444,20 @@ mod tests {
         let err = resolve(&cfg, dir.path(), "api", "up", true)
             .expect_err("an executable hook file must be refused")
             .to_string();
-        assert!(err.contains(r#""scripts": {"up": ".wsx-hooks/api/up"}"#), "{err}");
-        assert!(err.contains("$WSX_WORKTREE"), "the new worktree contract must be named: {err}");
+        assert!(err.contains(r#""scripts": {"up": ".drup-hooks/api/up"}"#), "{err}");
+        assert!(err.contains("$DRUP_WORKTREE"), "the new worktree contract must be named: {err}");
         assert!(err.contains("cwd = the worktree"), "the cwd change must be named: {err}");
 
         // A declared script wins outright — the shim never fires for a repo that already migrated.
         let migrated: WsConfig = serde_json::from_str(
-            r#"{"repos":[{"name":"api","scripts":{"up":".wsx-hooks/api/up"}}]}"#,
+            r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#,
         )
         .expect("parse config");
         assert_eq!(
             resolve(&migrated, dir.path(), "api", "up", true)
                 .expect("resolve")
                 .map(|s| s.cmd),
-            Some("\"$WSX_WORKSPACE_ROOT\"/.wsx-hooks/api/up".to_string())
+            Some("\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/api/up".to_string())
         );
     }
 }

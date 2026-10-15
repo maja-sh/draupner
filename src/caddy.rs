@@ -1,11 +1,11 @@
-//! Containerized Caddy on the shared `wsx-net`, driven by its admin API.
+//! Containerized Caddy on the shared `drup-net`, driven by its admin API.
 //!
 //! Caddy runs as a container (rootless host Caddy can't resolve container DNS)
 //! and dials worktree containers by `<project>-<service>-1`; host processes via
 //! `host.containers.internal`. Route CRUD is scoped by `@id` — never `/load` —
-//! so parallel `wsx` processes with distinct ids don't race. The admin API is
+//! so parallel `drup` processes with distinct ids don't race. The admin API is
 //! published on a host-loopback TCP port (a unix socket can't cross the macOS
-//! podman-machine VM boundary). `WSX_CADDY_ADMIN` treats Caddy + `wsx-net` as
+//! podman-machine VM boundary). `DRUP_CADDY_ADMIN` treats Caddy + `drup-net` as
 //! externally managed (BYO / test stub).
 
 use anyhow::{bail, Context, Result};
@@ -13,26 +13,26 @@ use std::path::PathBuf;
 
 use crate::remote::Site;
 
-pub const WSX_NET: &str = "wsx-net";
-pub const CADDY_CONTAINER: &str = "ws-caddy";
+pub const DRUP_NET: &str = "drup-net";
+pub const CADDY_CONTAINER: &str = "drup-caddy";
 const CADDY_IMAGE: &str = "docker.io/library/caddy:2";
-const SERVER: &str = "wsx";
+const SERVER: &str = "drup";
 /// Non-privileged so Caddy binds with no setup; `:443` needs the sysctl.
 pub const DEFAULT_HTTPS_PORT: u16 = 8443;
 const SOCK_MOUNT: &str = "/sock";
 /// Configurable: a host already running its own Caddy holds this exact port.
 const DEFAULT_ADMIN_PORT: u16 = 2019;
 /// CA root + leaf certs; persisted so the root stays trusted across recreation.
-const DATA_VOLUME: &str = "ws-caddy-data";
-/// `--resume` autosave; persisted so a recreated `ws-caddy` reloads every route.
-const CONFIG_VOLUME: &str = "ws-caddy-config";
+const DATA_VOLUME: &str = "drup-caddy-data";
+/// `--resume` autosave; persisted so a recreated `drup-caddy` reloads every route.
+const CONFIG_VOLUME: &str = "drup-caddy-config";
 /// Distinct from any `route_id` so worktree route CRUD never touches it.
-const STOPPED_STACK_ID: &str = "ws-stopped-stack";
+const STOPPED_STACK_ID: &str = "drup-stopped-stack";
 pub const HOST_ALIAS: &str = "host.containers.internal";
 
 fn admin_args(_site: &Site, path: &str) -> Vec<String> {
     // `_site` unused: for remote, `curl` runs on the server (see `curl`).
-    if let Ok(url) = std::env::var("WSX_CADDY_ADMIN") {
+    if let Ok(url) = std::env::var("DRUP_CADDY_ADMIN") {
         vec![format!("{}{}", url.trim_end_matches('/'), path)]
     } else {
         vec![format!("http://127.0.0.1:{}{path}", admin_port())]
@@ -40,12 +40,12 @@ fn admin_args(_site: &Site, path: &str) -> Vec<String> {
 }
 
 pub fn externally_managed() -> bool {
-    std::env::var_os("WSX_CADDY_ADMIN").is_some()
+    std::env::var_os("DRUP_CADDY_ADMIN").is_some()
 }
 
 pub fn https_port() -> u16 {
     // A `0` (truncated file / bad env) would publish port 0 — fall through instead.
-    if let Some(p) = std::env::var("WSX_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+    if let Some(p) = std::env::var("DRUP_HTTPS_PORT").ok().and_then(|v| v.trim().parse().ok()) {
         if p != 0 {
             return p;
         }
@@ -108,7 +108,7 @@ pub fn set_https_port(port: u16) -> Result<()> {
 }
 
 pub fn admin_port() -> u16 {
-    if let Some(p) = std::env::var("WSX_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
+    if let Some(p) = std::env::var("DRUP_CADDY_ADMIN_PORT").ok().and_then(|v| v.trim().parse().ok()) {
         if p != 0 {
             return p;
         }
@@ -132,16 +132,16 @@ pub fn set_admin_port(port: u16) -> Result<()> {
 ///
 /// Each segment is length-prefixed (`<len>_<value>`) so `(feat-web, api, x)`
 /// and `(feat, web-api, x)` can't collapse to the same id via the `-` split —
-/// bare concatenation had those two tuples producing `wsx-feat-web-api-x` and
+/// bare concatenation had those two tuples producing `drup-feat-web-api-x` and
 /// the second worktree silently clobbered the first's route.
 pub fn route_id(branch_sanitized: &str, repo: &str, service: &str) -> String {
     let a = id_part(branch_sanitized);
     let b = id_part(repo);
     let c = id_part(service);
-    format!("ws-{}_{a}-{}_{b}-{}_{c}", a.len(), b.len(), c.len())
+    format!("drup-{}_{a}-{}_{b}-{}_{c}", a.len(), b.len(), c.len())
 }
 
-/// The id becomes one segment of the admin API path, and `.wsx.json` (attacker-controlled) supplies `repo`/`service`; a slash or `..` in either would let curl's dot-segment normalisation retarget the request.
+/// The id becomes one segment of the admin API path, and `.drup.json` (attacker-controlled) supplies `repo`/`service`; a slash or `..` in either would let curl's dot-segment normalisation retarget the request.
 fn id_part(s: &str) -> String {
     s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "-")
 }
@@ -167,7 +167,7 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     }
     runtime_available(site, runtime)?;
     let out = site
-        .command(&[runtime, "network", "create", WSX_NET])
+        .command(&[runtime, "network", "create", DRUP_NET])
         .output()
         .with_context(|| format!("spawn `{runtime} network create`"))?;
     if out.status.success() {
@@ -179,7 +179,7 @@ pub fn ensure_net(site: &Site, runtime: &str) -> Result<()> {
     if lower.contains("already") || lower.contains("exists") {
         return Ok(());
     }
-    bail!("create {WSX_NET}: {}", err.trim());
+    bail!("create {DRUP_NET}: {}", err.trim());
 }
 
 /// Race-safe: never removes a running container (peer's live routes); only stale
@@ -210,7 +210,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             None => {
                 crate::ui::note(&format!(
                     "{CADDY_CONTAINER} is running but its admin is unreachable — \
-                     re-seeding it (routes reinstall on `wsx up`)"
+                     re-seeding it (routes reinstall on `drup up`)"
                 ));
                 reseed(site, runtime);
             }
@@ -218,7 +218,7 @@ pub fn ensure_running(site: &Site, runtime: &str, publish_addr: &str) -> Result<
             Some(_) if !port_bindable(site, https_port()) => return Ok(()),
             Some(_) => {
                 crate::ui::note(&format!(
-                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `wsx up`",
+                    "re-seeding {CADDY_CONTAINER} for the :{} move — routes reinstall on `drup up`",
                     https_port()
                 ));
                 reseed(site, runtime);
@@ -260,7 +260,7 @@ fn preflight_ports(site: &Site) -> Result<()> {
             let whose = if site.is_remote() { "the server" } else { "this machine" };
             bail!(
                 "{what} port :{port} is already in use on {whose} — another service (often an \
-                 existing Caddy) holds it. Move wsx's Caddy off it with `wsx setup {flag} <port>`."
+                 existing Caddy) holds it. Move drup's Caddy off it with `drup setup {flag} <port>`."
             );
         }
     }
@@ -281,7 +281,7 @@ fn parse_listen_port(body: &str) -> Option<u16> {
     v.get(0)?.as_str()?.rsplit(':').next()?.parse().ok()
 }
 
-/// Drops the config volume (which pins the port via `--resume`); keeps `ws-caddy-data` so the CA stays trusted.
+/// Drops the config volume (which pins the port via `--resume`); keeps `drup-caddy-data` so the CA stays trusted.
 fn reseed(site: &Site, runtime: &str) {
     let _ = site.command(&[runtime, "rm", "-f", CADDY_CONTAINER]).output();
     let _ = site.command(&[runtime, "volume", "rm", CONFIG_VOLUME]).output();
@@ -310,7 +310,7 @@ pub fn port_bindable(site: &Site, port: u16) -> bool {
 
 /// Fatal on infra failure: the override drops HTTP host-ports, so "up" without Caddy would be a lie.
 pub fn ensure_routing(site: &Site, runtime: &str, domain: &str, publish_addr: &str) -> Result<Dns> {
-    ensure_net(site, runtime).with_context(|| format!("routing needs the `{WSX_NET}` network"))?;
+    ensure_net(site, runtime).with_context(|| format!("routing needs the `{DRUP_NET}` network"))?;
     ensure_running(site, runtime, publish_addr)
         .context("caddy must be running to route HTTP services")?;
     Ok(resolve_domain(site, domain, expected_answer(publish_addr).as_deref()))
@@ -345,7 +345,7 @@ pub fn resolve_hint(site: &Site, domain: &str, dns: &Dns) -> Option<String> {
         Dns::Wrong { got, expected: Some(want) } => Some(format!(
             "`*.{domain}` resolves to {got}, expected {want} — the wildcard points at the \
              wrong machine, so requests leave for a host this workspace no longer uses. \
-             Re-run `wsx setup` to re-point it."
+             Re-run `drup setup` to re-point it."
         )),
         Dns::Wrong { got, expected: None } => Some(format!(
             "`*.{domain}` resolves to {got}, but this workspace's stacks run on the server — \
@@ -379,7 +379,7 @@ fn run_caddy(site: &Site, runtime: &str, dir: &str, publish_addr: &str) -> Optio
     let config_vol = format!("{CONFIG_VOLUME}:/config");
     let config_json = format!("{SOCK_MOUNT}/caddy.json");
     let mut args = vec![
-        runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", WSX_NET, "--restart", "always",
+        runtime, "run", "-d", "--name", CADDY_CONTAINER, "--network", DRUP_NET, "--restart", "always",
     ];
     args.extend(host_alias_args(runtime));
     args.extend([
@@ -430,11 +430,11 @@ impl Dns {
     }
 }
 
-/// Scratch thread with a short deadline so a slow resolver doesn't stall `wsx up`.
+/// Scratch thread with a short deadline so a slow resolver doesn't stall `drup up`.
 /// Without `expected`, falls back to loopback-vs-not so NXDOMAIN-hijacking resolvers don't read as "resolved".
 pub fn resolve_domain(site: &Site, domain: &str, expected: Option<&str>) -> Dns {
     // A label unlikely to be shadowed by a real service, so a hit means the wildcard resolves.
-    let probe = format!("ws-dns-probe.{domain}:{}", https_port());
+    let probe = format!("drup-dns-probe.{domain}:{}", https_port());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
@@ -480,13 +480,13 @@ pub fn root_ca_pem(site: &Site) -> Result<String> {
         .context("no root_certificate in /pki/ca/local response")
 }
 
-/// Written to `~/.config/wsx/` (0600), not `$TMPDIR`, to close the predictable-path clobber/symlink window before `sudo` reads it.
+/// Written to `~/.config/drup/` (0600), not `$TMPDIR`, to close the predictable-path clobber/symlink window before `sudo` reads it.
 pub fn write_root_ca(site: &Site) -> Result<PathBuf> {
     // Fetched at `site` where Caddy runs, written to the HOST dir — CA is trusted in the client's store.
     let pem = root_ca_pem(site)?;
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join("wsx-caddy-root.crt");
+    let path = dir.join("drup-caddy-root.crt");
     crate::config::write_atomic(&path, pem.as_bytes())?;
     #[cfg(unix)]
     {
@@ -516,7 +516,7 @@ fn config_dir_at(site: &Site) -> Result<PathBuf> {
             Ok(std::fs::canonicalize(&dir).unwrap_or(dir))
         }
         Site::Remote { .. } => {
-            Ok(PathBuf::from(site.home_path(".config/wsx").expect("remote site carries a home")))
+            Ok(PathBuf::from(site.home_path(".config/drup").expect("remote site carries a home")))
         }
     }
 }
@@ -556,12 +556,12 @@ fn boot_config() -> serde_json::Value {
 
 fn stopped_stack_route() -> serde_json::Value {
     let body = "<!doctype html><meta charset=utf-8>\
-        <title>wsx — no stack here</title>\
+        <title>drup — no stack here</title>\
         <style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 1.5rem;line-height:1.5}\
         code{background:#eee;padding:.15em .4em;border-radius:.3em}</style>\
         <h1>No stack is running here</h1>\
         <p>Nothing is routed for this hostname yet. Bring its worktree up with:</p>\
-        <p><code>wsx up &lt;branch&gt;</code></p>";
+        <p><code>drup up &lt;branch&gt;</code></p>";
     serde_json::json!({
         "@id": STOPPED_STACK_ID,
         "handle": [ {
@@ -614,7 +614,7 @@ fn delete_id(site: &Site, id: &str) {
     let _ = curl(site, &args);
 }
 
-/// Under `WSX_CADDY_ADMIN` the request always runs locally regardless of `site` — that URL is a host endpoint, not the server's admin port.
+/// Under `DRUP_CADDY_ADMIN` the request always runs locally regardless of `site` — that URL is a host endpoint, not the server's admin port.
 fn curl(site: &Site, args: &[String]) -> Result<CurlOut> {
     let local = Site::Local;
     let effective = if externally_managed() { &local } else { site };
@@ -682,7 +682,7 @@ mod tests {
     fn a_configured_address_narrows_only_the_remote_site() {
         let cfg = Some("100.64.1.3");
         assert_eq!(publish_address(&remote_site(), cfg), "100.64.1.3");
-        // Local ignores it: `wsx setup`'s CA probe and `resolve_*` assume loopback.
+        // Local ignores it: `drup setup`'s CA probe and `resolve_*` assume loopback.
         assert_eq!(publish_address(&Site::Local, cfg), "127.0.0.1");
     }
 
@@ -702,17 +702,17 @@ mod tests {
 
     #[test]
     fn route_id_is_stable_and_namespaced() {
-        assert_eq!(route_id("feat-foo", "api", "web"), "ws-8_feat-foo-3_api-3_web");
+        assert_eq!(route_id("feat-foo", "api", "web"), "drup-8_feat-foo-3_api-3_web");
         assert_ne!(route_id("feat-foo", "api", "web"), route_id("feat-foo", "ui", "web"));
         // Ordinary names survive their id_part encoding, including the underscores
         // and digits compose service names routinely carry.
-        assert_eq!(route_id("release-1.2", "web_api", "app2"), "ws-11_release-1-2-7_web_api-4_app2");
+        assert_eq!(route_id("release-1.2", "web_api", "app2"), "drup-11_release-1-2-7_web_api-4_app2");
     }
 
     #[test]
     fn route_id_does_not_collide_across_dash_split() {
         // Bare concatenation collapsed these two tuples onto the same id
-        // (`wsx-feat-web-api-x`), and Caddy's `@id`-keyed CRUD meant the second
+        // (`drup-feat-web-api-x`), and Caddy's `@id`-keyed CRUD meant the second
         // worktree silently overwrote the first's route in the admin config.
         // Length-prefixed segments are provably unique per tuple.
         let a = route_id("feat-web", "api", "x");
@@ -727,21 +727,21 @@ mod tests {
 
     #[test]
     fn route_id_cannot_escape_its_admin_path_segment() {
-        // A cloned `.wsx.json` names a service `/../../config`: interpolated raw,
+        // A cloned `.drup.json` names a service `/../../config`: interpolated raw,
         // `/id/<id>/` becomes a path curl normalizes down to `/config/`, so the
         // best-effort route delete would wipe the whole running Caddy config.
         let id = route_id("feat-foo", "api", "/../../config");
         assert!(!id.contains('/'), "id must stay one path segment: {id}");
         assert!(!id.contains(".."), "id must carry no dot segments: {id}");
-        // Same for a hostile repo name, the other `.wsx.json`-controlled part.
+        // Same for a hostile repo name, the other `.drup.json`-controlled part.
         let id = route_id("feat-foo", "../../..", "web");
         assert!(!id.contains('/') && !id.contains(".."), "{id}");
     }
 
     #[test]
     fn route_json_matches_host_and_proxies_upstream() {
-        let r = route("wsx-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80", false);
-        assert_eq!(r["@id"], "wsx-feat-foo-web");
+        let r = route("drup-feat-foo-web", "feat-foo.web.myapp.test", "feat-foo-api-web-1:80", false);
+        assert_eq!(r["@id"], "drup-feat-foo-web");
         assert_eq!(r["match"][0]["host"][0], "feat-foo.web.myapp.test");
         assert_eq!(r["match"][0]["host"].as_array().unwrap().len(), 1);
         assert_eq!(r["handle"][0]["handler"], "reverse_proxy");
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn wildcard_route_matches_the_base_and_every_tenant_subdomain() {
-        let r = route("wsx-feat-foo-app", "feat-foo.app.myapp.test", "host.containers.internal:20001", true);
+        let r = route("drup-feat-foo-app", "feat-foo.app.myapp.test", "host.containers.internal:20001", true);
         let hosts: Vec<&str> =
             r["match"][0]["host"].as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
         // `*.foo` alone would NOT match bare `foo`, so both must be present.
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn boot_config_has_on_demand_internal_tls_and_the_catch_all() {
-        // Hold the port-env lock so a concurrent `WSX_HTTPS_PORT` mutation can't
+        // Hold the port-env lock so a concurrent `DRUP_HTTPS_PORT` mutation can't
         // change it between the two reads.
         let _g = env_guard();
         let port = https_port();
@@ -782,15 +782,15 @@ mod tests {
         assert!(r.get("match").is_none(), "catch-all must not filter by host: {r}");
         assert_eq!(r["handle"][0]["handler"], "static_response");
         assert_eq!(r["handle"][0]["status_code"], 503);
-        assert!(r["handle"][0]["body"].as_str().unwrap().contains("wsx up"));
+        assert!(r["handle"][0]["body"].as_str().unwrap().contains("drup up"));
     }
 
     #[test]
     fn https_port_env_overrides_the_default() {
         let _g = env_guard();
-        std::env::set_var("WSX_HTTPS_PORT", "443");
+        std::env::set_var("DRUP_HTTPS_PORT", "443");
         assert_eq!(https_port(), 443);
-        std::env::remove_var("WSX_HTTPS_PORT");
+        std::env::remove_var("DRUP_HTTPS_PORT");
         assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
     }
 
@@ -803,19 +803,19 @@ mod tests {
     #[test]
     fn https_port_ignores_a_zero_value() {
         let _g = env_guard();
-        std::env::set_var("WSX_HTTPS_PORT", "0");
+        std::env::set_var("DRUP_HTTPS_PORT", "0");
         assert_eq!(https_port(), DEFAULT_HTTPS_PORT);
-        std::env::remove_var("WSX_HTTPS_PORT");
+        std::env::remove_var("DRUP_HTTPS_PORT");
     }
 
     #[test]
     fn admin_port_seam_wins_and_zero_falls_through() {
         let _g = env_guard();
-        std::env::set_var("WSX_CADDY_ADMIN_PORT", "2020");
+        std::env::set_var("DRUP_CADDY_ADMIN_PORT", "2020");
         assert_eq!(admin_port(), 2020);
-        std::env::set_var("WSX_CADDY_ADMIN_PORT", "0");
+        std::env::set_var("DRUP_CADDY_ADMIN_PORT", "0");
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
-        std::env::remove_var("WSX_CADDY_ADMIN_PORT");
+        std::env::remove_var("DRUP_CADDY_ADMIN_PORT");
         assert_eq!(admin_port(), DEFAULT_ADMIN_PORT);
     }
 
@@ -919,14 +919,14 @@ mod tests {
     fn a_name_that_cannot_resolve_reads_as_unresolved_not_wrong() {
         // `.invalid` is reserved by RFC 2606, so this is deterministic offline.
         assert_eq!(
-            resolve_domain(&Site::Local, "ws-no-such-domain.invalid", Some("127.0.0.1")),
+            resolve_domain(&Site::Local, "drup-no-such-domain.invalid", Some("127.0.0.1")),
             Dns::Unresolved
         );
     }
 
     #[test]
     fn admin_args_hit_the_loopback_admin_port() {
-        // Holds the env guard so a concurrent `WSX_CADDY_ADMIN_PORT` mutation
+        // Holds the env guard so a concurrent `DRUP_CADDY_ADMIN_PORT` mutation
         // can't make the two `admin_port()` reads disagree.
         let _g = env_guard();
         let args = admin_args(&Site::Local, "/config/");

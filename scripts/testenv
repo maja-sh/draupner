@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# testenv — drop into a throwaway workspace for exercising `ws` by hand.
+# testenv — drop into a throwaway workspace for exercising `drup` by hand.
 #
 # Not part of the shipped binary. Running it:
-#   1. builds `ws` (release),
+#   1. builds `drup` (release),
 #   2. scaffolds a fresh sandbox with a couple of dummy git repos,
-#   3. drops you into a subshell *inside* that sandbox with `ws` on PATH,
+#   3. drops you into a subshell *inside* that sandbox with `drup` on PATH,
 #   4. removes the sandbox when you `exit`.
 #
 # So there's nothing to clean up and nothing left tracked. Just run:
@@ -13,13 +13,13 @@
 #   scripts/testenv
 #
 # then type `exit` when you're done. Sandbox lives at ./.testenv/sandbox
-# (gitignored); override with WS_TESTENV_DIR.
+# (gitignored); override with DRUP_TESTENV_DIR.
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SANDBOX="${WS_TESTENV_DIR:-$REPO_ROOT/.testenv/sandbox}"
-WS_BIN="$REPO_ROOT/target/release/ws"
+SANDBOX="${DRUP_TESTENV_DIR:-$REPO_ROOT/.testenv/sandbox}"
+DRUP_BIN="$REPO_ROOT/target/release/drup"
 REPOS=(api web)
 
 # Stable identity so commits work on a host with no git identity configured.
@@ -42,7 +42,7 @@ make_repo() {
   git -C "$dir" add -A
   git -C "$dir" commit -q -m "init $name"
 
-  # Fake deps so `ws new` copies vendor/ and symlinks node_modules.
+  # Fake deps so `drup new` copies vendor/ and symlinks node_modules.
   printf '{}\n' > "$dir/composer.json"
   mkdir -p "$dir/vendor";       printf '<?php // fake\n' > "$dir/vendor/autoload.php"
   mkdir -p "$dir/node_modules"; printf '{}\n'            > "$dir/node_modules/.installed"
@@ -54,10 +54,10 @@ make_repo() {
 
 # Let cargo render its own progress TUI (live bar + colored Compiling/Finished)
 # straight to the terminal instead of hiding it behind a spinner.
-printf '\n  \033[1mBuilding ws\033[0m \033[2m(release)\033[0m\n\n'
+printf '\n  \033[1mBuilding drup\033[0m \033[2m(release)\033[0m\n\n'
 ( cd "$REPO_ROOT" && cargo build --release ) || die "build failed"
 printf '\n'
-[ -x "$WS_BIN" ] || die "expected binary at $WS_BIN after build"
+[ -x "$DRUP_BIN" ] || die "expected binary at $DRUP_BIN after build"
 
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX"
@@ -69,10 +69,10 @@ steps() {
   Sandbox: $SANDBOX   (removed when you exit)
 
   Try:
-    ws init                       # detects: ${REPOS[*]}
-    ws new ${REPOS[0]},${REPOS[1]} feat/demo
-    ws list
-    ws rm feat/demo
+    drup init                       # detects: ${REPOS[*]}
+    drup new ${REPOS[0]},${REPOS[1]} feat/demo
+    drup list
+    drup rm feat/demo
 
   Type 'exit' to leave and clean up.
 EOF
@@ -82,7 +82,7 @@ steps
 # --- drop into the sandbox -------------------------------------------------
 
 cd "$SANDBOX"
-export PATH="$REPO_ROOT/target/release:$PATH"   # so bare `ws` works
+export PATH="$REPO_ROOT/target/release:$PATH"   # so bare `drup` works
 
 cleanup() { cd "$REPO_ROOT"; rm -rf "$SANDBOX"; log "sandbox removed"; }
 

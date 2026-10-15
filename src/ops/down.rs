@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::hooksweep;
 
 pub fn run(branch: &str) -> Result<()> {
-    let r = hooksweep::sweep(branch, "down", "wsx-down")?;
+    let r = hooksweep::sweep(branch, "down", "drup-down")?;
 
     if !r.failed.is_empty() {
         let mut msg = format!("down hook failed for: {}", r.failed.join(", "));
@@ -14,7 +14,7 @@ pub fn run(branch: &str) -> Result<()> {
     }
     if !r.needs_human.is_empty() {
         return Err(super::interactive_required(format!(
-            "down needs an interactive terminal for: {}; re-run `wsx down {branch}` from your shell",
+            "down needs an interactive terminal for: {}; re-run `drup down {branch}` from your shell",
             r.needs_human.join(", ")
         )));
     }
@@ -27,6 +27,6 @@ pub fn run(branch: &str) -> Result<()> {
         lines.push(format!("No down hook: {}", r.skipped.join(", ")));
     }
     crate::ui::summary_ok(&lines);
-    crate::ui::nudge(&format!("wsx up {branch} to resume"));
+    crate::ui::nudge(&format!("drup up {branch} to resume"));
     Ok(())
 }

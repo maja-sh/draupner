@@ -1,6 +1,6 @@
-# wsx
+# draupner
 
-Multi-repo worktree orchestration — the `wsx` command.
+Multi-repo worktree orchestration — the `drup` command.
 
 > **Platform:** macOS is the only supported platform today. Linux support is
 > on the roadmap; Windows users can run via WSL once that lands.
@@ -11,14 +11,14 @@ own hostnames — and tears the whole thing down again.
 
 The problem it solves: a feature that spans an API and a frontend means two
 checkouts and two stacks, and the moment you want a second branch in flight they
-fight over ports, container names, and database volumes. `wsx` makes the *task*
+fight over ports, container names, and database volumes. `drup` makes the *task*
 the unit of work rather than the repo:
 
 ```sh
-wsx new api,app feat/checkout   # a worktree of feat/checkout in both repos
-wsx up feat/checkout            # both stacks up, de-conflicted
-wsx list                        # what's running, and whether it's actually serving
-wsx rm feat/checkout            # gone
+drup new api,app feat/checkout   # a worktree of feat/checkout in both repos
+drup up feat/checkout            # both stacks up, de-conflicted
+drup list                        # what's running, and whether it's actually serving
+drup rm feat/checkout            # gone
 ```
 
 Several tasks can run at once. Nothing is shared between them unless you say so.
@@ -30,25 +30,25 @@ Several tasks can run at once. Nothing is shared between them unless you say so.
 From crates.io (Rust stable):
 
 ```sh
-cargo install wsx
+cargo install draupner
 ```
 
 Or grab the prebuilt `aarch64-apple-darwin` (Apple Silicon) binary from the latest release:
 
 ```sh
-gh release download vX.Y.Z --repo maja-sh/wsx -p '*aarch64-apple-darwin*' -O wsx
-chmod +x wsx && mv wsx ~/.local/bin/wsx
+gh release download vX.Y.Z --repo maja-sh/draupner -p '*aarch64-apple-darwin*' -O drup
+chmod +x drup && mv drup ~/.local/bin/drup
 ```
 
 Or build from a clone:
 
 ```sh
-cargo build --release   # → target/release/wsx
+cargo build --release   # → target/release/drup
 ```
 
 ### Prerequisites
 
-On the machine you run `wsx` from:
+On the machine you run `drup` from:
 
 | Need | For |
 |---|---|
@@ -58,11 +58,11 @@ On the machine you run `wsx` from:
 | `mutagen` | offloading a workspace to a server ([docs/offload.md](docs/offload.md)) |
 
 Per-worktree **hostnames** are optional and need a little more: a wildcard DNS
-answer for `*.<domain>` and a trusted local CA. `wsx setup` reports what's
+answer for `*.<domain>` and a trusted local CA. `drup setup` reports what's
 missing and offers to run each privileged step for you (showing the command
 first — it never handles your password). On an offload server, the same ground
 is covered by the readable script in [`server-setup/`](server-setup/). Without
-a `domain` configured, `wsx` skips routing entirely and services are reached on
+a `domain` configured, `drup` skips routing entirely and services are reached on
 allocated ports.
 
 ---
@@ -76,38 +76,38 @@ mkdir ~/work/myapp && cd ~/work/myapp
 git clone git@github.com:you/api.git
 git clone git@github.com:you/app.git
 
-wsx init --domain myapp.test
+drup init --domain myapp.test
 ```
 
-`wsx init` detects the repos, derives what it can from each one's compose file,
+`drup init` detects the repos, derives what it can from each one's compose file,
 and writes three things:
 
-- **`.wsx.json`** — the workspace config. Yours to edit.
-- **`.wsx.schema.json`** — a JSON Schema for it, generated from the code, so your
+- **`.drup.json`** — the workspace config. Yours to edit.
+- **`.drup.schema.json`** — a JSON Schema for it, generated from the code, so your
   editor completes and validates every field. Regenerate after an upgrade with
-  `wsx init --refresh-schema`.
-- **`.wsx-hooks/`** — starter scripts for the lifecycle events you want to fill
-  in. Each is inert until a repo's `scripts` block in `.wsx.json` names it.
+  `drup init --refresh-schema`.
+- **`.drup-hooks/`** — starter scripts for the lifecycle events you want to fill
+  in. Each is inert until a repo's `scripts` block in `.drup.json` names it.
 
 Then work a task:
 
 ```sh
-wsx new api,app feat/checkout    # worktrees + post-create hooks
-wsx up feat/checkout             # stacks up, routes installed, ports reported
-wsx exec api -- php artisan tinker
-wsx down feat/checkout           # stop, keep the files
-wsx rm feat/checkout             # stop and remove the worktrees
+drup new api,app feat/checkout    # worktrees + post-create hooks
+drup up feat/checkout             # stacks up, routes installed, ports reported
+drup exec api -- php artisan tinker
+drup down feat/checkout           # stop, keep the files
+drup rm feat/checkout             # stop and remove the worktrees
 ```
 
-`wsx list` shows every task, and `wsx clean` audits worktrees and offers to drop
+`drup list` shows every task, and `drup clean` audits worktrees and offers to drop
 the ones that are merged and clean.
 
 ---
 
 ## The model
 
-**Workspace** — a directory holding your repo clones plus `.wsx.json`. The clones
-stay on their default branch and `wsx` never commits in them; it reads them and
+**Workspace** — a directory holding your repo clones plus `.drup.json`. The clones
+stay on their default branch and `drup` never commits in them; it reads them and
 creates worktrees from them.
 
 **Task** — a branch name. Every repo you name gets a worktree of that branch, and
@@ -120,38 +120,38 @@ the task dir, the compose project, and the hostname prefix.
 
 **Stack** — what a repo runs for a task. Two kinds:
 
-- `kind: container` — a compose project. `wsx` generates a per-worktree override
+- `kind: container` — a compose project. `drup` generates a per-worktree override
   that renames the project and reissues published ports, so N branches of the
   same repo coexist.
 - `kind: host` — a long-running process (`vite`, `cargo watch`, `artisan serve`)
-  that `wsx` starts detached, tracks by PID file, and can report the health of.
+  that `drup` starts detached, tracks by PID file, and can report the health of.
   No systemd or launchd, so it works the same on macOS.
 
 **Isolation** is per service. A raw-TCP service (a database, redis) gets its own
 allocated host port, recorded so it stays stable across `up` runs. An HTTP
 service instead gets a *hostname* — `<branch>.<subdomain>.<domain>` — routed by a
 shared Caddy, so any number of branches share one HTTPS port. That split is why
-`wsx` cares whether a service is HTTP: hostnames multiplex, raw TCP can't.
+`drup` cares whether a service is HTTP: hostnames multiplex, raw TCP can't.
 
 ---
 
-## Where `wsx` fits
+## Where `drup` fits
 
 Related tools solve related but different problems:
 
 - **Monorepo build tools** (Nx, Turborepo, Rush) — great at caching and task
-  orchestration *inside one repo*. `wsx` is about running N branches × N
+  orchestration *inside one repo*. `drup` is about running N branches × N
   separate repos side by side; the orchestration seam is "which branch" and
   "which services," not "which build graph."
 - **Devcontainers / dip / Lando** — reproducible environments for one checkout.
-  `wsx` assumes you already have those and solves what happens when you want
+  `drup` assumes you already have those and solves what happens when you want
   several of them running at the same time without them fighting over ports,
   container names, and database volumes.
 - **Docker Compose profiles** — a lightweight way to run subsets of services.
-  `wsx` sits *above* compose and generates per-branch overrides so the same
+  `drup` sits *above* compose and generates per-branch overrides so the same
   compose file can run multiple times without collision.
 
-If any of those already solve your problem, you don't need `wsx` on top. If you
+If any of those already solve your problem, you don't need `drup` on top. If you
 keep running into the "second branch wants a second stack" wall, that's the
 space this fills.
 
@@ -161,20 +161,20 @@ space this fills.
 
 | Command | What it does |
 |---|---|
-| `wsx init` | Scaffold `.wsx.json`, `.wsx.schema.json`, `.wsx-hooks/` from the repos found here |
-| `wsx new <repos> <branch>` | Create worktrees for a task (comma-separated repos); `--up` to start immediately |
-| `wsx up <branch>` | Bring the task's stacks up, install routes, report ports |
-| `wsx down <branch>` | Stop the stacks, leave the files |
-| `wsx rm <branch>` | Stop and remove the worktrees (`--force` when dirty) |
-| `wsx list` | Every task, its repos, and their run state (`-s` for one line per task) |
-| `wsx context` | JSON snapshot of the current task and workspace for LLM agents |
-| `wsx clean` | Audit worktrees; preview what's safe to drop, `--force` to act |
-| `wsx exec [repo] -- <cmd>` | Run a command where that repo's stack lives (over SSH when offloaded) |
-| `wsx setup` | Ready this machine for routing; reports the gaps it can't close itself |
-| `wsx remote check` | Read-only health check of the offload server (or of local routing) |
-| `wsx remote set/unset` | Move this workspace to a server, or bring it back; refuses while a stack is running |
-| `wsx config get/set/unset` | Machine-global defaults in `~/.config/wsx/config.toml` |
-| `wsx claude` | Install Claude Code skills for the `wsx` workflow |
+| `drup init` | Scaffold `.drup.json`, `.drup.schema.json`, `.drup-hooks/` from the repos found here |
+| `drup new <repos> <branch>` | Create worktrees for a task (comma-separated repos); `--up` to start immediately |
+| `drup up <branch>` | Bring the task's stacks up, install routes, report ports |
+| `drup down <branch>` | Stop the stacks, leave the files |
+| `drup rm <branch>` | Stop and remove the worktrees (`--force` when dirty) |
+| `drup list` | Every task, its repos, and their run state (`-s` for one line per task) |
+| `drup context` | JSON snapshot of the current task and workspace for LLM agents |
+| `drup clean` | Audit worktrees; preview what's safe to drop, `--force` to act |
+| `drup exec [repo] -- <cmd>` | Run a command where that repo's stack lives (over SSH when offloaded) |
+| `drup setup` | Ready this machine for routing; reports the gaps it can't close itself |
+| `drup remote check` | Read-only health check of the offload server (or of local routing) |
+| `drup remote set/unset` | Move this workspace to a server, or bring it back; refuses while a stack is running |
+| `drup config get/set/unset` | Machine-global defaults in `~/.config/drup/config.toml` |
+| `drup claude` | Install Claude Code skills for the `drup` workflow |
 
 Every command takes `--help`.
 
@@ -182,11 +182,11 @@ Every command takes `--help`.
 
 ## Documentation
 
-- **[docs/configuration.md](docs/configuration.md)** — `.wsx.json`: services and
+- **[docs/configuration.md](docs/configuration.md)** — `.drup.json`: services and
   routing, how compose derivation works, and the precedence rules. The field
-  list lives in `.wsx.schema.json`; this covers what a schema can't say.
+  list lives in `.drup.schema.json`; this covers what a schema can't say.
 - **[docs/hooks.md](docs/hooks.md)** — the lifecycle events, where each one runs,
-  and the full `WSX_*` environment contract your scripts receive.
+  and the full `DRUP_*` environment contract your scripts receive.
 - **[docs/offload.md](docs/offload.md)** — running the stacks on a server while
   you edit locally.
 - **[server-setup/](server-setup/)** — the one-time privileged host setup.
@@ -195,24 +195,24 @@ Every command takes `--help`.
 
 ## Environment
 
-Read by `wsx`:
+Read by `drup`:
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `WSX_REMOTE_HOST` | — | Default SSH host for a bare `wsx init --remote` / `wsx remote set`. Precedence: explicit argument > this > `wsx config` `remote.host` |
-| `WSX_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH` |
-| `WSX_MUTAGEN` | `mutagen` | Override the `mutagen` binary |
-| `CLAUDE_SKILLS_DIR` | `~/.claude/skills` | Where `wsx claude` installs skill files |
+| `DRUP_REMOTE_HOST` | — | Default SSH host for a bare `drup init --remote` / `drup remote set`. Precedence: explicit argument > this > `drup config` `remote.host` |
+| `DRUP_SSH` | `ssh` | Override the `ssh` binary — e.g. point at a wrapper. Mirrors git's `GIT_SSH` |
+| `DRUP_MUTAGEN` | `mutagen` | Override the `mutagen` binary |
+| `CLAUDE_SKILLS_DIR` | `~/.claude/skills` | Where `drup claude` installs skill files |
 
-`HOME` is read to resolve `~/.config/wsx` and the default skills directory.
+`HOME` is read to resolve `~/.config/drup` and the default skills directory.
 
 `git` is deliberately **not** overridable: `ssh`/`mutagen` get an override seam
 because they're the network and sync tools the out-of-process test suite has to
 stub; `git` always runs against real repositories.
 
 Two more exist as escape hatches rather than everyday settings.
-`WSX_HTTPS_PORT` overrides the port Caddy serves on for one invocation (the
-durable way is `wsx setup --port`). `WSX_CADDY_ADMIN` points `wsx` at an admin API
+`DRUP_HTTPS_PORT` overrides the port Caddy serves on for one invocation (the
+durable way is `drup setup --port`). `DRUP_CADDY_ADMIN` points `drup` at an admin API
 you manage yourself, which also stops it from creating the network or running a
 Caddy container at all — bring-your-own routing.
 

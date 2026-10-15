@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::hooksweep;
 
 pub fn run(branch: &str) -> Result<()> {
-    let r = hooksweep::sweep(branch, "up", "wsx-up")?;
+    let r = hooksweep::sweep(branch, "up", "drup-up")?;
 
     if !r.failed.is_empty() {
         let mut msg = format!("up hook failed for: {}", r.failed.join(", "));
@@ -14,7 +14,7 @@ pub fn run(branch: &str) -> Result<()> {
     }
     if !r.needs_human.is_empty() {
         return Err(super::interactive_required(format!(
-            "up needs an interactive terminal for: {}; re-run `wsx up {branch}` from your shell",
+            "up needs an interactive terminal for: {}; re-run `drup up {branch}` from your shell",
             r.needs_human.join(", ")
         )));
     }

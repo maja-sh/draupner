@@ -12,7 +12,7 @@ pub fn run(branch: &str, repo: Option<&str>) -> Result<()> {
     let task_dir = workspace::task_dir(&ws.root, branch);
     if !task_dir.is_dir() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `wsx new` first"
+            "no worktrees for {branch}; run `drup new` first"
         )));
     }
 

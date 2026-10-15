@@ -1,4 +1,4 @@
-//! `wsx exec` — run a command in a repo's worktree, remote via `ssh -t` or local, with stdio and exit code passing straight through.
+//! `drup exec` — run a command in a repo's worktree, remote via `ssh -t` or local, with stdio and exit code passing straight through.
 
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
@@ -39,20 +39,20 @@ pub fn run(
     let repo = match repo {
         Some(r) => r.to_string(),
         None => repo_from_cwd.ok_or_else(|| {
-            super::preflight("can't infer the repo; pass it: `wsx exec [--branch <b>] <repo> -- …`")
+            super::preflight("can't infer the repo; pass it: `drup exec [--branch <b>] <repo> -- …`")
         })?,
     };
     if !cfg.repos.iter().any(|e| e.name() == repo) {
-        return Err(super::preflight(format!("unknown repo `{repo}` (not in .wsx.json)")));
+        return Err(super::preflight(format!("unknown repo `{repo}` (not in .drup.json)")));
     }
-    // Check locally before any SSH: `wsx new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
+    // Check locally before any SSH: `drup new` always creates the local dir, so a bogus `--branch` fails clean instead of round-tripping to `cd` into a missing path.
     if workspace::worktree_for(&ws.root, &task, &repo).is_none() {
         return Err(super::preflight(format!("no worktree for `{repo}` in task `{task}`")));
     }
 
     let remote = if local { None } else { cfg.remote.as_ref() };
 
-    // Local run allocates host ports (Exec); remote only loads ports recorded at `wsx up` (Inspect). Passing `Site::Local` unconditionally keeps `wsx exec` from pre-dialing the server.
+    // Local run allocates host ports (Exec); remote only loads ports recorded at `drup up` (Inspect). Passing `Site::Local` unconditionally keeps `drup exec` from pre-dialing the server.
     let phase = if remote.is_none() { inject::Phase::Exec } else { inject::Phase::Inspect };
     let wt = workspace::task_dir(&ws.root, &task).join(&repo);
     let injected = inject::prepare(&cfg, &remote::Site::Local, &ws.root, &wt, &task, &repo, phase)?;
@@ -65,12 +65,12 @@ pub fn run(
     propagate(status)
 }
 
-/// Base `WSX_*` env every dispatched command sees. Deliberately does NOT set
-/// `WSX_HOOK_NAME` — `wsx exec` isn't a hook, so lying about the event context
+/// Base `DRUP_*` env every dispatched command sees. Deliberately does NOT set
+/// `DRUP_HOOK_NAME` — `drup exec` isn't a hook, so lying about the event context
 /// would surprise a script that special-cases lifecycle events.
 ///
 /// Kept in lockstep with `hooks::base_env`; the parity test in this module
-/// asserts they agree on every key except `WSX_HOOK_NAME`.
+/// asserts they agree on every key except `DRUP_HOOK_NAME`.
 fn build_env<'a>(
     workspace_root: &'a str,
     worktree: &'a str,
@@ -79,10 +79,10 @@ fn build_env<'a>(
     injected: &'a [(String, String)],
 ) -> Vec<(&'a str, &'a str)> {
     let mut env = vec![
-        ("WSX_WORKSPACE_ROOT", workspace_root),
-        ("WSX_WORKTREE", worktree),
-        ("WSX_REPO", repo),
-        ("WSX_BRANCH_SANITIZED", branch_sanitized),
+        ("DRUP_WORKSPACE_ROOT", workspace_root),
+        ("DRUP_WORKTREE", worktree),
+        ("DRUP_REPO", repo),
+        ("DRUP_BRANCH_SANITIZED", branch_sanitized),
     ];
     env.extend(injected.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     env
@@ -142,7 +142,7 @@ fn exec_remote(
     }
 
     let script = remote::remote_script(&dir, &env, command);
-    // Both TTYs required: keying on stdin alone puts a pty on `wsx exec … > file` and corrupts the redirect with CRLF/control sequences.
+    // Both TTYs required: keying on stdin alone puts a pty on `drup exec … > file` and corrupts the redirect with CRLF/control sequences.
     let want_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     crate::ui::note(&format!("→ {}:{dir}", r.connection));
@@ -151,7 +151,7 @@ fn exec_remote(
         .with_context(|| format!("ssh {}", r.connection))
 }
 
-/// Mirror the child's exit status; non-zero or signal death becomes a silent passthrough error so `wsx` exits with the code but prints no banner over the command's own output.
+/// Mirror the child's exit status; non-zero or signal death becomes a silent passthrough error so `drup` exits with the code but prints no banner over the command's own output.
 fn propagate(status: ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
@@ -159,7 +159,7 @@ fn propagate(status: ExitStatus) -> Result<()> {
     Err(super::passthrough_exit(exit_code(&status)))
 }
 
-/// Child's exit code, mapping signal death to `128 + signum` (Ctrl-C → 130) to match `wsx`'s exit conventions elsewhere.
+/// Child's exit code, mapping signal death to `128 + signum` (Ctrl-C → 130) to match `drup`'s exit conventions elsewhere.
 #[cfg(unix)]
 fn exit_code(status: &ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
@@ -178,9 +178,9 @@ fn exit_code(status: &ExitStatus) -> i32 {
 mod tests {
     use super::*;
 
-    /// The parity invariant: every `WSX_*` key `hooks::base_env` sets — except
-    /// `WSX_HOOK_NAME`, which exec deliberately omits — must appear in
-    /// `build_env` with the same value. Prevents `wsx exec` from silently
+    /// The parity invariant: every `DRUP_*` key `hooks::base_env` sets — except
+    /// `DRUP_HOOK_NAME`, which exec deliberately omits — must appear in
+    /// `build_env` with the same value. Prevents `drup exec` from silently
     /// drifting away from the hook env contract when a new key is added.
     #[test]
     fn build_env_matches_hooks_base_env_minus_hook_name() {
@@ -189,26 +189,26 @@ mod tests {
         let root_s = root.to_string_lossy();
         let wt_s = wt.to_string_lossy();
         let injected: Vec<(String, String)> = vec![
-            ("WSX_PORT_mysql".to_string(), "20001".to_string()),
-            ("WSX_RUNTIME".to_string(), "podman".to_string()),
+            ("DRUP_PORT_mysql".to_string(), "20001".to_string()),
+            ("DRUP_RUNTIME".to_string(), "podman".to_string()),
         ];
 
         let env = build_env(&root_s, &wt_s, "api", "foo", &injected);
         let hook_env = crate::hooks::base_env(root, &wt_s, "api", "foo", "up");
 
         for (k, v) in &hook_env {
-            if k == "WSX_HOOK_NAME" {
+            if k == "DRUP_HOOK_NAME" {
                 continue;
             }
             let got = env.iter().find(|(ek, _)| *ek == k.as_str()).map(|(_, ev)| *ev);
             assert_eq!(got, Some(v.as_str()), "exec must match hook for {k}");
         }
         assert!(
-            !env.iter().any(|(k, _)| *k == "WSX_HOOK_NAME"),
-            "exec must not set WSX_HOOK_NAME — it isn't a hook",
+            !env.iter().any(|(k, _)| *k == "DRUP_HOOK_NAME"),
+            "exec must not set DRUP_HOOK_NAME — it isn't a hook",
         );
         assert_eq!(
-            env.iter().find(|(k, _)| *k == "WSX_PORT_mysql").map(|(_, v)| *v),
+            env.iter().find(|(k, _)| *k == "DRUP_PORT_mysql").map(|(_, v)| *v),
             Some("20001"),
             "injected env must survive",
         );

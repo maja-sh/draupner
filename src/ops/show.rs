@@ -1,8 +1,8 @@
 //! Focused per-worktree endpoint: everything you need to operate one task's
-//! worktree, one call. Narrower than `wsx list` (single branch, no siblings),
-//! richer than `ws path` (services, ports, hostnames, exec syntax on top of
+//! worktree, one call. Narrower than `drup list` (single branch, no siblings),
+//! richer than `drup path` (services, ports, hostnames, exec syntax on top of
 //! paths). The `--json` shape doubles as the `task.repos[]` payload of
-//! `wsx context`, which is why field names are self-documenting — the LLM
+//! `drup context`, which is why field names are self-documenting — the LLM
 //! endpoint leans on names in place of a schema round-trip.
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ use crate::inject;
 use crate::remote::Site;
 use crate::workspace;
 
-/// Container liveness runs the same `status` hook `wsx list` uses; cap it short so a hung stack can't stall the summary.
+/// Container liveness runs the same `status` hook `drup list` uses; cap it short so a hung stack can't stall the summary.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
@@ -35,7 +35,7 @@ pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
 
     if data.repos.is_empty() {
         return Err(super::preflight(format!(
-            "no worktrees for {branch}; run `wsx new` first"
+            "no worktrees for {branch}; run `drup new` first"
         )));
     }
 
@@ -47,7 +47,7 @@ pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
     Ok(())
 }
 
-/// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `wsx exec`s see the branch the user typed.
+/// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `drup exec`s see the branch the user typed.
 fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<String> {
     if let Some(b) = branch {
         return Ok(b.to_string());
@@ -57,8 +57,8 @@ fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<S
     let worktrees_root = worktrees_root.canonicalize().unwrap_or(worktrees_root);
     let (task, cwd_repo) = workspace::task_repo_under(&cwd, &worktrees_root).ok_or_else(|| {
         super::preflight(
-            "ws show without a branch must be run from inside a worktree; \
-             pass `ws show <branch>` to name one explicitly",
+            "drup show without a branch must be run from inside a worktree; \
+             pass `drup show <branch>` to name one explicitly",
         )
     })?;
     // Probe git for just the repo whose worktree we're inside — sibling repos would give the same branch anyway (a task groups worktrees under one branch), and one `git worktree list` is cheaper than one per configured repo.
@@ -141,7 +141,7 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
             "host"
         };
 
-        // One `.wsx-meta` read serves both liveness (never-up short-circuit) and the service list.
+        // One `.drup-meta` read serves both liveness (never-up short-circuit) and the service list.
         let (port_map, recorded_services) = crate::ports::load_meta(root, &sanitized, name);
 
         let is_running = liveness(
@@ -152,7 +152,7 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
         let log_path_absolute = is_host
             .then(|| site.and_then(|s| crate::supervise::log_path(s, &crate::supervise::proc_name(branch, name))))
             .flatten();
-        let exec_command_prefix = format!("wsx exec --branch {branch} {name} --");
+        let exec_command_prefix = format!("drup exec --branch {branch} {name} --");
 
         repos.push(RepoInfo {
             name: name.to_string(),
@@ -209,7 +209,7 @@ fn liveness(
         cfg, site, root, worktree, sanitized, repo, inject::Phase::Inspect,
     )
     .ok()?;
-    // Remote workspace container status must run on the server, otherwise the local runtime answers a question about the server's containers — the exact mismatch `wsx list` avoids at list.rs:47-64.
+    // Remote workspace container status must run on the server, otherwise the local runtime answers a question about the server's containers — the exact mismatch `drup list` avoids at list.rs:47-64.
     let out = match site {
         Site::Local => hooks::capture_command(
             root, worktree, repo, sanitized, "status", &cmd, STATUS_TIMEOUT, &extra_env,
@@ -229,7 +229,7 @@ fn liveness(
     })
 }
 
-/// Services with their allocated port + routing status. `recorded` comes from the `.wsx-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.wsx.json`-declared set for a not-yet-up worktree.
+/// Services with their allocated port + routing status. `recorded` comes from the `.drup-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.drup.json`-declared set for a not-yet-up worktree.
 fn services_for(
     cfg: &WsConfig,
     sanitized: &str,
@@ -262,7 +262,7 @@ fn services_for(
 }
 
 fn render_human(d: &ShowData) {
-    crate::ui::header("ws-show", &d.branch);
+    crate::ui::header("drup-show", &d.branch);
     println!();
     println!("  workspace  {}", d.workspace_root.display());
     match &d.remote {
@@ -299,7 +299,7 @@ fn render_human(d: &ShowData) {
 }
 
 /// The `--describe` schema block, kept next to the emitting code so drift is obvious in review. Any change to `ShowData`'s field set MUST update this text in the same commit; the LLM skill leans on it as ground truth.
-const SCHEMA_TEXT: &str = r#"ws show — per-worktree status endpoint.
+const SCHEMA_TEXT: &str = r#"drup show — per-worktree status endpoint.
 
 Human by default. `--json` emits the same data as a structured object:
 
@@ -311,7 +311,7 @@ Human by default. `--json` emits the same data as a structured object:
                              "worktree_base_absolute": "<server-side path>" },
   "repos": [
     {
-      "name":                  repo name from .wsx.json,
+      "name":                  repo name from .drup.json,
       "kind":                  "host" | "container",
       "worktree_absolute":     absolute path to this repo's worktree,
       "is_running":            true | false | null,
@@ -324,19 +324,19 @@ Human by default. `--json` emits the same data as a structured object:
         }
       ],
       "log_path_absolute":     absolute path to the host log, null for containers,
-      "exec_command_prefix":   "wsx exec --branch <branch> <repo> --" — append your command
+      "exec_command_prefix":   "drup exec --branch <branch> <repo> --" — append your command
     }
   ]
 }
 
 Semantics tooling should ground on:
-- `is_running` is a live probe. Host repos use ws's supervise::is_active check;
+- `is_running` is a live probe. Host repos use drup's supervise::is_active check;
   container repos run their `status` hook capped at 3s. `null` means the site
-  is out of reach or ws couldn't decide.
+  is out of reach or drup couldn't decide.
 - `allocated_host_port` is null on a worktree that has never been up; every
   other state has a port.
 - `routed_hostname` is the correct answer for HTTPS access. Do NOT re-derive
-  it from branch/repo names — ws applied its own sanitization.
+  it from branch/repo names — drup applied its own sanitization.
 - `exec_command_prefix` ends in ` --`; append a space and your command.
 "#;
 
@@ -344,9 +344,9 @@ Semantics tooling should ground on:
 mod tests {
     use super::*;
 
-    /// Build a minimal workspace on disk that `collect` can read against — a `.wsx.json`, the target repo as a bare git dir, a `.worktrees/<task>/<repo>` dir, and an optional `.wsx-meta/*.json` port record.
+    /// Build a minimal workspace on disk that `collect` can read against — a `.drup.json`, the target repo as a bare git dir, a `.worktrees/<task>/<repo>` dir, and an optional `.drup-meta/*.json` port record.
     fn scaffold_workspace(root: &Path, ws_json: &str, sanitized_task: &str, repo: &str, meta: Option<&str>) {
-        std::fs::write(root.join(".wsx.json"), ws_json).expect("write .wsx.json");
+        std::fs::write(root.join(".drup.json"), ws_json).expect("write .drup.json");
         // Bare git repo at <root>/<repo> — worktrees::worktrees() skips repos where is_git_repo is false.
         let repo_dir = root.join(repo);
         std::fs::create_dir_all(repo_dir.join(".git")).expect("mkdir repo/.git");
@@ -355,8 +355,8 @@ mod tests {
         std::fs::create_dir_all(root.join(".worktrees").join(sanitized_task).join(repo))
             .expect("mkdir worktree");
         if let Some(m) = meta {
-            let meta_dir = root.join(".wsx-meta");
-            std::fs::create_dir_all(&meta_dir).expect("mkdir .wsx-meta");
+            let meta_dir = root.join(".drup-meta");
+            std::fs::create_dir_all(&meta_dir).expect("mkdir .drup-meta");
             let fname = crate::ports::override_filename(sanitized_task, repo)
                 .replace(".override.yml", ".json");
             std::fs::write(meta_dir.join(fname), m).expect("write meta");
@@ -442,7 +442,7 @@ mod tests {
         let cfg = config::load(root).unwrap();
         let data = collect(&cfg, root, "feat/x", Some(&Site::Local));
         let repo = &data.repos[0];
-        assert_eq!(repo.exec_command_prefix, "wsx exec --branch feat/x api --");
+        assert_eq!(repo.exec_command_prefix, "drup exec --branch feat/x api --");
         // Whatever HOME points at, the suffix is what the LLM appends to its own log-tail commands.
         let log = repo
             .log_path_absolute
@@ -450,18 +450,18 @@ mod tests {
             .and_then(|p| p.to_str())
             .expect("host repo carries a log path");
         assert!(
-            log.ends_with("/.wsx-run/wsx-feat-x-api.log"),
-            "log path should follow the ~/.wsx-run/<proc_name>.log convention, got {log}"
+            log.ends_with("/.drup-run/drup-feat-x-api.log"),
+            "log path should follow the ~/.drup-run/<proc_name>.log convention, got {log}"
         );
     }
 
     #[test]
     fn log_path_for_a_remote_workspace_names_the_server_home_not_ours() {
         let site = Site::Remote { connection: "srv".into(), home: "/home/server-user".into() };
-        let got = crate::supervise::log_path(&site, "wsx-feat-x-api")
+        let got = crate::supervise::log_path(&site, "drup-feat-x-api")
             .and_then(|p| p.to_str().map(str::to_owned))
             .expect("remote log path");
-        assert_eq!(got, "/home/server-user/.wsx-run/wsx-feat-x-api.log");
+        assert_eq!(got, "/home/server-user/.drup-run/drup-feat-x-api.log");
     }
 
     #[test]

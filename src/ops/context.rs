@@ -27,7 +27,7 @@ pub fn run(describe: bool) -> Result<()> {
 
 #[derive(Serialize)]
 struct Context {
-    wsx_version: &'static str,
+    drup_version: &'static str,
     workspace: Workspace,
     current: Current,
     /// `null` when the cwd isn't inside a task worktree — the agent has workspace-level facts but no per-task detail.
@@ -77,7 +77,7 @@ fn collect(cfg: &WsConfig, root: &Path, cwd: &Path, site: Option<&Site>) -> Cont
     let workspace = build_workspace(cfg, root, site);
     let hints = agent_hints(&workspace, &current, task.as_ref());
     Context {
-        wsx_version: env!("CARGO_PKG_VERSION"),
+        drup_version: env!("CARGO_PKG_VERSION"),
         workspace,
         current,
         task,
@@ -122,7 +122,7 @@ fn build_current(cfg: &WsConfig, root: &Path, cwd: &Path) -> Current {
     Current { cwd: cwd_canon, task: branch, repo: repo_name, task_dir, repo_worktree }
 }
 
-/// Recover the user-typed branch from a sanitized task-dir name via git; None when no repo confirms it, since the sanitized name is not a valid substitute for downstream `wsx exec`.
+/// Recover the user-typed branch from a sanitized task-dir name via git; None when no repo confirms it, since the sanitized name is not a valid substitute for downstream `drup exec`.
 fn recover_branch(cfg: &WsConfig, root: &Path, worktrees_root: &Path, task_dir: &str) -> Option<String> {
     let target = worktrees_root.join(task_dir);
     let target = target.canonicalize().unwrap_or(target);
@@ -176,34 +176,34 @@ fn aggregate_state(repos: &[show::RepoInfo]) -> TaskState {
 fn agent_hints(workspace: &Workspace, current: &Current, task: Option<&Task>) -> Vec<&'static str> {
     let mut h = vec![
         "task.state.kind is one of: running (all repos healthy) | degraded (some healthy, some not) | stopped (none running) | unknown (state could not be determined). The numeric fields (healthy_repos, total_repos) are the ground truth if the label is unclear.",
-        "task.repos[].kind is one of: host (wsx-supervised process — wsx owns its lifecycle via `wsx up`/`down`) | container (compose stack — compose owns the lifecycle).",
+        "task.repos[].kind is one of: host (drup-supervised process — drup owns its lifecycle via `drup up`/`down`) | container (compose stack — compose owns the lifecycle).",
         "task.repos[].is_running: true = confirmed running; false = confirmed not running; null = the check could not complete. Do NOT infer 'stopped' from null.",
         "Edit files at absolute paths from task.repos[].worktree_absolute. Do NOT cd into a worktree — operate from wherever the user placed you and use absolute paths.",
         "Run commands inside a repo's worktree via task.repos[].exec_command_prefix — append a space and your command. Direct calls to docker/podman/npm/etc. from outside the prefix miss the injected env and target the wrong stack.",
-        "Use services[].routed_hostname verbatim. Do NOT re-derive hostnames from the branch or repo name — wsx applied its own sanitization.",
+        "Use services[].routed_hostname verbatim. Do NOT re-derive hostnames from the branch or repo name — drup applied its own sanitization.",
         "services[].allocated_host_port is null on a worktree that has never been brought up. Any other state has a port.",
-        "Do NOT auto-run `wsx up`, `wsx down`, `wsx rm`, `wsx new`. If a repo isn't running or a worktree doesn't exist, tell the user and let them decide.",
+        "Do NOT auto-run `drup up`, `drup down`, `drup rm`, `drup new`. If a repo isn't running or a worktree doesn't exist, tell the user and let them decide.",
     ];
     if workspace.remote.is_some() {
-        h.push("workspace.remote is set — this task's stack lives on the server. `wsx exec` is location-transparent (routes through ssh automatically), so keep using it exactly as documented.");
+        h.push("workspace.remote is set — this task's stack lives on the server. `drup exec` is location-transparent (routes through ssh automatically), so keep using it exactly as documented.");
     }
     if current.task.is_none() {
         h.push("cwd is outside any task worktree, so `task` is null. Ask the user which task they want to work in, or ask them to cd into one — do NOT guess.");
     }
     if let Some(t) = task {
         if t.state.total_repos > 0 && !t.state.any_running {
-            h.push("This task's stack is not running. Do not attempt to reach any service or read runtime state until the user runs `wsx up`.");
+            h.push("This task's stack is not running. Do not attempt to reach any service or read runtime state until the user runs `drup up`.");
         }
     }
     h
 }
 
-const SCHEMA_TEXT: &str = r#"wsx context — cwd-adaptive JSON wakeup for LLM agents.
+const SCHEMA_TEXT: &str = r#"drup context — cwd-adaptive JSON wakeup for LLM agents.
 
 Always JSON on stdout. Fields:
 
 {
-  "wsx_version": string — wsx version producing this payload,
+  "drup_version": string — drup version producing this payload,
   "workspace": {
     "root":     absolute path to the workspace root,
     "domain":   private TLD used for routed hostnames, or null,
@@ -242,7 +242,7 @@ mod tests {
     use super::*;
 
     fn scaffold(root: &Path, ws_json: &str) {
-        std::fs::write(root.join(".wsx.json"), ws_json).expect("write .wsx.json");
+        std::fs::write(root.join(".drup.json"), ws_json).expect("write .drup.json");
     }
 
     fn repo(name: &str, is_running: Option<bool>) -> show::RepoInfo {
@@ -253,7 +253,7 @@ mod tests {
             is_running,
             services: Vec::new(),
             log_path_absolute: None,
-            exec_command_prefix: format!("wsx exec --branch feat/x {name} --"),
+            exec_command_prefix: format!("drup exec --branch feat/x {name} --"),
         }
     }
 

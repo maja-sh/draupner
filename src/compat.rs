@@ -4,7 +4,7 @@
 
 use std::process::Command;
 
-const MATRIX: &str = env!("WSX_COMPAT_MATRIX");
+const MATRIX: &str = env!("DRUP_COMPAT_MATRIX");
 
 pub fn check() {
     if MATRIX == "linux" || MATRIX == "unknown" {
@@ -16,7 +16,7 @@ pub fn check() {
 
     if below_floor(min, running) {
         eprintln!(
-            "warning: wsx is qualified for macOS {min} and newer; running {running} \
+            "warning: drup is qualified for macOS {min} and newer; running {running} \
              may hit untested APFS/signal behavior."
         );
     }

@@ -1,5 +1,5 @@
-//! Config injection: per-worktree `WSX_HOST_*`/`WSX_PORT_*` values reach the app
-//! via env, CLI-arg passthrough, and `${WSX_*}` template substitution, all driven
+//! Config injection: per-worktree `DRUP_HOST_*`/`DRUP_PORT_*` values reach the app
+//! via env, CLI-arg passthrough, and `${DRUP_*}` template substitution, all driven
 //! by [`prepare`]. Substitution is hand-rolled rather than via the `subst` crate
 //! so bare `$VAR`s in nginx.conf/redis.conf are copied verbatim.
 
@@ -19,7 +19,7 @@ use crate::remote::{self, Site};
 pub enum Phase {
     /// `up` / `post-create`: allocate ports and render templates.
     Activate,
-    /// `wsx exec` locally: allocate ports but don't render — exec is a command
+    /// `drup exec` locally: allocate ports but don't render — exec is a command
     /// runner, not a config step.
     Exec,
     /// `down` / `post-remove` / `status` / remote exec: never allocate or render.
@@ -98,8 +98,8 @@ pub fn prepare(
     // Peer keys carry a `.` (invalid env-var char) so they're substitution-only,
     // never injected; an unbuilt peer just leaves the token literal.
     let mut subst = vars.clone();
-    // Substitutable so `.wsx.json` can map `"DOCKER_COMMAND": "${WSX_RUNTIME}"`
-    // instead of teaching the project about ws.
+    // Substitutable so `.drup.json` can map `"DOCKER_COMMAND": "${DRUP_RUNTIME}"`
+    // instead of teaching the project about drup.
     subst.extend(context.iter().cloned());
     for peer in cfg.repos.iter().map(|r| r.name()).filter(|&n| n != repo) {
         subst.extend(peer_vars(cfg, site, root, branch_sanitized, peer, phase)?);
@@ -118,21 +118,21 @@ pub fn prepare(
     // parallel worktrees de-conflict raw-TCP host ports.
     if !host && rc.is_container(|| compose::has_compose_file(worktree)) {
         let project = compose::project_name(branch_sanitized, repo);
-        // Skipped when routing is off, else referencing the external `wsx-net`
+        // Skipped when routing is off, else referencing the external `drup-net`
         // would fail `compose up` for nothing.
-        let join_ws_net = cfg.routing_active();
+        let join_drup_net = cfg.routing_active();
         let base = base_files_at(worktree, &site_worktree);
         let override_path = override_path_at(cfg, site, root, branch_sanitized, repo);
         env.extend(compose_env(
             site, &base, &override_path, &project, &services, &all_services, &port_map, &declared,
-            phase, join_ws_net,
+            phase, join_drup_net,
         )?);
     }
     env.extend(context);
     Ok(env)
 }
 
-/// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `wsx rm` wiped the sibling's DB volumes).
+/// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `drup rm` wiped the sibling's DB volumes).
 fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
     let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
     match entry.config() {
@@ -155,13 +155,13 @@ fn recorded_or_declared(
     if recorded.is_empty() { rc.services.clone() } else { recorded }
 }
 
-/// `WSX_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `WSX_REMOTE_HOST` because that is an input override a nested `wsx` call would silently inherit.
+/// `DRUP_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `DRUP_REMOTE_HOST` because that is an input override a nested `drup` call would silently inherit.
 fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
     vec![
-        ("WSX_RUNTIME".to_string(), cfg.runtime().to_string()),
-        ("WSX_REMOTE".to_string(), if cfg.remote.is_some() { "1" } else { "0" }.to_string()),
+        ("DRUP_RUNTIME".to_string(), cfg.runtime().to_string()),
+        ("DRUP_REMOTE".to_string(), if cfg.remote.is_some() { "1" } else { "0" }.to_string()),
         (
-            "WSX_CONNECTION".to_string(),
+            "DRUP_CONNECTION".to_string(),
             cfg.remote.as_ref().map(|r| r.connection.clone()).unwrap_or_default(),
         ),
     ]
@@ -207,7 +207,7 @@ pub(crate) fn override_path_at(
         None => ports::override_file(root, branch_sanitized, repo).to_string_lossy().into_owned(),
         // Absolute, same reason as `site_worktree_path`.
         Some(r) => format!(
-            "{}/.wsx-meta/{}",
+            "{}/.drup-meta/{}",
             site.abs_base(&r.worktree_base(root)).trim_end_matches('/'),
             ports::override_filename(branch_sanitized, repo),
         ),
@@ -229,7 +229,7 @@ fn compose_env(
     port_map: &BTreeMap<String, u16>,
     declared: &[(String, String)],
     phase: Phase,
-    join_ws_net: bool,
+    join_drup_net: bool,
 ) -> Result<Vec<(String, String)>> {
     if base.is_empty() {
         return Ok(Vec::new());
@@ -237,7 +237,7 @@ fn compose_env(
 
     let mut env = vec![("COMPOSE_PROJECT_NAME".to_string(), project.to_string())];
     if phase.writes_override()
-        && compose::write_override(site, override_path, services, all_services, port_map, declared, join_ws_net)?
+        && compose::write_override(site, override_path, services, all_services, port_map, declared, join_drup_net)?
     {
         let mut files: Vec<String> = base.to_vec();
         files.push(override_path.to_string());
@@ -327,7 +327,7 @@ fn effective_services(
     Ok((rc.services.clone(), rc.services.keys().cloned().collect()))
 }
 
-/// Shared by the `WSX_HOST_*` env var and the Caddy route match so the two
+/// Shared by the `DRUP_HOST_*` env var and the Caddy route match so the two
 /// can't drift.
 pub(crate) fn ws_host(branch_sanitized: &str, subdomain: &str, domain: &str) -> String {
     format!("{}.{}.{domain}", dns_label(branch_sanitized), dns_label(subdomain))
@@ -350,12 +350,12 @@ fn ws_vars(
     for (name, svc) in services {
         if let Some(sub) = svc.subdomain(name) {
             if let Some(d) = domain {
-                vars.insert(format!("WSX_HOST_{name}"), ws_host(branch_sanitized, sub, d));
+                vars.insert(format!("DRUP_HOST_{name}"), ws_host(branch_sanitized, sub, d));
             }
         }
         if host || !svc.is_http() {
             if let Some(port) = port_map.get(name) {
-                vars.insert(format!("WSX_PORT_{name}"), port.to_string());
+                vars.insert(format!("DRUP_PORT_{name}"), port.to_string());
             }
         }
     }
@@ -375,9 +375,9 @@ fn peer_vars(
     let services = recorded_or_declared(root, branch_sanitized, peer, rc);
     let peer_host = rc.is_host();
 
-    // Allocating phases pre-reserve the peer's ports so `${WSX_PORT_<peer>.<svc>}`
+    // Allocating phases pre-reserve the peer's ports so `${DRUP_PORT_<peer>.<svc>}`
     // resolves even when the peer worktree hasn't been built yet; the reservation
-    // lands in the peer's own `.wsx-meta` and its later `up` reuses it.
+    // lands in the peer's own `.drup-meta` and its later `up` reuses it.
     let port_map = if phase.allocates() {
         let needs: Vec<String> = services
             .iter()
@@ -392,15 +392,15 @@ fn peer_vars(
         .into_iter()
         .filter_map(|(k, v)| {
             let rekeyed = k
-                .strip_prefix("WSX_HOST_")
-                .map(|svc| format!("WSX_HOST_{peer}.{svc}"))
-                .or_else(|| k.strip_prefix("WSX_PORT_").map(|svc| format!("WSX_PORT_{peer}.{svc}")))?;
+                .strip_prefix("DRUP_HOST_")
+                .map(|svc| format!("DRUP_HOST_{peer}.{svc}"))
+                .or_else(|| k.strip_prefix("DRUP_PORT_").map(|svc| format!("DRUP_PORT_{peer}.{svc}")))?;
             Some((rekeyed, v))
         })
         .collect())
 }
 
-/// Maps ws's `WSX_*` values onto the app's own var names.
+/// Maps drup's `DRUP_*` values onto the app's own var names.
 fn declared_env(rc: &RepoConfig, vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
     rc.env.iter().map(|(k, t)| (k.clone(), substitute(t, vars))).collect()
 }
@@ -418,7 +418,7 @@ fn render_all(worktree: &Path, rc: &RepoConfig, vars: &BTreeMap<String, String>)
     git::add_worktree_excludes(worktree, &dests)
 }
 
-/// `.wsx.json` arrives with a clone, so `dest` is attacker-controlled: without this, an entry like `../../../../.ssh/authorized_keys` had `wsx new` and every `wsx up` write anywhere the user could. Same rule `copy` entries have always had (`ops::new::seed_copies`); the `is_tracked` guard below inverts for escaping paths and never caught this.
+/// `.drup.json` arrives with a clone, so `dest` is attacker-controlled: without this, an entry like `../../../../.ssh/authorized_keys` had `drup new` and every `drup up` write anywhere the user could. Same rule `copy` entries have always had (`ops::new::seed_copies`); the `is_tracked` guard below inverts for escaping paths and never caught this.
 fn ensure_within_worktree(worktree: &Path, field: &str, p: &str) -> Result<()> {
     let rel = Path::new(p);
     if rel.is_absolute() {
@@ -487,7 +487,7 @@ fn render_one(
         .with_context(|| format!("write {}", dest_path.display()))
 }
 
-/// Only names present in `vars` (only ever `WSX_*`) are replaced; every other
+/// Only names present in `vars` (only ever `DRUP_*`) are replaced; every other
 /// `$…` is copied byte-for-byte so nginx-style `$host` survives untouched.
 fn substitute(text: &str, vars: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
@@ -542,10 +542,10 @@ mod tests {
         let local = WsConfig::default();
         let ctx = workspace_context(&local);
         let detected = crate::config::detect_runtime().unwrap_or("podman").to_string();
-        assert!(ctx.contains(&("WSX_RUNTIME".to_string(), detected)), "{ctx:?}");
-        assert!(ctx.contains(&("WSX_REMOTE".to_string(), "0".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_RUNTIME".to_string(), detected)), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_REMOTE".to_string(), "0".to_string())), "{ctx:?}");
         // Always present so a hook can test it without an unset-variable guard.
-        assert!(ctx.contains(&("WSX_CONNECTION".to_string(), String::new())), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_CONNECTION".to_string(), String::new())), "{ctx:?}");
 
         let remote = WsConfig {
             runtime: Some("docker".to_string()),
@@ -553,9 +553,9 @@ mod tests {
             ..WsConfig::default()
         };
         let ctx = workspace_context(&remote);
-        assert!(ctx.contains(&("WSX_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
-        assert!(ctx.contains(&("WSX_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
-        assert!(ctx.contains(&("WSX_CONNECTION".to_string(), "srv".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_REMOTE".to_string(), "1".to_string())), "{ctx:?}");
+        assert!(ctx.contains(&("DRUP_CONNECTION".to_string(), "srv".to_string())), "{ctx:?}");
     }
 
     #[test]
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn a_bare_name_repo_routes_its_recorded_services() {
         // Same rule on the routing side: `prepare` hands a bare-name repo's HTTP
-        // services a `WSX_HOST_*`, so `routes` must produce the Caddy route that
+        // services a `DRUP_HOST_*`, so `routes` must produce the Caddy route that
         // hostname resolves to — otherwise the injected host is a dead name.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -610,14 +610,14 @@ mod tests {
     #[test]
     fn substitute_resolves_a_cross_repo_token() {
         let mut vars = BTreeMap::new();
-        vars.insert("WSX_PORT_app.web".to_string(), "20008".to_string());
+        vars.insert("DRUP_PORT_app.web".to_string(), "20008".to_string());
         assert_eq!(
-            substitute("https://myapp.localhost:${WSX_PORT_app.web}/x", &vars),
+            substitute("https://myapp.localhost:${DRUP_PORT_app.web}/x", &vars),
             "https://myapp.localhost:20008/x"
         );
         assert_eq!(
-            substitute("${WSX_PORT_missing.web}", &BTreeMap::new()),
-            "${WSX_PORT_missing.web}"
+            substitute("${DRUP_PORT_missing.web}", &BTreeMap::new()),
+            "${DRUP_PORT_missing.web}"
         );
     }
 
@@ -638,8 +638,8 @@ mod tests {
         .unwrap();
 
         let pv = peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Inspect).unwrap();
-        assert_eq!(pv.get("WSX_PORT_app.web").map(String::as_str), Some("20008"));
-        assert!(!pv.contains_key("WSX_HOST_app.web"));
+        assert_eq!(pv.get("DRUP_PORT_app.web").map(String::as_str), Some("20008"));
+        assert!(!pv.contains_key("DRUP_HOST_app.web"));
     }
 
     #[test]
@@ -666,9 +666,9 @@ mod tests {
         .unwrap();
 
         let pv = peer_vars(&cfg, &Site::Local, root, "feat", "app", Phase::Activate).unwrap();
-        let port = pv.get("WSX_PORT_app.web").expect("peer port pre-allocated");
+        let port = pv.get("DRUP_PORT_app.web").expect("peer port pre-allocated");
         assert!(port.parse::<u16>().is_ok(), "a real port, got {port}");
-        // Lands in the peer's own `.wsx-meta` so app reuses it when built.
+        // Lands in the peer's own `.drup-meta` so app reuses it when built.
         assert_eq!(
             ports::load(root, "feat", "app").get("web").map(|p| p.to_string()).as_deref(),
             Some(port.as_str()),
@@ -686,10 +686,10 @@ mod tests {
             &services, &BTreeMap::new(), false, "feat-x-api", "feat-x", "api", "myapp.test",
         );
         assert_eq!(specs.len(), 2, "only HTTP services route: {:?}", specs.iter().map(|r| &r.id).collect::<Vec<_>>());
-        let web = specs.iter().find(|r| r.id == "ws-6_feat-x-3_api-3_web").unwrap();
+        let web = specs.iter().find(|r| r.id == "drup-6_feat-x-3_api-3_web").unwrap();
         assert_eq!(web.hostname, "feat-x.web.myapp.test");
         assert_eq!(web.upstream, "feat-x-api-web-1:80");
-        let admin = specs.iter().find(|r| r.id == "ws-6_feat-x-3_api-5_admin").unwrap();
+        let admin = specs.iter().find(|r| r.id == "drup-6_feat-x-3_api-5_admin").unwrap();
         assert_eq!(admin.hostname, "feat-x.admin.myapp.test");
         assert_eq!(admin.upstream, "feat-x-api-admin-1:8080");
     }
@@ -703,7 +703,7 @@ mod tests {
         let ports = [("web".to_string(), 20001u16)].into_iter().collect();
         let specs = route_specs(&services, &ports, true, "", "feat-x", "svc", "myapp.test");
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].id, "ws-6_feat-x-3_svc-3_web");
+        assert_eq!(specs[0].id, "drup-6_feat-x-3_svc-3_web");
         assert_eq!(specs[0].upstream, "host.containers.internal:20001");
         assert!(!specs[0].wildcard, "web is not a wildcard service");
     }
@@ -742,20 +742,20 @@ mod tests {
     #[test]
     fn substitute_only_touches_known_ws_braces() {
         let mut vars = BTreeMap::new();
-        vars.insert("WSX_HOST_app".to_string(), "feat.api.myapp.test".to_string());
-        vars.insert("WSX_PORT_mysql".to_string(), "54321".to_string());
+        vars.insert("DRUP_HOST_app".to_string(), "feat.api.myapp.test".to_string());
+        vars.insert("DRUP_PORT_mysql".to_string(), "54321".to_string());
 
         assert_eq!(
-            substitute("https://${WSX_HOST_app}/x", &vars),
+            substitute("https://${DRUP_HOST_app}/x", &vars),
             "https://feat.api.myapp.test/x"
         );
-        assert_eq!(substitute("${WSX_typo}", &vars), "${WSX_typo}");
-        assert_eq!(substitute("$WSX_HOST_app", &vars), "$WSX_HOST_app");
+        assert_eq!(substitute("${DRUP_typo}", &vars), "${DRUP_typo}");
+        assert_eq!(substitute("$DRUP_HOST_app", &vars), "$DRUP_HOST_app");
         assert_eq!(
-            substitute("listen $host; port ${WSX_PORT_mysql};", &vars),
+            substitute("listen $host; port ${DRUP_PORT_mysql};", &vars),
             "listen $host; port 54321;"
         );
-        assert_eq!(substitute("a ${WSX_HOST_app", &vars), "a ${WSX_HOST_app");
+        assert_eq!(substitute("a ${DRUP_HOST_app", &vars), "a ${DRUP_HOST_app");
     }
 
     #[test]
@@ -769,10 +769,10 @@ mod tests {
         ports.insert("mysql".to_string(), 54321u16);
 
         let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
-        assert_eq!(vars["WSX_HOST_app"], "feat-x.api.myapp.test");
-        assert_eq!(vars["WSX_HOST_admin"], "feat-x.admin.myapp.test");
-        assert_eq!(vars["WSX_PORT_mysql"], "54321");
-        assert!(!vars.contains_key("WSX_PORT_app"));
+        assert_eq!(vars["DRUP_HOST_app"], "feat-x.api.myapp.test");
+        assert_eq!(vars["DRUP_HOST_admin"], "feat-x.admin.myapp.test");
+        assert_eq!(vars["DRUP_PORT_mysql"], "54321");
+        assert!(!vars.contains_key("DRUP_PORT_app"));
     }
 
     #[test]
@@ -781,8 +781,8 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert("app".to_string(), 20001u16);
         let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, true);
-        assert_eq!(vars["WSX_HOST_app"], "feat-x.api.myapp.test");
-        assert_eq!(vars["WSX_PORT_app"], "20001");
+        assert_eq!(vars["DRUP_HOST_app"], "feat-x.api.myapp.test");
+        assert_eq!(vars["DRUP_PORT_app"], "20001");
     }
 
     #[test]
@@ -791,14 +791,14 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert("web".to_string(), 20001u16); // stale allocation from a raw-TCP era
         let vars = ws_vars(&services(&rc), "feat-x", Some("myapp.test"), &ports, false);
-        assert!(!vars.contains_key("WSX_PORT_web"), "stale port must not leak: {vars:?}");
+        assert!(!vars.contains_key("DRUP_PORT_web"), "stale port must not leak: {vars:?}");
     }
 
     #[test]
     fn ws_vars_skips_host_without_domain() {
         let rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
         let vars = ws_vars(&services(&rc), "feat-x", None, &BTreeMap::new(), false);
-        assert!(vars.is_empty(), "no domain ⇒ no WSX_HOST var: {vars:?}");
+        assert!(vars.is_empty(), "no domain ⇒ no DRUP_HOST var: {vars:?}");
     }
 
     #[test]
@@ -810,16 +810,16 @@ mod tests {
         };
         let site = Site::Remote { connection: "srv".into(), home: "/home/u".into() };
         let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
-        assert_eq!(p, "/home/u/myapp/.wsx-meta/6_feat-x-3_api.override.yml");
+        assert_eq!(p, "/home/u/myapp/.drup-meta/6_feat-x-3_api.override.yml");
 
         let local = WsConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
-        assert!(lp.ends_with(".wsx-meta/6_feat-x-3_api.override.yml"), "{lp}");
+        assert!(lp.ends_with(".drup-meta/6_feat-x-3_api.override.yml"), "{lp}");
     }
 
     #[test]
     fn template_paths_must_stay_inside_the_worktree() {
-        // `templates` is attacker-controlled config (`.wsx.json` ships with a
+        // `templates` is attacker-controlled config (`.drup.json` ships with a
         // clone), and both fields are joined onto the worktree. Every escape
         // shape is refused; ordinary relative paths are not.
         let tmp = tempfile::tempdir().unwrap();
@@ -854,9 +854,9 @@ mod tests {
     #[test]
     fn declared_env_substitutes_declared_mappings() {
         let mut rc = repo_with(&[("app", svc(Some(HttpDecl::Subdomain("api".into())), 80))]);
-        rc.env.insert("APP_URL".into(), "https://${WSX_HOST_app}".into());
+        rc.env.insert("APP_URL".into(), "https://${DRUP_HOST_app}".into());
         let mut vars = BTreeMap::new();
-        vars.insert("WSX_HOST_app".to_string(), "feat-x.api.myapp.test".to_string());
+        vars.insert("DRUP_HOST_app".to_string(), "feat-x.api.myapp.test".to_string());
 
         let pairs = declared_env(&rc, &vars);
         let app_url = pairs.iter().find(|(k, _)| k == "APP_URL").unwrap();

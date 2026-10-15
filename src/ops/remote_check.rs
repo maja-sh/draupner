@@ -1,4 +1,4 @@
-//! `wsx remote check` — read-only verification of where a workspace's stack
+//! `drup remote check` — read-only verification of where a workspace's stack
 //! lives, safe to run against a server you're still setting up.
 
 use anyhow::Result;
@@ -36,7 +36,7 @@ fn check_remote(
     domain: Option<&str>,
     verbose: bool,
 ) -> Result<()> {
-    crate::ui::header("ws-remote-check", connection);
+    crate::ui::header("drup-remote-check", connection);
 
     // `server_probes` returns `None` iff SSH failed, so derive the ssh line from that instead of paying a second handshake.
     let server = probe::server_probes(connection, workspace_path, runtime, domain);
@@ -78,7 +78,7 @@ fn check_remote(
         let client_side = match domain {
             Some(d) => format!(
                 "Still client-side: trust the server's Caddy root CA, and resolve *.{d} \
-                 to the server from here (`wsx setup`)."
+                 to the server from here (`drup setup`)."
             ),
             None => "Trust the server's Caddy root CA from this machine if you haven't.".to_string(),
         };
@@ -91,14 +91,14 @@ fn check_remote(
     }
 }
 
-/// Report local routing readiness by reusing `wsx setup`'s probe so the two agree on "ready".
+/// Report local routing readiness by reusing `drup setup`'s probe so the two agree on "ready".
 fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
-    crate::ui::header("ws-remote-check", "local");
+    crate::ui::header("drup-remote-check", "local");
 
     let Some(domain) = cfg.domain.as_deref() else {
         crate::ui::note(
-            "no `domain` set — no local routing to verify. Add `domain` to .wsx.json \
-             to route worktrees, or `wsx init --remote` to offload to a server.",
+            "no `domain` set — no local routing to verify. Add `domain` to .drup.json \
+             to route worktrees, or `drup init --remote` to offload to a server.",
         );
         return Ok(());
     };
@@ -114,7 +114,7 @@ fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
     }
 
     if report.privileged_gaps() {
-        crate::ui::nudge("`wsx setup` — walk through fixing the gaps above");
+        crate::ui::nudge("`drup setup` — walk through fixing the gaps above");
         return Err(super::op_failure("local routing setup is incomplete"));
     }
     crate::ui::summary_ok(&[format!(

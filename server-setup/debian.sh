@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# ws host setup — Debian / Ubuntu
+# drup host setup — Debian / Ubuntu
 # ================================
 #
-# Everything `ws` needs on a host but deliberately does NOT do to it for you:
-# the packages it expects to find, and the privileged one-time bits. `ws` handles
-# the rootless pieces itself (the `wsx-net` network, the Caddy container); the
+# Everything `drup` needs on a host but deliberately does NOT do to it for you:
+# the packages it expects to find, and the privileged one-time bits. `drup` handles
+# the rootless pieces itself (the `drup-net` network, the Caddy container); the
 # rest lives here — a readable script you run yourself. That's the transparency
 # contract: nothing privileged happens invisibly.
 #
-# Podman only, deliberately. `ws` drives either podman or docker on the machine
+# Podman only, deliberately. `drup` drives either podman or docker on the machine
 # you run it *from*, but a server is podman: rootless by default, no daemon, and
 # no root-equivalent group to join. Debian's docker packages are also too old for
-# the Compose features `ws` generates. So a workspace that offloads here runs on
-# podman — which is exactly what an absent `runtime` in `.wsx.json` resolves to.
+# the Compose features `drup` generates. So a workspace that offloads here runs on
+# podman — which is exactly what an absent `runtime` in `.drup.json` resolves to.
 #
 #   0. Prerequisites  → podman, a Compose provider, iproute2, mutagen, curl, sshd.
 #   1. Trust Caddy's internal root CA  → browsers stop warning on the TLS cert.
@@ -29,24 +29,24 @@
 #
 # Usage:
 #   server-setup/debian.sh <domain> [--address <ip>] [--port 443]
-#   WSX_DOMAIN=myapp.test server-setup/debian.sh
+#   DRUP_DOMAIN=myapp.test server-setup/debian.sh
 #
 # `--address` is what `*.<domain>` resolves to; it defaults to 127.0.0.1, which
-# is right when `ws` runs on this same box. On an offload box, pass the address
+# is right when `drup` runs on this same box. On an offload box, pass the address
 # its clients reach it at — any routable address works, Tailscale or not.
 #
 # Run it as your normal user; it invokes `sudo` per privileged command (so sudo
 # prompts you directly — the script never reads your password). Caddy must be up
-# first so its root CA exists — `wsx setup` or `wsx up` starts it, run on whichever
-# machine `ws` lives on. On an **offload box** that is a *different* machine:
-# `ws` is deliberately never installed on the server, so every `ws` command named
+# first so its root CA exists — `drup setup` or `drup up` starts it, run on whichever
+# machine `drup` lives on. On an **offload box** that is a *different* machine:
+# `drup` is deliberately never installed on the server, so every `drup` command named
 # in this script's output runs on the client and reaches this box over SSH.
 
 set -euo pipefail
 
-CADDY_CONTAINER="ws-caddy"
-CA_DEST="/usr/local/share/ca-certificates/ws-caddy-root.crt"
-SYSCTL_FILE="/etc/sysctl.d/99-ws-unprivileged-ports.conf"
+CADDY_CONTAINER="drup-caddy"
+CA_DEST="/usr/local/share/ca-certificates/drup-caddy-root.crt"
+SYSCTL_FILE="/etc/sysctl.d/99-drup-unprivileged-ports.conf"
 # Bump when a newer mutagen is wanted; the client and server should match.
 MUTAGEN_VERSION="0.18.1"
 # Upstream publishes SHA256SUMS but nothing this script can chain trust to, so
@@ -55,30 +55,30 @@ MUTAGEN_VERSION="0.18.1"
 # Bump these together with MUTAGEN_VERSION (they're in the release's SHA256SUMS).
 MUTAGEN_SHA256_amd64="7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f"
 MUTAGEN_SHA256_arm64="bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd540db8a"
-# `ws` generates a compose override that uses the `!override` tag, which Compose
+# `drup` generates a compose override that uses the `!override` tag, which Compose
 # only understands from this version on.
 COMPOSE_MIN="2.24.4"
 
-domain="${WSX_DOMAIN:-}"
+domain="${DRUP_DOMAIN:-}"
 # What `*.<domain>` should answer with. Loopback is right when the workspaces
 # live on this same machine; an offload box wants the address its clients
 # actually reach it at (LAN IP, tailnet IP, whatever routes).
-address="${WSX_ADDRESS:-127.0.0.1}"
+address="${DRUP_ADDRESS:-127.0.0.1}"
 want_443=0
 
-# Whether this box is an *offload server* (it runs the stacks; `ws` itself runs
-# on a client and drives it over SSH) rather than the machine running `ws`. The
+# Whether this box is an *offload server* (it runs the stacks; `drup` itself runs
+# on a client and drives it over SSH) rather than the machine running `drup`. The
 # answer address is the signal: loopback only makes sense when the workspaces
 # live here. It decides which commands the guidance below can honestly name —
-# on an offload box there is no local `ws` to invoke, by design.
+# on an offload box there is no local `drup` to invoke, by design.
 
 # No local-vs-offload predicate here on purpose. This script runs on the box that
-# hosts the stacks, and whether `ws` also runs on it is the operator's business,
+# hosts the stacks, and whether `drup` also runs on it is the operator's business,
 # not something to infer and act on. The previous version guessed from the DNS
-# answer (`address != 127.0.0.1`) and got it wrong for a real setup — `ws` running
+# answer (`address != 127.0.0.1`) and got it wrong for a real setup — `drup` running
 # locally on a box that also serves peers on the LAN takes an `--address` for
-# their benefit, and was then told `ws` doesn't run here. Every hint below is
-# phrased to hold either way; `wsx remote check` reports on the server when a
+# their benefit, and was then told `drup` doesn't run here. Every hint below is
+# phrased to hold either way; `drup remote check` reports on the server when a
 # `remote` block exists and on the local host otherwise, so it needs no branch.
 
 while [ $# -gt 0 ]; do
@@ -130,11 +130,11 @@ say()  { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
-# 0. Prerequisites — the binaries `ws` calls on this box
+# 0. Prerequisites — the binaries `drup` calls on this box
 # ---------------------------------------------------------------------------
-# `ws` drives this host over SSH; everything checked below is something it
+# `drup` drives this host over SSH; everything checked below is something it
 # actually invokes. `timeout` and the rest of coreutils ship with Debian already.
-# `kind: host` repos need nothing beyond this list — `ws` supervises those as its
+# `kind: host` repos need nothing beyond this list — `drup` supervises those as its
 # own detached, PID-tracked processes, not as service-manager units.
 
 # Report whether $1 is present; return non-zero so the caller can collect it.
@@ -209,9 +209,9 @@ prerequisites() {
   have_bin podman "runs your container stacks"            || missing+=(podman)
   have_bin ss     "allocates free host ports (iproute2)"  || missing+=(iproute2)
   have_bin curl   "used below to fetch mutagen"           || missing+=(curl)
-  have_bin sshd   "the transport ws drives this box over" || missing+=(openssh-server)
+  have_bin sshd   "the transport drup drives this box over" || missing+=(openssh-server)
   # `podman compose` is only a delegating front-end — without a real Compose
-  # binary beside it, every `wsx up` fails at the compose call.
+  # binary beside it, every `drup up` fails at the compose call.
   if compose_provider_present; then
     note "✓ compose provider"
   else
@@ -232,14 +232,14 @@ prerequisites() {
 }
 
 # Having the binaries isn't enough — they have to be new enough to understand the
-# override file `ws` generates. Debian 12 fails this on both counts (podman 4.3.1
+# override file `drup` generates. Debian 12 fails this on both counts (podman 4.3.1
 # has no `compose` subcommand at all; its docker-compose is the 1.x line), so say
-# so plainly rather than letting `wsx up` fail later with a YAML parse error.
+# so plainly rather than letting `drup up` fail later with a YAML parse error.
 check_compose() {
   local v
   if ! podman compose version >/dev/null 2>&1; then
     note "✗ \`podman compose\` does not work on this box."
-    note "    ws needs podman >= 4.7 (older ones have no \`compose\` subcommand)"
+    note "    drup needs podman >= 4.7 (older ones have no \`compose\` subcommand)"
     note "    and a Compose provider >= $COMPOSE_MIN (for the \`!override\` tag)."
     note "    Debian 12 ships podman 4.3.1 + docker-compose 1.29.2 — both too old."
     note "    Use Debian 13 (trixie) or newer, or install them from upstream."
@@ -253,7 +253,7 @@ check_compose() {
   if [ -n "$v" ] &&
      [ "$(printf '%s\n%s\n' "$COMPOSE_MIN" "$v" | sort -V | head -1)" != "$COMPOSE_MIN" ]; then
     note "✗ Compose $v is older than $COMPOSE_MIN — \`!override\` is unsupported."
-    note "    Container repos will fail at \`wsx up\` until this is upgraded."
+    note "    Container repos will fail at \`drup up\` until this is upgraded."
     return 0
   fi
   note "✓ podman compose${v:+ (provider $v)}"
@@ -292,7 +292,7 @@ trust_ca() {
   say "Trust Caddy's root CA"
   if ! podman container inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then
     note "skip: the $CADDY_CONTAINER container isn't running yet."
-    note "      start it from the machine running \`ws\` (\`wsx setup\`, which reaches"
+    note "      start it from the machine running \`drup\` (\`drup setup\`, which reaches"
     note "      this box over SSH when it's remote), then re-run this script."
     return 0
   fi
@@ -325,7 +325,7 @@ trust_ca() {
 # so that last hop is printed, not forced.
 wildcard_dns() {
   say "Wildcard DNS: *.$domain → $address"
-  local conf="/etc/dnsmasq.d/ws-${domain}.conf"
+  local conf="/etc/dnsmasq.d/drup-${domain}.conf"
   # dnsmasq lives in /usr/sbin, off a normal user's PATH — checking the name
   # alone would reinstall it on every run.
   if ! PATH="$PATH:/usr/sbin:/sbin" command -v dnsmasq >/dev/null 2>&1; then
@@ -335,7 +335,7 @@ wildcard_dns() {
   fi
   # `bind-interfaces` matters more than it looks: left to itself dnsmasq claims
   # :53 on *every* interface, including the gateway of podman's container
-  # network. aardvark-dns then can't bind, so the ws network — and the Caddy
+  # network. aardvark-dns then can't bind, so the drup network — and the Caddy
   # container on it — fails to start outright. Listen only where clients ask.
   local desired="address=/${domain}/${address}
 listen-address=127.0.0.1"
@@ -357,7 +357,7 @@ bind-interfaces"
       note "  check \`systemctl status dnsmasq\` — DNS may be down until it's fixed."
     fi
   fi
-  note "final hop — point the machine running \`ws\` at this resolver:"
+  note "final hop — point the machine running \`drup\` at this resolver:"
   if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
     note "  systemd-resolved detected → route just '$domain' here:"
     note "    sudo resolvectl dns    <iface> ${address}"
@@ -367,7 +367,7 @@ bind-interfaces"
     note "  \`address=/${domain}/${address}\` line to that machine's own dnsmasq."
   fi
   if [ "$address" = "127.0.0.1" ]; then
-    note "note: answering with loopback — right when \`ws\` runs on THIS box."
+    note "note: answering with loopback — right when \`drup\` runs on THIS box."
     note "      for an offload box, re-run with \`--address <ip clients reach it at>\`."
   fi
 }
@@ -393,7 +393,7 @@ bind-interfaces"
 local_resolver() {
   say "Local resolver: resolve *.$domain on this machine"
 
-  if getent hosts "ws-probe.${domain}" >/dev/null 2>&1; then
+  if getent hosts "drup-probe.${domain}" >/dev/null 2>&1; then
     note "already resolves here — nothing to do."
     # Resolving *now* says nothing about surviving the next lease renewal, and an
     # earlier run of this script wired the file without defending it. Re-running
@@ -406,7 +406,7 @@ local_resolver() {
   # systemd-resolved can route a single domain, leaving every other lookup on
   # the existing upstream. Narrowest blast radius available, so prefer it.
   if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q systemd; then
-    local unit="/etc/systemd/resolved.conf.d/ws-${domain}.conf"
+    local unit="/etc/systemd/resolved.conf.d/drup-${domain}.conf"
     note "systemd-resolved detected → routing only '$domain' at dnsmasq."
     sudo mkdir -p /etc/systemd/resolved.conf.d
     printf '[Resolve]\nDNS=127.0.0.1\nDomains=~%s\n' "$domain" | sudo tee "$unit" >/dev/null
@@ -416,7 +416,7 @@ local_resolver() {
       note "wrote $unit, but systemd-resolved FAILED to restart."
       note "  check \`systemctl status systemd-resolved\`."
     fi
-    getent hosts "ws-probe.${domain}" >/dev/null 2>&1 ||
+    getent hosts "drup-probe.${domain}" >/dev/null 2>&1 ||
       note "still not resolving — check \`resolvectl status\`."
     return 0
   fi
@@ -438,7 +438,7 @@ local_resolver() {
 
   # A separate file: `wildcard_dns` rewrites its own conf whole whenever it
   # differs, which would drop these lines on the next run.
-  local up_conf="/etc/dnsmasq.d/ws-upstream.conf"
+  local up_conf="/etc/dnsmasq.d/drup-upstream.conf"
   { echo "# Written by server-setup — dnsmasq must not read /etc/resolv.conf"
     echo "# for upstreams once that file points back here."
     echo "no-resolv"
@@ -453,7 +453,7 @@ local_resolver() {
     return 0
   fi
 
-  local backup="/etc/resolv.conf.ws-backup"
+  local backup="/etc/resolv.conf.drup-backup"
   sudo cp /etc/resolv.conf "$backup"
   # An earlier run may have frozen the file (see `freeze_resolver`); both the
   # write below and the restore on failure fail outright while it is immutable.
@@ -461,13 +461,13 @@ local_resolver() {
   # Keep the old servers as fallbacks. glibc only falls through on timeout, not
   # on NXDOMAIN, so this can't leak `*.$domain` to the upstream — it only means
   # a dead dnsmasq degrades to the previous behaviour instead of no DNS at all.
-  { echo "# ws: dnsmasq first for *.${domain}; originals kept as fallback."
+  { echo "# drup: dnsmasq first for *.${domain}; originals kept as fallback."
     echo "nameserver 127.0.0.1"
     printf 'nameserver %s\n' $upstreams   # unquoted: one line per server
   } | sudo tee /etc/resolv.conf >/dev/null
 
   local ok=1
-  getent hosts "ws-probe.${domain}" >/dev/null 2>&1 || ok=0
+  getent hosts "drup-probe.${domain}" >/dev/null 2>&1 || ok=0
   [ "$external_ok" = 0 ] || getent hosts "$canary" >/dev/null 2>&1 || ok=0
   if [ "$ok" = 1 ]; then
     note "resolver now consults dnsmasq (backup at $backup)."
@@ -525,7 +525,7 @@ thaw_resolver() {
 # A symlinked resolv.conf is left alone — resolvconf/openresolv keep the real
 # file elsewhere, so the attribute would land on the link and defend nothing.
 freeze_resolver() {
-  local up_conf="/etc/dnsmasq.d/ws-upstream.conf"
+  local up_conf="/etc/dnsmasq.d/drup-upstream.conf"
   grep -qE '^[[:space:]]*no-resolv[[:space:]]*$' "$up_conf" 2>/dev/null || return 1
   [ ! -L /etc/resolv.conf ] || return 1
   command -v chattr >/dev/null 2>&1 || return 1
@@ -597,7 +597,7 @@ persist_resolver() {
       note "dhclient already prepends 127.0.0.1 ($dh)."
     else
       { echo
-        echo "# ws: put dnsmasq first every time dhclient rewrites resolv.conf."
+        echo "# drup: put dnsmasq first every time dhclient rewrites resolv.conf."
         echo "# The DHCP-supplied servers stay behind it as fallback."
         echo "prepend domain-name-servers 127.0.0.1;"
       } | sudo tee -a "$dh" >/dev/null
@@ -656,17 +656,17 @@ unprivileged_443() {
     sudo sysctl --system >/dev/null
     note "set net.ipv4.ip_unprivileged_port_start=443 ($SYSCTL_FILE)."
   fi
-  note "then, from the machine running \`ws\`: \`wsx setup --port 443\` to move this"
+  note "then, from the machine running \`drup\`: \`drup setup --port 443\` to move this"
   note "box's Caddy onto :443 (it re-seeds)."
 }
 
 # ---------------------------------------------------------------------------
 # 4. Linger — give the login-less SSH sessions a `systemd --user` manager
 # ---------------------------------------------------------------------------
-# Not for host processes (`ws` supervises those itself, no service manager
+# Not for host processes (`drup` supervises those itself, no service manager
 # involved) — for the rootless podman API socket below, which *is* a
 # `systemd --user` unit. Without lingering, that user manager only exists while
-# a session is open, and `ws` connects over non-login SSH.
+# a session is open, and `drup` connects over non-login SSH.
 enable_linger() {
   # `id -un`, not `$USER`: the latter is just an env var, so a stray value would
   # aim this script's `sudo` at somebody else's account.
@@ -685,16 +685,16 @@ enable_linger() {
 # 5. The podman API socket — what `podman compose` actually talks to
 # ---------------------------------------------------------------------------
 # `podman compose` hands the work to Docker's Compose binary, which speaks the
-# Docker API over podman's socket. Without it every `wsx up` dies on "Cannot
+# Docker API over podman's socket. Without it every `drup up` dies on "Cannot
 # connect to the Docker daemon". Runs after linger because the rootless socket
-# is a `systemd --user` unit, and `ws` connects over a non-login SSH session
+# is a `systemd --user` unit, and `drup` connects over a non-login SSH session
 # where the user manager only exists if lingering is on.
 podman_socket() {
   say "Podman API socket"
   local path
   path="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
   # Test the path itself. podman's own `RemoteSocket.Exists` reports true for a
-  # socket that isn't there, so trusting it skips the work and `wsx up` then
+  # socket that isn't there, so trusting it skips the work and `drup up` then
   # fails with a bare "Cannot connect to the Docker daemon".
   if [ -n "$path" ] && [ -S "$path" ]; then
     note "already listening ($path)."
@@ -729,13 +729,13 @@ unprivileged_443
 enable_linger
 podman_socket
 
-# Deliberately doesn't name a `ws` command to run *here*: this box hosts the
-# stacks, and on a dedicated one `ws` isn't installed — the client drives it over
-# SSH. `wsx remote check` is the right call from wherever `ws` lives, reporting on
+# Deliberately doesn't name a `drup` command to run *here*: this box hosts the
+# stacks, and on a dedicated one `drup` isn't installed — the client drives it over
+# SSH. `drup remote check` is the right call from wherever `drup` lives, reporting on
 # the server when a `remote` block exists and on the local host otherwise.
 #
-# Say that `ws` may not be here, without claiming to know. Phrasing this as a bare
-# "re-check from the machine running ws" reads, to someone sitting on the server
+# Say that `drup` may not be here, without claiming to know. Phrasing this as a bare
+# "re-check from the machine running drup" reads, to someone sitting on the server
 # that just printed it, as an instruction to run a command that isn't installed.
-say "Done. Re-check with \`wsx remote check\`, run from wherever you use \`ws\`"
+say "Done. Re-check with \`drup remote check\`, run from wherever you use \`drup\`"
 say "— on a dedicated offload box that's your client machine, not this one."

@@ -35,13 +35,13 @@ pub struct Report {
 }
 
 impl Report {
-    /// The rootless Caddy bit isn't counted — `wsx` fixes that itself without a prompt.
+    /// The rootless Caddy bit isn't counted — `drup` fixes that itself without a prompt.
     pub fn privileged_gaps(&self) -> bool {
         !self.dns.is_ok() || !self.ca_ok || !self.port_ok
     }
 }
 
-/// Shared by `wsx setup` and `wsx remote check`'s local mode so the two never drift.
+/// Shared by `drup setup` and `drup remote check`'s local mode so the two never drift.
 pub fn render_report(report: &Report, domain: &str) {
     // Show what the wildcard *does* answer when wrong; a bare cross reads as "not wired yet".
     let detail = match &report.dns {
@@ -61,7 +61,7 @@ pub fn render_report(report: &Report, domain: &str) {
     }
 }
 
-/// Non-mutating; the single owner of "what counts as ready" — `wsx up` and `wsx setup` both read the `Report`.
+/// Non-mutating; the single owner of "what counts as ready" — `drup up` and `drup setup` both read the `Report`.
 ///
 /// `known_dns` lets a caller that already resolved the wildcard pass the answer in to skip a second lookup.
 pub fn probe(
@@ -88,9 +88,9 @@ pub fn probe(
 ///
 /// `--resolve` pins the handshake at `address` so it needs no DNS; on-demand TLS mints a leaf signed by the internal root.
 fn ca_trusted(domain: &str, port: u16, address: &str) -> bool {
-    let host = format!("ws-ca-probe.{domain}");
+    let host = format!("drup-ca-probe.{domain}");
     Command::new("curl")
-        // Short timeout: this runs on the `wsx up` hot path — a wedged Caddy mustn't stall the up.
+        // Short timeout: this runs on the `drup up` hot path — a wedged Caddy mustn't stall the up.
         .args(["-sS", "-o", "/dev/null", "-m", "4", "--resolve"])
         .arg(format!("{host}:{port}:{address}"))
         .arg(format!("https://{host}:{port}"))
@@ -105,7 +105,7 @@ struct Step {
     commands: Vec<String>,
 }
 
-/// Refuses shell metacharacters so a hand-edited `.wsx.json` can't smuggle a command into a consented `sudo` line.
+/// Refuses shell metacharacters so a hand-edited `.drup.json` can't smuggle a command into a consented `sudo` line.
 fn valid_domain(domain: &str) -> bool {
     !domain.is_empty()
         && domain.len() <= 253
@@ -135,7 +135,7 @@ fn dns_step_macos(domain: &str, address: &str) -> Step {
         commands: vec![
             "brew list dnsmasq >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install dnsmasq"
                 .to_string(),
-            format!("sed -i.wsx-bak '/^address=\\/{pattern}\\//d' {conf}"),
+            format!("sed -i.drup-bak '/^address=\\/{pattern}\\//d' {conf}"),
             format!("echo 'address=/{domain}/{address}' >> {conf}"),
             "sudo brew services restart dnsmasq".to_string(),
             "sudo mkdir -p /etc/resolver".to_string(),
@@ -170,7 +170,7 @@ pub fn run(
     address: &str,
     publish_addr: &str,
 ) -> Result<()> {
-    crate::ui::header("ws-setup", domain.unwrap_or("(no domain)"));
+    crate::ui::header("drup-setup", domain.unwrap_or("(no domain)"));
 
     if site.is_remote() {
         crate::ui::note(&format!(
@@ -198,7 +198,7 @@ pub fn run(
 
     let Some(domain) = domain else {
         crate::ui::summary_ok(&["No `domain` set — routing isn't configured, so there are no \
-                                 privileged bits to set up. Add `domain` to .wsx.json to route \
+                                 privileged bits to set up. Add `domain` to .drup.json to route \
                                  worktrees.".to_string()]);
         return Ok(());
     };
@@ -211,7 +211,7 @@ pub fn run(
     if !valid_address(address) {
         return Err(crate::ops::op_failure(format!(
             "refusing to build setup commands for `{address}` — the routing address must be \
-             a literal IP. Set `remote.publish_address` in .wsx.json to the server's address."
+             a literal IP. Set `remote.publish_address` in .drup.json to the server's address."
         )));
     }
 
@@ -269,7 +269,7 @@ fn macos_steps(site: &Site, domain: &str, report: &Report) -> Vec<Step> {
     steps
 }
 
-/// Persists to `wsx`'s config dir (not `$TMPDIR`) so the trust command has a non-clobberable file to point at.
+/// Persists to `drup`'s config dir (not `$TMPDIR`) so the trust command has a non-clobberable file to point at.
 fn fetch_root_ca(site: &Site) -> Option<String> {
     match crate::caddy::write_root_ca(site) {
         Ok(path) => Some(path.to_string_lossy().into_owned()),
@@ -321,10 +321,10 @@ fn walk_gaps(steps: Vec<Step>, yes: bool) -> Result<()> {
 
     if printed {
         crate::ui::nudge(
-            "stdin isn't a terminal — run the commands above, or re-run `wsx setup` in a terminal.",
+            "stdin isn't a terminal — run the commands above, or re-run `drup setup` in a terminal.",
         );
     } else {
-        crate::ui::summary_ok(&["setup walk complete — re-run `wsx setup` to re-check.".to_string()]);
+        crate::ui::summary_ok(&["setup walk complete — re-run `drup setup` to re-check.".to_string()]);
     }
     Ok(())
 }
@@ -368,7 +368,7 @@ fn apply_step(step: &Step, yes: bool) -> Result<Outcome> {
     }
 }
 
-/// Inherits the terminal so `sudo` prompts directly — `wsx` never reads the password.
+/// Inherits the terminal so `sudo` prompts directly — `drup` never reads the password.
 fn run_commands(commands: &[String]) -> Result<()> {
     for c in commands {
         crate::ui::note(&format!("$ {c}"));
@@ -470,7 +470,7 @@ fn dns_step_linux(domain: &str, address: &str) -> Option<Step> {
             what: format!("resolve `*.{domain}` → {address} (dnsmasq drop-in){caveat}"),
             commands: vec![
                 format!(
-                    "echo 'address=/{domain}/{address}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"
+                    "echo 'address=/{domain}/{address}' | sudo tee /etc/dnsmasq.d/drup-{domain}.conf"
                 ),
                 "sudo systemctl restart dnsmasq".to_string(),
             ],
@@ -502,7 +502,7 @@ fn ca_step_linux(pem_path: &str) -> Option<Step> {
     Some(Step {
         what: "trust Caddy's root CA in the system store".to_string(),
         commands: vec![
-            format!("sudo cp {} {dir}/ws-caddy-root.crt", sh_quote(pem_path)),
+            format!("sudo cp {} {dir}/drup-caddy-root.crt", sh_quote(pem_path)),
             format!("sudo {update}"),
         ],
     })
@@ -556,7 +556,7 @@ fn linux_client_commands(report: &Report, domain: &str) -> Vec<String> {
     let addr = &report.address;
     vec![
         "# wildcard DNS — dnsmasq:".to_string(),
-        format!("echo 'address=/{domain}/{addr}' | sudo tee /etc/dnsmasq.d/ws-{domain}.conf"),
+        format!("echo 'address=/{domain}/{addr}' | sudo tee /etc/dnsmasq.d/drup-{domain}.conf"),
         "sudo systemctl restart dnsmasq".to_string(),
         "# …or systemd-resolved, routing just this domain:".to_string(),
         format!("sudo resolvectl dns    <iface> {addr}"),
@@ -603,10 +603,10 @@ mod tests {
         // dnsmasq answers with every matching `address=` line — a stale loopback would win half the time.
         let step = dns_step_macos("myapp.test", "100.64.1.2");
         let joined = step.commands.join("\n");
-        assert!(joined.contains("sed -i.wsx-bak"), "must delete before appending: {joined}");
+        assert!(joined.contains("sed -i.drup-bak"), "must delete before appending: {joined}");
         // Anchored and dot-escaped so `myapp.test` can't match `myappXtest`.
         assert!(joined.contains(r"/^address=\/myapp\.test\//d"), "{joined}");
-        let del = joined.find("sed -i.wsx-bak").unwrap();
+        let del = joined.find("sed -i.drup-bak").unwrap();
         let add = joined.find("echo 'address=/myapp.test/100.64.1.2'").unwrap();
         assert!(del < add, "the delete must precede the append: {joined}");
     }
@@ -653,11 +653,11 @@ mod tests {
 
     #[test]
     fn macos_ca_step_trusts_the_root_in_the_system_keychain() {
-        let step = ca_step_macos("/tmp/ws-caddy-root.crt");
+        let step = ca_step_macos("/tmp/drup-caddy-root.crt");
         let cmd = &step.commands[0];
         assert!(cmd.contains("security add-trusted-cert"), "{cmd}");
         assert!(cmd.contains("/Library/Keychains/System.keychain"), "{cmd}");
-        assert!(cmd.contains("/tmp/ws-caddy-root.crt"), "{cmd}");
+        assert!(cmd.contains("/tmp/drup-caddy-root.crt"), "{cmd}");
     }
 
     #[test]
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn dns_step_is_not_offered_for_values_that_cant_be_shell_safe() {
-        // The flip must not let a hand-edited `.wsx.json` smuggle anything into a consented `sudo` line.
+        // The flip must not let a hand-edited `.drup.json` smuggle anything into a consented `sudo` line.
         assert!(!offer_dns_step("myapp.test; rm -rf /", "127.0.0.1", true).unwrap());
         assert!(!offer_dns_step("myapp.test", "the server `srv`", true).unwrap());
     }

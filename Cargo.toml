@@ -1,17 +1,17 @@
 [package]
-name         = "wsx"
+name         = "draupner"
 version      = "0.12.0"
 edition      = "2021"
 rust-version = "1.75"
 license      = "MIT"
 description  = "Multi-repo git-worktree orchestration — task-scoped, de-conflicted stacks per branch."
-repository   = "https://github.com/maja-sh/wsx"
+repository   = "https://github.com/maja-sh/draupner"
 readme       = "README.md"
 keywords     = ["git-worktree", "workspace", "orchestration", "containers", "multi-repo"]
 categories   = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "wsx"
+name = "drup"
 path = "src/main.rs"
 
 [dependencies]

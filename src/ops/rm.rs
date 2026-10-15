@@ -19,7 +19,7 @@ pub fn run(branch: &str, force: bool, keep_images: bool, keep_volumes: bool) -> 
         .map(|w| (w.repo.clone(), w.path.clone()))
         .collect();
 
-    // Reported, not acted on — same contract `wsx clean` states.
+    // Reported, not acted on — same contract `drup clean` states.
     let task_dir = workspace::task_dir(&ws.root, branch);
     let leftovers: Vec<String> = workspace::orphan_dirs(&ws.root, &known)
         .into_iter()
@@ -31,7 +31,7 @@ pub fn run(branch: &str, force: bool, keep_images: bool, keep_volumes: bool) -> 
         let mut msg = format!("no worktrees for {branch}; nothing to remove");
         if !leftovers.is_empty() {
             msg.push_str(&format!(
-                " ({} director{} under {} {} not registered with git — `wsx clean` lists them)",
+                " ({} director{} under {} {} not registered with git — `drup clean` lists them)",
                 leftovers.len(),
                 if leftovers.len() == 1 { "y" } else { "ies" },
                 task_dir.display(),
@@ -41,7 +41,7 @@ pub fn run(branch: &str, force: bool, keep_images: bool, keep_volumes: bool) -> 
         return Err(super::preflight(msg));
     }
 
-    crate::ui::header("wsx-rm", branch);
+    crate::ui::header("drup-rm", branch);
 
     if !leftovers.is_empty() {
         crate::ui::note(&format!(
@@ -71,7 +71,7 @@ pub fn run(branch: &str, force: bool, keep_images: bool, keep_volumes: bool) -> 
     }
     if blocking && !force {
         return Err(super::op_failure(format!(
-            "worktree(s) not clean; re-run `wsx rm {branch} --force` to remove anyway"
+            "worktree(s) not clean; re-run `drup rm {branch} --force` to remove anyway"
         )));
     }
 
@@ -85,7 +85,7 @@ pub fn run(branch: &str, force: bool, keep_images: bool, keep_volumes: bool) -> 
     }
 
     crate::ui::summary_ok(&[format!("Removed worktrees for {branch}")]);
-    crate::ui::nudge(&format!("wsx new <repos> {branch} to recreate"));
+    crate::ui::nudge(&format!("drup new <repos> {branch} to recreate"));
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in wsx
+about: Report a bug in drup
 title: ""
 labels: bug
 ---
@@ -19,7 +19,7 @@ labels: bug
 
 **Environment**
 
-- `ws --version`:
+- `drup --version`:
 - OS / version:
 - `git --version`:
 - Container runtime (docker/podman, if relevant):

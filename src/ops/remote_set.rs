@@ -1,4 +1,4 @@
-//! Flip a workspace between local and remote after `wsx init`; worktree syncs
+//! Flip a workspace between local and remote after `drup init`; worktree syncs
 //! must be backfilled or torn down to match, and running stacks and stale DNS
 //! are guarded because both are derived rather than declared.
 
@@ -26,14 +26,14 @@ pub fn set(
         .or_else(super::default_remote_host)
         .ok_or_else(|| {
             super::preflight(
-                "`wsx remote set` needs a host: pass one, set $WSX_REMOTE_HOST, \
-                 or `wsx config set remote.host <host>`",
+                "`drup remote set` needs a host: pass one, set $DRUP_REMOTE_HOST, \
+                 or `drup config set remote.host <host>`",
             )
         })?;
     // Fresh user input headed for ssh argv — refuse an option-shaped host before storing it.
     remote::ensure_connection_safe(&connection).map_err(|e| super::preflight(e.to_string()))?;
 
-    crate::ui::header("ws-remote-set", &connection);
+    crate::ui::header("drup-remote-set", &connection);
 
     let stranded = refuse_if_running(&cfg, &ws.root, force)?;
 
@@ -57,7 +57,7 @@ pub fn set(
     super::verify_remote_client(&new_remote, no_verify)?;
 
     // Sync backfill runs *before* the cfg write: an interrupt mid-loop then
-    // leaves `.wsx.json` still pointing at the old host, so the user can re-run
+    // leaves `.drup.json` still pointing at the old host, so the user can re-run
     // from a consistent state instead of a workspace whose config points at a
     // new host that has none of its files. Every helper below reads the flip
     // target from local args (`connection`, `base`, `new_remote`) rather than
@@ -102,7 +102,7 @@ pub fn set(
             }
         }
     }
-    // Best-effort initial push so files exist before the first `wsx up`/`exec`.
+    // Best-effort initial push so files exist before the first `drup up`/`exec`.
     for session in &created {
         let _ = mutagen::flush(session);
     }
@@ -113,8 +113,8 @@ pub fn set(
     if domain.is_some() {
         cfg.domain = domain;
     }
-    let step = crate::ui::step("cfg", ".wsx.json");
-    config::write_json_pretty(&ws.root.join(".wsx.json"), &cfg)?;
+    let step = crate::ui::step("cfg", ".drup.json");
+    config::write_json_pretty(&ws.root.join(".drup.json"), &cfg)?;
     step.ok();
 
     let mut summary = vec![format!("remote  → {connection}:{base}")];
@@ -124,15 +124,15 @@ pub fn set(
     crate::ui::summary_ok(&summary);
     if stranded {
         crate::ui::note(
-            "stacks that were running keep running and `wsx down` now targets the server — \
-             `wsx remote unset`, `wsx down`, then `wsx remote set` again to stop them",
+            "stacks that were running keep running and `drup down` now targets the server — \
+             `drup remote unset`, `drup down`, then `drup remote set` again to stop them",
         );
     }
     settle_dns_flip(cfg.domain.as_deref(), &old_answer, &new_answer, true);
-    crate::ui::nudge("run `wsx remote check` once the server's set up for full validation");
+    crate::ui::nudge("run `drup remote check` once the server's set up for full validation");
 
     if failed {
-        return Err(super::op_failure("one or more sync sessions failed — fix and rerun `wsx remote set`"));
+        return Err(super::op_failure("one or more sync sessions failed — fix and rerun `drup remote set`"));
     }
     Ok(())
 }
@@ -147,7 +147,7 @@ pub fn unset(force: bool) -> Result<()> {
     }
 
     crate::ui::header(
-        "ws-remote-unset",
+        "drup-remote-unset",
         cfg.remote.as_ref().map(|r| r.connection.as_str()).unwrap_or_default(),
     );
 
@@ -173,15 +173,15 @@ pub fn unset(force: bool) -> Result<()> {
         }
     }
 
-    let step = crate::ui::step("cfg", ".wsx.json");
-    config::write_json_pretty(&ws.root.join(".wsx.json"), &cfg)?;
+    let step = crate::ui::step("cfg", ".drup.json");
+    config::write_json_pretty(&ws.root.join(".drup.json"), &cfg)?;
     step.ok();
 
     crate::ui::summary_ok(&["workspace is local again".to_string()]);
     if stranded {
         crate::ui::note(&format!(
-            "stacks and routes still on {} are left as-is — `wsx remote set {}`, `wsx down`, \
-             then `wsx remote unset` again to stop them",
+            "stacks and routes still on {} are left as-is — `drup remote set {}`, `drup down`, \
+             then `drup remote unset` again to stop them",
             old.connection, old.connection
         ));
     }
@@ -218,7 +218,7 @@ fn settle_dns_flip(domain: Option<&str>, old: &str, new: &str, offloading: bool)
     }
     crate::ui::note(&format!(
         "DNS is now stale: `*.{domain}` should resolve to {new}, not {old} — \
-         re-run `wsx setup` to re-point it (`wsx` never edits your resolver itself)"
+         re-run `drup setup` to re-point it (`drup` never edits your resolver itself)"
     ));
 }
 
@@ -233,7 +233,7 @@ enum Live {
 /// Probes where the workspace points now — the side that would be stranded. Returns whether
 /// --force overrode a positive or inconclusive finding.
 fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result<bool> {
-    // Filter to repos ws has a stack model for: anything else would only manufacture "unknown".
+    // Filter to repos drup has a stack model for: anything else would only manufacture "unknown".
     let targets: Vec<workspace::Worktree> = workspace::worktrees(root, cfg)
         .into_iter()
         .filter(|wt| wt.task.is_some())
@@ -282,7 +282,7 @@ fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result
             .join(", ");
         let cmds = branches
             .iter()
-            .map(|(b, _)| format!("`wsx down {b}`"))
+            .map(|(b, _)| format!("`drup down {b}`"))
             .collect::<Vec<_>>()
             .join(", ");
         return refuse(
@@ -333,8 +333,8 @@ fn refuse(force: bool, finding: String, remedy: String) -> Result<bool> {
         return Ok(true);
     }
     Err(super::preflight(format!(
-        "refusing to flip — {finding}. {remedy} Flipping now leaves the stack where `wsx` \
-         will no longer look for it (`wsx down` follows the config, not the containers); \
+        "refusing to flip — {finding}. {remedy} Flipping now leaves the stack where `drup` \
+         will no longer look for it (`drup down` follows the config, not the containers); \
          pass --force to flip anyway."
     )))
 }
@@ -383,7 +383,7 @@ fn compose_liveness(
         _ => wt.path.to_string_lossy().into_owned(),
     };
     // `ps` needs no COMPOSE_FILE since the generated override only carries ports/env.
-    // Every interpolated value is shell-quoted: `runtime` comes from a possibly cloned `.wsx.json`.
+    // Every interpolated value is shell-quoted: `runtime` comes from a possibly cloned `.drup.json`.
     let script = format!(
         "command -v {rt} >/dev/null 2>&1 || exit 3\n\
          cd {dir} 2>/dev/null || exit 4\n\

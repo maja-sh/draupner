@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-/// `wsx setup` — ready the *client* for per-worktree routing. Runs even for
+/// `drup setup` — ready the *client* for per-worktree routing. Runs even for
 /// remote-offload workspaces: the browser still needs `*.<domain>` resolving to
 /// the server and the server's Caddy root CA trusted locally.
 pub fn run(yes: bool, port: Option<u16>, admin_port: Option<u16>) -> Result<()> {
@@ -44,7 +44,7 @@ fn routing_address(cfg: &crate::config::WsConfig) -> Result<String> {
     crate::remote::routing_address(&remote.connection).ok_or_else(|| {
         crate::ops::op_failure(format!(
             "couldn't work out an address for the server `{}` — `ssh -G` didn't report a \
-             resolvable hostname. Set `remote.publish_address` in .wsx.json to the address \
+             resolvable hostname. Set `remote.publish_address` in .drup.json to the address \
              this machine reaches the server at.",
             remote.connection
         ))
@@ -63,7 +63,7 @@ mod tests {
 
     // `.invalid` (RFC 2606) never resolves, so SSH derivation fails deterministically.
     fn remote_cfg(publish: Option<&str>) -> WsConfig {
-        let mut r = RemoteConfig::new("ws-no-such-server.invalid".to_string(), None);
+        let mut r = RemoteConfig::new("drup-no-such-server.invalid".to_string(), None);
         r.publish_address = publish.map(str::to_string);
         WsConfig { remote: Some(r), ..WsConfig::default() }
     }

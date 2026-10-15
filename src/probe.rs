@@ -33,7 +33,7 @@ pub fn ssh_status(connection: &str, ok: bool) -> Probe {
     )
 }
 
-/// Standalone SSH-reachability check for callers that do no server probing (e.g. `wsx init --remote`).
+/// Standalone SSH-reachability check for callers that do no server probing (e.g. `drup init --remote`).
 pub fn ssh_reachable(connection: &str) -> Probe {
     ssh_status(connection, remote::reachable(connection))
 }
@@ -51,7 +51,7 @@ pub fn mutagen_local() -> Probe {
 /// Kept beside the script so the reported keys and the checks can't drift.
 const SERVER_CHECKS: &[(&str, &str)] = &[
     ("mutagen", "mutagen present on the server"),
-    ("caddy", "the ws-caddy container is running"),
+    ("caddy", "the drup-caddy container is running"),
     ("workspace", "the workspace dir exists and is writable"),
 ];
 
@@ -62,7 +62,7 @@ const RUNTIME_CHECK: &str = "runtime";
 const DNS_CHECK: &str = "dns";
 
 /// Fixed synthetic label matching `server-setup/debian.sh` so both agree on what "wired" means.
-const DNS_PROBE_LABEL: &str = "ws-probe";
+const DNS_PROBE_LABEL: &str = "drup-probe";
 
 /// Failure text names what didn't resolve, why it matters, and where the fix lives — the whole value of this probe.
 fn dns_detail(domain: &str, ok: bool) -> String {
@@ -80,13 +80,13 @@ fn dns_detail(domain: &str, ok: bool) -> String {
 /// One round-trip, read-only script printing `<key>:<ok|fail>` lines; `runtime` is the configured runtime so we don't probe a binary the server was never meant to have.
 pub fn server_script(workspace_path: &str, runtime: &str, domain: Option<&str>) -> String {
     let wp = remote::shell_quote(workspace_path);
-    // `runtime` comes from a possibly-cloned `.wsx.json` and runs in the server's shell.
+    // `runtime` comes from a possibly-cloned `.drup.json` and runs in the server's shell.
     let rt = remote::shell_quote(runtime);
     let mut lines = vec![
         "command -v mutagen >/dev/null 2>&1 && echo mutagen:ok || echo mutagen:fail".to_string(),
         format!("{rt} info >/dev/null 2>&1 && echo {RUNTIME_CHECK}:ok || echo {RUNTIME_CHECK}:fail"),
-        // Anchor `-f name=` (`^…$`) or a stray `ws-caddy-old` would make a stopped ws-caddy read as up.
-        format!("{rt} ps -q -f name='^ws-caddy$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail"),
+        // Anchor `-f name=` (`^…$`) or a stray `drup-caddy-old` would make a stopped drup-caddy read as up.
+        format!("{rt} ps -q -f name='^drup-caddy$' -f status=running | grep -q . && echo caddy:ok || echo caddy:fail"),
         format!("test -d {wp} && test -w {wp} && echo workspace:ok || echo workspace:fail"),
     ];
     if let Some(d) = domain {
@@ -181,7 +181,7 @@ mod tests {
         assert!(!without.contains("dns:"), "no domain must mean no DNS check at all: {without}");
 
         let with = server_script("workspace", "podman", Some("myapp.test"));
-        assert!(with.contains("getent hosts ws-probe.myapp.test"), "expected the wildcard lookup: {with}");
+        assert!(with.contains("getent hosts drup-probe.myapp.test"), "expected the wildcard lookup: {with}");
         assert!(with.contains("echo dns:ok"), "expected the dns key: {with}");
         assert!(with.contains("echo dns:fail"), "expected the dns failure branch: {with}");
         assert_read_only(&with);
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn server_script_quotes_the_domain() {
         let s = server_script("workspace", "podman", Some("evil; reboot"));
-        assert!(s.contains("'ws-probe.evil; reboot'"), "the probe host must be shell-quoted: {s}");
+        assert!(s.contains("'drup-probe.evil; reboot'"), "the probe host must be shell-quoted: {s}");
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         assert!(ok.contains("*.myapp.test"), "pass line should name the domain: {ok}");
 
         let bad = dns_detail("myapp.test", false);
-        assert!(bad.contains("ws-probe.myapp.test"), "failure must name what didn't resolve: {bad}");
+        assert!(bad.contains("drup-probe.myapp.test"), "failure must name what didn't resolve: {bad}");
         assert!(bad.contains("server-setup/debian.sh"), "failure must point at the fix: {bad}");
         assert!(bad.contains("resolv.conf"), "failure should name the usual cause: {bad}");
     }

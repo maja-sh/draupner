@@ -52,7 +52,7 @@ pub(crate) fn interactive_required(msg: impl Into<String>) -> anyhow::Error {
 
 /// Machine-wide default remote host completing the precedence flag > env > global config; a malformed global config is noted, not fatal, so the caller's "needs a host" error isn't masked.
 pub(crate) fn default_remote_host() -> Option<String> {
-    if let Some(h) = std::env::var("WSX_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
+    if let Some(h) = std::env::var("DRUP_REMOTE_HOST").ok().filter(|s| !s.is_empty()) {
         return Some(h);
     }
     match crate::config::GlobalConfig::load() {
@@ -65,7 +65,7 @@ pub(crate) fn default_remote_host() -> Option<String> {
     }
 }
 
-/// Client-side readiness (mutagen local, SSH reachable) run at remote-config time so failure surfaces before the first `wsx new`; `no_verify` escapes it for bootstrap. Server half is `wsx remote check`.
+/// Client-side readiness (mutagen local, SSH reachable) run at remote-config time so failure surfaces before the first `drup new`; `no_verify` escapes it for bootstrap. Server half is `drup remote check`.
 pub(crate) fn verify_remote_client(
     r: &crate::config::RemoteConfig,
     no_verify: bool,
@@ -87,7 +87,7 @@ pub(crate) fn verify_remote_client(
 }
 
 fn verify_probes(r: &crate::config::RemoteConfig) -> anyhow::Result<()> {
-    // Reuse the probes `wsx remote check` runs so there's one source of truth for reachability.
+    // Reuse the probes `drup remote check` runs so there's one source of truth for reachability.
     if !crate::probe::mutagen_local().ok {
         return Err(preflight(
             "mutagen isn't installed — a remote workspace needs it locally to sync. \
@@ -119,10 +119,10 @@ pub(crate) fn run_remote_event(
 ) -> anyhow::Result<()> {
     // Best-effort: session may not exist yet or mutagen may be absent, and a failed flush shouldn't block dispatch.
     let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));
-    // Absolute base — a relative one leaves `WSX_WORKSPACE_ROOT` relative, so hooks resolving `$WSX_WORKSPACE_ROOT/…` land in the wrong place.
+    // Absolute base — a relative one leaves `DRUP_WORKSPACE_ROOT` relative, so hooks resolving `$DRUP_WORKSPACE_ROOT/…` land in the wrong place.
     let base = site.abs_base(&r.worktree_base(root));
-    // Ship workspace-root `.wsx-hooks/` because those scripts live outside the repos and never ride the worktree sync; fatal here so the failure isn't muddied later.
-    if let Err(e) = crate::remote::push_ws_hooks(site, root, &base) {
+    // Ship workspace-root `.drup-hooks/` because those scripts live outside the repos and never ride the worktree sync; fatal here so the failure isn't muddied later.
+    if let Err(e) = crate::remote::push_drup_hooks(site, root, &base) {
         return Err(op_failure(format!("{event} on {}: {e}", r.connection)));
     }
     match crate::remote::run_event(&r.connection, &base, sanitized, repo, event, cmd, extra_env) {
@@ -132,7 +132,7 @@ pub(crate) fn run_remote_event(
     }
 }
 
-/// Exit with `code` and no failure banner, for cases where `wsx` merely relays an outcome already reported.
+/// Exit with `code` and no failure banner, for cases where `drup` merely relays an outcome already reported.
 pub(crate) fn passthrough_exit(code: i32) -> anyhow::Error {
     ExitError { code, msg: String::new(), silent: true }.into()
 }
@@ -145,7 +145,7 @@ pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Best-effort `wsx-net` creation when routing is on — a failure notes rather
+/// Best-effort `drup-net` creation when routing is on — a failure notes rather
 /// than fails so a broken infra doesn't block worktree creation for a
 /// stack that doesn't need routing.
 pub(crate) fn ensure_ws_net_if_active(
@@ -154,7 +154,7 @@ pub(crate) fn ensure_ws_net_if_active(
 ) {
     if cfg.routing_active() {
         if let Err(e) = crate::caddy::ensure_net(site, cfg.runtime()) {
-            crate::ui::note(&format!("wsx-net: {e}"));
+            crate::ui::note(&format!("drup-net: {e}"));
         }
     }
 }

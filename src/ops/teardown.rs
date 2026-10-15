@@ -1,4 +1,4 @@
-//! Shared teardown for `wsx rm` and `wsx clean` — the gating differs, but from
+//! Shared teardown for `drup rm` and `drup clean` — the gating differs, but from
 //! hooks through branch-delete the sequence is identical.
 
 use anyhow::Result;
@@ -29,14 +29,14 @@ pub fn remove_task(
     let mut hook_failed = false;
 
     // `None` ⇒ remote server unreachable; still drop the local worktrees so
-    // `wsx rm` isn't blocked when the server is down.
+    // `drup rm` isn't blocked when the server is down.
     let site = Site::resolve(cfg).ok();
 
     for (repo, wt) in worktrees {
         super::bail_if_interrupted()?;
 
-        // Host processes are ws-owned units — stop them at their site instead of
-        // running hooks (same exclusive split as `wsx down`).
+        // Host processes are drup-owned units — stop them at their site instead of
+        // running hooks (same exclusive split as `drup down`).
         if cfg.is_host_repo(repo) {
             teardown_host(site.as_ref(), branch, repo, &mut hook_failed);
         } else if cfg.remote.is_some() {
@@ -83,7 +83,7 @@ pub fn remove_task(
         }
 
         // Free ports before worktree removal so a `git worktree remove` failure
-        // can't leak the `.wsx-meta` reservation.
+        // can't leak the `.drup-meta` reservation.
         ports::forget(root, &sanitized, repo);
 
         // Terminate the sync before deleting the worktree so mutagen isn't
@@ -117,7 +117,7 @@ pub fn remove_task(
         delete_branch(&main, branch);
     }
 
-    // Cross-repo `${WSX_PORT_<peer>.<svc>}` pre-allocates the peer's port, so a
+    // Cross-repo `${DRUP_PORT_<peer>.<svc>}` pre-allocates the peer's port, so a
     // peer that never got a worktree still holds a reservation to free here.
     let torn_down: std::collections::HashSet<&str> =
         worktrees.iter().map(|(r, _)| r.as_str()).collect();
@@ -130,7 +130,7 @@ pub fn remove_task(
     Ok(hook_failed)
 }
 
-/// Stop a `kind: host` repo's supervised process at its site (best-effort); a `None` site is a remote server that's unreachable, so `wsx rm` still drops the local worktree.
+/// Stop a `kind: host` repo's supervised process at its site (best-effort); a `None` site is a remote server that's unreachable, so `drup rm` still drops the local worktree.
 fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mut bool) {
     match site {
         Some(s) => {
@@ -226,7 +226,7 @@ fn teardown_remote(
     }
 }
 
-/// Scope `WSX_KEEP_IMAGES` / `WSX_KEEP_VOLUMES` to `post-remove` so a user's declared `down` script can't accidentally read them as signals meant for teardown's later prune phase.
+/// Scope `DRUP_KEEP_IMAGES` / `DRUP_KEEP_VOLUMES` to `post-remove` so a user's declared `down` script can't accidentally read them as signals meant for teardown's later prune phase.
 fn post_remove_env(
     base: &[(String, String)],
     event: &str,
@@ -238,10 +238,10 @@ fn post_remove_env(
     }
     let mut env = base.to_vec();
     if keep_images {
-        env.push(("WSX_KEEP_IMAGES".to_string(), "1".to_string()));
+        env.push(("DRUP_KEEP_IMAGES".to_string(), "1".to_string()));
     }
     if keep_volumes {
-        env.push(("WSX_KEEP_VOLUMES".to_string(), "1".to_string()));
+        env.push(("DRUP_KEEP_VOLUMES".to_string(), "1".to_string()));
     }
     env
 }
@@ -274,7 +274,7 @@ impl std::fmt::Display for SweepReport {
     }
 }
 
-/// `keep_volumes` gates volumes only — a leaked container pins its image and a leaked network collides with the next `wsx new` on this branch, so those go regardless.
+/// `keep_volumes` gates volumes only — a leaked container pins its image and a leaked network collides with the next `drup new` on this branch, so those go regardless.
 fn sweep_compose(
     site: &Site,
     runtime: &str,

@@ -6,17 +6,17 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Walk upward from CWD for the nearest `.wsx.json`.
+/// Walk upward from CWD for the nearest `.drup.json`.
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
     loop {
-        if cur.join(".wsx.json").is_file() {
+        if cur.join(".drup.json").is_file() {
             return Ok(Workspace { root: cur.to_path_buf() });
         }
         match cur.parent() {
             Some(p) => cur = p,
-            None => bail!("no `.wsx.json` found from {} upward", start.display()),
+            None => bail!("no `.drup.json` found from {} upward", start.display()),
         }
     }
 }
@@ -63,7 +63,7 @@ pub fn task_worktrees(
 }
 
 /// Which of `requested` already have a subdir under this task's dir — the
-/// conflict-check predicate `wsx new` and `wsx add` both need. Returns
+/// conflict-check predicate `drup new` and `drup add` both need. Returns
 /// references into `requested` so callers format their own error message.
 pub fn existing_repos_in_task<'a>(task_dir: &Path, requested: &'a [String]) -> Vec<&'a str> {
     requested
@@ -95,7 +95,7 @@ pub struct Worktree {
     pub path: PathBuf,
     /// The checked-out branch; `None` for a detached HEAD.
     pub branch: Option<String>,
-    /// The `.worktrees/<task>` dir when ws-managed; `None` for hand-made worktrees elsewhere.
+    /// The `.worktrees/<task>` dir when drup-managed; `None` for hand-made worktrees elsewhere.
     pub task: Option<String>,
 }
 
@@ -128,7 +128,7 @@ pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
     out
 }
 
-/// Directories under `.worktrees/` git doesn't know — reported by `wsx clean`, never acted
+/// Directories under `.worktrees/` git doesn't know — reported by `drup clean`, never acted
 /// on, because silently syncing a leftover to a server as if it were real is the failure mode.
 pub fn orphan_dirs(root: &Path, known: &[Worktree]) -> Vec<PathBuf> {
     let known: Vec<PathBuf> = known

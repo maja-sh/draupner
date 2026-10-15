@@ -91,7 +91,7 @@ contributed to a commit, the trailer is for humans only.
 
 ### Examples
 
-    compat: Shrink WSX_COMPAT_MATRIX parser and add malformed-range tests
+    compat: Shrink DRUP_COMPAT_MATRIX parser and add malformed-range tests
 
     ---
 
@@ -110,19 +110,19 @@ contributed to a commit, the trailer is for humans only.
     ---
 
     # Objective
-    `wsx new` was failing on shared-repo workspaces because the hook lookup
+    `drup new` was failing on shared-repo workspaces because the hook lookup
     resolved paths relative to the workspace root instead of the config file's
     directory.
 
     ## Solution
     - Thread the config dir through `hooks::lookup`.
-    - Extend the fixture builder to cover the `.ws/` layout.
+    - Extend the fixture builder to cover the `.drup/` layout.
 
     ## Testing
     - Added `hooks_lookup_uses_config_dir_in_shared_layout`.
     - `cargo nextest run` — all pass.
 
     Release Notes:
-    - Fix `.wsx-hooks/<repo>/<event>` discovery inside shared-repo workspaces.
+    - Fix `.drup-hooks/<repo>/<event>` discovery inside shared-repo workspaces.
 
     Closes #17
