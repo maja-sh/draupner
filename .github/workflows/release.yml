@@ -2,9 +2,12 @@ name: release
 
 # Cut a release by pushing a version tag:
 #   git tag v0.1.0 && git push origin v0.1.0
-# Builds natively on macOS (no cross-compilation) and attaches the binary to a
-# GitHub Release. Install with:
+# Builds natively on macOS (no cross-compilation), attaches the binary to a
+# GitHub Release, and publishes the crate to crates.io. Install with:
 #   gh release download vX.Y.Z --repo maja-sh/draupner -p '*aarch64-apple-darwin*' -O drup
+# or
+#   cargo install draupner
+# Publishing needs CARGO_REGISTRY_TOKEN in the repo's Actions secrets.
 on:
   push:
     tags: ['v*']
@@ -98,3 +101,18 @@ jobs:
               --generate-notes \
               dist/*
           fi
+
+  # Publish to crates.io only after the GitHub Release is up. crates.io
+  # rejects a re-publish of an existing version, so a tag that races the
+  # manual `cargo publish` from a prior release will just no-op noisily.
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p draupner
