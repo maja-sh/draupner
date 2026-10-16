@@ -12,27 +12,12 @@ const SKILLS: &[(&str, &str)] = &[
     ("drup-clean",    include_str!("../skills/drup-clean/SKILL.md")),
     ("drup-exec",     include_str!("../skills/drup-exec/SKILL.md")),
     ("drup-context",  include_str!("../skills/drup-context/SKILL.md")),
-];
-
-/// Skills that used to ship and were removed. `write_all` sweeps them from the target so a re-run of `drup claude` cleans up any prior install. Keep entries here for at least one release cycle after retirement so users who upgrade catch the removal; then drop them.
-const DEPRECATED_SKILLS: &[&str] = &[
-    // Retired commands (never shipped under the current name).
-    "ws-init", "ws-show", "ws-resume",
-    "wsx-init", "wsx-show", "wsx-resume",
-    // Pre-rename skill names, swept when a user re-runs `drup claude` after upgrading.
-    "ws-new", "ws-add", "ws-up", "ws-down", "ws-rm",
-    "ws-list", "ws-clean", "ws-exec", "ws-context",
-    "wsx-new", "wsx-add", "wsx-up", "wsx-down", "wsx-rm",
-    "wsx-list", "wsx-clean", "wsx-exec", "wsx-context",
+    ("drup-resume",   include_str!("../skills/drup-resume/SKILL.md")),
 ];
 
 pub fn write_all(target_root: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(target_root)
         .with_context(|| format!("create {}", target_root.display()))?;
-    // Best-effort — a missing dir is the common case; only a real fs error would matter and it'd resurface on the write below.
-    for name in DEPRECATED_SKILLS {
-        let _ = fs::remove_dir_all(target_root.join(name));
-    }
     let mut written = Vec::with_capacity(SKILLS.len());
     for (name, body) in SKILLS {
         let dir = target_root.join(name);
@@ -94,21 +79,4 @@ mod tests {
         assert!(tmp.path().join("drup-new").join("SKILL.md").is_file());
     }
 
-    #[test]
-    fn write_all_sweeps_deprecated_skills_from_prior_installs() {
-        let tmp = tempfile::tempdir().unwrap();
-        // A prior `drup claude` install had a skill that has since been retired — the file below stands in for whatever `~/.claude/skills/<retired>/SKILL.md` a user carried over from an older drup.
-        for name in DEPRECATED_SKILLS {
-            let dir = tmp.path().join(name);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("SKILL.md"), "stale").unwrap();
-        }
-        write_all(tmp.path()).unwrap();
-        for name in DEPRECATED_SKILLS {
-            assert!(
-                !tmp.path().join(name).exists(),
-                "deprecated skill `{name}` must be swept when `drup claude` runs against an older install"
-            );
-        }
-    }
 }
