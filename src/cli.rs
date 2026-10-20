@@ -1,10 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "drup", version, about = "Multi-repo worktree orchestration")]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+pub(crate) fn command() -> clap::Command {
+    Cli::command()
 }
 
 #[derive(Subcommand)]
@@ -136,6 +140,17 @@ enum Cmd {
         #[arg(last = true, required = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Print a shell-completion script (`eval "$(drup completion zsh)"` or source it from .zshrc)
+    Completion {
+        /// Shell to generate for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Internal: enumerate values for shell completion (kind = branch | repo)
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        kind: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,5 +229,7 @@ pub fn run() -> anyhow::Result<()> {
         },
         Cmd::Exec{repo,branch,local,no_flush,command} =>
             crate::ops::exec::run(repo.as_deref(), branch.as_deref(), local, no_flush, &command),
+        Cmd::Completion{shell}       => crate::ops::completion::run(shell),
+        Cmd::Complete{kind}          => crate::ops::complete::run(&kind),
     }
 }

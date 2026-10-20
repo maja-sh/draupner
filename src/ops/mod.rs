@@ -17,6 +17,8 @@ pub mod clean;
 pub mod exec;
 pub mod setup;
 pub mod remote_check;
+pub mod completion;
+pub mod complete;
 
 #[derive(Debug)]
 pub struct ExitError {
