@@ -41,14 +41,8 @@ _drup_repos() {
 }
 "#;
     let mut out = match script.find("\n_drup()") {
-        Some(i) => {
-            let mut s = String::with_capacity(script.len() + helpers.len());
-            s.push_str(&script[..i]);
-            s.push_str(helpers);
-            s.push_str(&script[i..]);
-            s
-        }
-        None => format!("{script}{helpers}"),
+        Some(i) => format!("{}{helpers}{}", &script[..i], &script[i..]),
+        None    => format!("{script}{helpers}"),
     };
 
     // Option values render `:METAVAR:_default` — safe to swap globally since
@@ -64,13 +58,13 @@ _drup_repos() {
     out = swap_positional_default_with_help(&out, "repo", "_drup_repos");
 
     // Positionals without a help string render `':branch:_default'` and are
-    // ambiguous across subcommands — swap them per-arm.
-    for name in ["up", "down", "rm", "path", "show", "add"] {
+    // ambiguous across subcommands — swap them per-arm. `path`/`show` are
+    // omitted because their branch args carry help, so pass 2 above has
+    // already caught them.
+    for name in ["up", "down", "rm", "add"] {
         out = patch_arm(&out, name, ":branch:_default", ":branch:_drup_branches");
     }
-    for name in ["path", "exec"] {
-        out = patch_arm(&out, name, ":repo:_default", ":repo:_drup_repos");
-    }
+    out = patch_arm(&out, "exec", ":repo:_default", ":repo:_drup_repos");
 
     out
 }
@@ -114,20 +108,11 @@ fn patch_arm(script: &str, name: &str, old: &str, new: &str) -> String {
 /// Fish: append `complete -c drup` lines that call `drup __complete` for
 /// branch/repo-shaped slots across every subcommand that takes one.
 fn inject_fish(script: &str) -> String {
-    let branch_subs = "up down rm path show add";
-    let repo_subs = "exec";
-    let mut extra = String::from("\n");
-    extra.push_str(&format!(
-        "complete -c drup -n \"__fish_seen_subcommand_from {branch_subs}\" -f -a \"(drup __complete branch)\"\n"
-    ));
-    extra.push_str(
-        "complete -c drup -n \"__fish_seen_subcommand_from exec\" -s b -l branch -r -f -a \"(drup __complete branch)\"\n"
-    );
-    extra.push_str(&format!(
-        "complete -c drup -n \"__fish_seen_subcommand_from {repo_subs}\" -f -a \"(drup __complete repo)\"\n"
-    ));
-    extra.push_str(
-        "complete -c drup -n \"__fish_seen_subcommand_from path\" -s r -l repo -r -f -a \"(drup __complete repo)\"\n"
-    );
+    let extra = r#"
+complete -c drup -n "__fish_seen_subcommand_from up down rm path show add" -f -a "(drup __complete branch)"
+complete -c drup -n "__fish_seen_subcommand_from exec" -s b -l branch -r -f -a "(drup __complete branch)"
+complete -c drup -n "__fish_seen_subcommand_from exec" -f -a "(drup __complete repo)"
+complete -c drup -n "__fish_seen_subcommand_from path" -s r -l repo -r -f -a "(drup __complete repo)"
+"#;
     format!("{script}{extra}")
 }

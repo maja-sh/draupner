@@ -8,32 +8,26 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 
 pub fn run(kind: &str) -> Result<()> {
+    let Ok(ws) = crate::workspace::locate() else { return Ok(()) };
+    let Ok(cfg) = crate::config::load(&ws.root) else { return Ok(()) };
     match kind {
-        "branch" => emit_branches(),
-        "repo" => emit_repos(),
+        "branch" => {
+            let mut names: BTreeSet<String> = BTreeSet::new();
+            for wt in crate::workspace::worktrees(&ws.root, &cfg) {
+                if let Some(b) = wt.branch {
+                    names.insert(b);
+                }
+            }
+            for name in names {
+                println!("{name}");
+            }
+        }
+        "repo" => {
+            for entry in &cfg.repos {
+                println!("{}", entry.name());
+            }
+        }
         _ => {}
     }
     Ok(())
-}
-
-fn emit_branches() {
-    let Ok(ws) = crate::workspace::locate() else { return };
-    let Ok(cfg) = crate::config::load(&ws.root) else { return };
-    let mut names: BTreeSet<String> = BTreeSet::new();
-    for wt in crate::workspace::worktrees(&ws.root, &cfg) {
-        if let Some(b) = wt.branch {
-            names.insert(b);
-        }
-    }
-    for name in names {
-        println!("{name}");
-    }
-}
-
-fn emit_repos() {
-    let Ok(ws) = crate::workspace::locate() else { return };
-    let Ok(cfg) = crate::config::load(&ws.root) else { return };
-    for entry in &cfg.repos {
-        println!("{}", entry.name());
-    }
 }
