@@ -146,11 +146,6 @@ enum Cmd {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Internal: enumerate values for shell completion (kind = branch | repo)
-    #[command(name = "__complete", hide = true)]
-    Complete {
-        kind: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +225,5 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Exec{repo,branch,local,no_flush,command} =>
             crate::ops::exec::run(repo.as_deref(), branch.as_deref(), local, no_flush, &command),
         Cmd::Completion{shell}       => crate::ops::completion::run(shell),
-        Cmd::Complete{kind}          => crate::ops::complete::run(&kind),
     }
 }

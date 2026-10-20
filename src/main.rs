@@ -28,6 +28,17 @@ mod workspace;
 fn main() {
     compat::check();
     signal::install();
+    // `__complete <kind>` is the shell-completion callback. Dispatched before
+    // clap parses so the subcommand never enters the clap command tree and
+    // clap_complete can't leak it into the generated scripts (4.6.11 emits
+    // every subcommand regardless of `hide = true`).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("__complete") {
+        if let Some(kind) = args.get(2) {
+            let _ = ops::complete::run(kind);
+        }
+        return;
+    }
     if let Err(e) = cli::run() {
         let exit = e.downcast_ref::<ops::ExitError>();
         let code = exit.map_or(1, |e| e.code);

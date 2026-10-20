@@ -27,16 +27,21 @@ pub fn run(shell: Shell) -> Result<()> {
 /// sense. `new`'s positional branch is a *new* name — leaving it on
 /// `_default` keeps tab from falsely suggesting existing worktrees.
 fn inject_zsh(script: &str) -> String {
+    // `${names:#}` drops the single empty element zsh's `(f)` flag produces
+    // when the subshell's stdout is empty (e.g. tabbing outside a workspace),
+    // which otherwise shows up as a blank candidate in the menu.
     let helpers = r#"
 _drup_branches() {
     local -a names
     names=(${(f)"$(drup __complete branch 2>/dev/null)"})
+    names=(${names:#})
     _describe 'branch' names
 }
 
 _drup_repos() {
     local -a names
     names=(${(f)"$(drup __complete repo 2>/dev/null)"})
+    names=(${names:#})
     _describe 'repo' names
 }
 "#;
@@ -95,7 +100,18 @@ fn patch_arm(script: &str, name: &str, old: &str, new: &str) -> String {
     };
     let body_at = open_at + open.len();
     let rest = &script[body_at..];
-    let close_rel = rest.find("\n;;\n").map(|i| i + 1).unwrap_or(rest.len());
+    // Line-based scan rather than `rest.find("\n;;\n")` so a cosmetic reflow
+    // in clap_complete that wraps `;;` with whitespace can't slide the arm
+    // boundary past the next arm and spray the substitution.
+    let mut close_rel = rest.len();
+    let mut cursor = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim() == ";;" {
+            close_rel = cursor;
+            break;
+        }
+        cursor += line.len();
+    }
     let body = &rest[..close_rel];
     let patched = body.replace(old, new);
     let mut out = String::with_capacity(script.len());
@@ -106,10 +122,13 @@ fn patch_arm(script: &str, name: &str, old: &str, new: &str) -> String {
 }
 
 /// Fish: append `complete -c drup` lines that call `drup __complete` for
-/// branch/repo-shaped slots across every subcommand that takes one.
+/// branch/repo-shaped slots across every subcommand that takes one. `add`
+/// is a `REPOS BRANCH` pair — the branch completer is index-guarded so
+/// `drup add <TAB>` doesn't offer branches for the repos slot.
 fn inject_fish(script: &str) -> String {
     let extra = r#"
-complete -c drup -n "__fish_seen_subcommand_from up down rm path show add" -f -a "(drup __complete branch)"
+complete -c drup -n "__fish_seen_subcommand_from up down rm path show" -f -a "(drup __complete branch)"
+complete -c drup -n "__fish_seen_subcommand_from add; and test (count (commandline -opc)) -eq 3" -f -a "(drup __complete branch)"
 complete -c drup -n "__fish_seen_subcommand_from exec" -s b -l branch -r -f -a "(drup __complete branch)"
 complete -c drup -n "__fish_seen_subcommand_from exec" -f -a "(drup __complete repo)"
 complete -c drup -n "__fish_seen_subcommand_from path" -s r -l repo -r -f -a "(drup __complete repo)"

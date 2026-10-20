@@ -53,9 +53,12 @@ jobs:
 
   # Target-independent shell-completion scripts, generated once from a native
   # build and attached to the release so packagers (homebrew, deb, nix) can
-  # pick them up without running the binary.
+  # pick them up without running the binary. `continue-on-error` so a flaky
+  # completion generation doesn't block the real binary release — the scripts
+  # are a packaging convenience, not the artifact.
   completions:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
