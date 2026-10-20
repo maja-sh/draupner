@@ -51,8 +51,31 @@ jobs:
           path: drup-${{ matrix.target }}
           if-no-files-found: error
 
+  # Target-independent shell-completion scripts, generated once from a native
+  # build and attached to the release so packagers (homebrew, deb, nix) can
+  # pick them up without running the binary.
+  completions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Generate
+        run: |
+          mkdir -p completions
+          ./target/release/drup completion bash > completions/drup.bash
+          ./target/release/drup completion zsh  > completions/_drup
+          ./target/release/drup completion fish > completions/drup.fish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drup-completions
+          path: completions/*
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, completions]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the release + upload assets

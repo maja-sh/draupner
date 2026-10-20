@@ -46,6 +46,32 @@ Or build from a clone:
 cargo build --release   # → target/release/drup
 ```
 
+### Shell completion
+
+Pre-built scripts for bash, zsh, and fish ship as separate assets on each
+release (`drup.bash`, `_drup`, `drup.fish`). Drop the one for your shell where
+your shell looks for completion (e.g. `~/.local/share/zsh/site-functions/_drup`
+for zsh — make sure its parent is in `$fpath` before `compinit`).
+
+Or generate from the installed binary:
+
+```sh
+# zsh
+drup completion zsh > ~/.local/share/zsh/site-functions/_drup
+# or inline, in .zshrc:
+eval "$(drup completion zsh)"
+
+# bash — in .bashrc
+eval "$(drup completion bash)"
+
+# fish
+drup completion fish > ~/.config/fish/completions/drup.fish
+```
+
+Beyond subcommands and flags, tab completes live worktree branches on
+`up`/`down`/`rm`/`path`/`show`/`add`/`exec -b` and repo names on `path -r`
+and `exec`.
+
 ### Prerequisites
 
 On the machine you run `drup` from:
