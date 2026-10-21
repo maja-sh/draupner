@@ -69,6 +69,12 @@ enum Cmd {
         /// One line per task: aggregate glyph + `running N/M`/`stopped`/`crashed`, no per-repo detail
         #[arg(short, long)]
         short: bool,
+        /// Emit a JSON array on stdout — one object per task, same per-repo shape as `drup show --json`
+        #[arg(long)]
+        json: bool,
+        /// Print the JSON schema and exit
+        #[arg(long)]
+        describe: bool,
     },
     /// Print a worktree path (composable with `$(...)`, e.g. `$EDITOR $(drup path feat/x -r api)`)
     Path {
@@ -195,7 +201,7 @@ pub fn run() -> anyhow::Result<()> {
         Cmd::Up{branch}              => crate::ops::up::run(&branch),
         Cmd::Down{branch}            => crate::ops::down::run(&branch),
         Cmd::Rm{branch,force,keep_images,keep_volumes} => crate::ops::rm::run(&branch, force, keep_images, keep_volumes),
-        Cmd::List{short}             => crate::ops::list::run(short),
+        Cmd::List{short,json,describe} => crate::ops::list::run(short, json, describe),
         Cmd::Path{branch,repo}       => crate::ops::path::run(&branch, repo.as_deref()),
         Cmd::Show{branch,json,describe} => crate::ops::show::run(branch.as_deref(), json, describe),
         Cmd::Context{describe}       => crate::ops::context::run(describe),
