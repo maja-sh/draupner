@@ -91,7 +91,7 @@ pub(crate) struct ShowData {
     pub repos: Vec<RepoInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct RemoteInfo {
     pub connection: String,
     pub worktree_base_absolute: String,
@@ -230,7 +230,7 @@ fn liveness(
 }
 
 /// Services with their allocated port + routing status. `recorded` comes from the `.drup-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.drup.json`-declared set for a not-yet-up worktree.
-fn services_for(
+pub(crate) fn services_for(
     cfg: &WsConfig,
     sanitized: &str,
     repo: &str,
