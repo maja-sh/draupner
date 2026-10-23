@@ -1,0 +1,38 @@
+{
+  "domain": "myapp.test",
+  "repos": [
+    {
+      "name": "api",
+      "kind": "container",
+      "services": {
+        "web": { "http": true, "port": 80 },
+        "db":  { "port": 5432 }
+      }
+    },
+    {
+      "name": "web",
+      "kind": "host",
+      "services": {
+        "web": { "http": true, "port": 3000 }
+      },
+      "env": {
+        "NEXT_PUBLIC_API_URL": "https://${DRUP_HOST_api.web}"
+      },
+      "scripts": {
+        "up":     "pnpm install && pnpm dev --port $DRUP_PORT_web",
+        "status": "curl -fs http://127.0.0.1:$DRUP_PORT_web/ >/dev/null && echo running || echo stopped"
+      }
+    },
+    {
+      "name": "worker",
+      "kind": "host",
+      "env": {
+        "DATABASE_URL": "postgres://app:app@127.0.0.1:${DRUP_PORT_api.db}/app"
+      },
+      "scripts": {
+        "up":     "cargo run --release",
+        "status": "pgrep -f \"$DRUP_WORKTREE/target\" >/dev/null && echo running || echo stopped"
+      }
+    }
+  ]
+}

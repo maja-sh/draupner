@@ -1,0 +1,10 @@
+services:
+  web:
+    image: nginx:alpine
+    ports: ["80:80"]
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: app
+    ports: ["5432:5432"]
