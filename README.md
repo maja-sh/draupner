@@ -65,6 +65,13 @@ is covered by the readable script in [`server-setup/`](server-setup/). Without
 a `domain` configured, `drup` skips routing entirely and services are reached on
 allocated ports.
 
+### Examples
+
+Three worked workspace configs live in [`examples/`](examples/) — a
+single-repo minimum, a multi-repo stack with cross-repo env injection, and
+a templated-config walkthrough. Clone one and adapt it, or skim them to see
+the shapes drup supports.
+
 ---
 
 ## Quickstart
