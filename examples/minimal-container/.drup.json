@@ -1,0 +1,4 @@
+{
+  "domain": "myapp.test",
+  "repos": ["api"]
+}
