@@ -1189,4 +1189,24 @@ mod tests {
         assert!(write_atomic(&bad, b"anything").is_err());
         assert_eq!(std::fs::read(&good).unwrap(), b"kept");
     }
+
+    /// Drift alarm for the in-repo examples: a schema change that invalidates
+    /// a committed example reaches `main` only through this test. An empty
+    /// `examples/` tree is a no-op so the test can land before the first dir.
+    #[test]
+    fn in_repo_examples_round_trip_through_config_load() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        if !examples.is_dir() {
+            return;
+        }
+        for entry in std::fs::read_dir(&examples).expect("read examples/") {
+            let path = entry.expect("read examples/ entry").path();
+            if !path.is_dir() || !path.join(".drup.json").is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            load(&path)
+                .unwrap_or_else(|e| panic!("examples/{name}/.drup.json failed to load: {e:#}"));
+        }
+    }
 }
