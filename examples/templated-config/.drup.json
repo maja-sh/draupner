@@ -1,0 +1,26 @@
+{
+  "domain": "myapp.test",
+  "repos": [
+    {
+      "name": "api",
+      "kind": "container",
+      "services": {
+        "web": { "http": true, "port": 80 }
+      }
+    },
+    {
+      "name": "web",
+      "kind": "host",
+      "services": {
+        "web": { "http": true, "port": 5173 }
+      },
+      "templates": [
+        { "src": "vite.config.ts.template", "dest": "vite.config.ts" }
+      ],
+      "scripts": {
+        "up":     "pnpm install && pnpm dev --port $DRUP_PORT_web",
+        "status": "curl -fs http://127.0.0.1:$DRUP_PORT_web/ >/dev/null && echo running || echo stopped"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+// Rendered to vite.config.ts at `drup up`. The `${DRUP_*}` tokens below
+// are substituted per-worktree — keep them literal in this committed file.
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: {
+    port: Number(process.env.DRUP_PORT_web),
+    proxy: {
+      "/api": {
+        target: "https://${DRUP_HOST_api.web}",
+        changeOrigin: true,
+      },
+    },
+  },
+});
