@@ -28,7 +28,7 @@ jobs:
         #   runners are scarce and being retired.
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -45,7 +45,7 @@ jobs:
       # Name the asset by target so re-added targets slot in without churn.
       - name: Rename
         run: cp target/${{ matrix.target }}/release/drup drup-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: drup-${{ matrix.target }}
           path: drup-${{ matrix.target }}
@@ -58,10 +58,10 @@ jobs:
       contents: write   # create the release + upload assets
     steps:
       # Full history so we can extract Release Notes trailers between tags.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true   # flatten all artifacts into dist/
@@ -109,7 +109,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Publish to crates.io
