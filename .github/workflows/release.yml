@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14        # Apple Silicon
+          - os: macos-latest    # Apple Silicon (moves with GitHub's current default)
             target: aarch64-apple-darwin
         # Deliberately omitted (add back as a matrix entry when a target lands):
         # - `x86_64-unknown-linux-gnu` — Linux is on the README roadmap but not shipping.
