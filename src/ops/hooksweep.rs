@@ -413,7 +413,7 @@ fn sweep_host(
         }
     };
 
-    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `DRUP_WORKSPACE_ROOT` is what a `.drup-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
+    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `DRUP_WORKSPACE_ROOT` is exposed to hooks (e.g. an explicit `$DRUP_WORKSPACE_ROOT/.drup-hooks/…` reference to a workspace-level file), so a local root while running on the server points at a filesystem that isn't there.
     let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));

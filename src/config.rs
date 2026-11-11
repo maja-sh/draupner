@@ -45,14 +45,6 @@ impl RemoteConfig {
     }
 }
 
-/// Rewrite a `.drup-hooks/`-prefixed command to run under `$DRUP_WORKSPACE_ROOT` so it resolves the same locally and on the server; the var is quoted to survive spaces.
-pub fn anchor_drup_hooks(cmd: &str) -> String {
-    match cmd.strip_prefix(".drup-hooks/") {
-        Some(rest) => format!("\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/{rest}"),
-        None => cmd.to_string(),
-    }
-}
-
 /// Default server-side worktree base: the workspace's own directory name so two projects on one server don't collide.
 pub fn default_worktree_base(ws_root: &Path) -> String {
     ws_root
@@ -190,9 +182,9 @@ impl Script {
         }
     }
 
-    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). `.drup-hooks/…` refs are anchored here so every consumer — local run, remote dispatch, `capture_action` status probe — agrees on the resolution.
+    /// `Many` runs as `cmd1 && cmd2 …` (fail-fast). Paths are passed through verbatim — a hook referencing `.drup-hooks/x.sh` resolves from the worktree (the shell's cwd), reach workspace-level files with an explicit `$DRUP_WORKSPACE_ROOT/…` prefix.
     pub fn joined(&self) -> String {
-        self.commands().iter().map(|c| anchor_drup_hooks(c)).collect::<Vec<_>>().join(" && ")
+        self.commands().join(" && ")
     }
 
     pub fn is_interactive(&self) -> bool {
@@ -455,7 +447,54 @@ pub fn load(root: &Path) -> Result<WsConfig> {
         }
     }
     refuse_misplaced_interactive(&cfg)?;
+    refuse_legacy_anchor_references(&cfg, root)?;
     Ok(cfg)
+}
+
+// Migration shim: DELETE a release after 0.13. The `.drup-hooks/` auto-anchor to
+// the workspace root was removed in that release; script paths now pass through
+// verbatim. A pre-0.13 config's `scripts: {"up": ".drup-hooks/x.sh"}` would
+// otherwise fail with `sh: .drup-hooks/x.sh: not found` once per repo at run
+// time — cryptic for someone who hasn't read the release notes.
+
+/// Refuse a `.drup.json` whose `scripts` still references `.drup-hooks/x` at the
+/// workspace root as if the auto-anchor were still in play. Fires only when the
+/// file actually exists there and is executable, so a repo that moved its hook
+/// into the checkout (the new primary pattern) is never refused, and a plain
+/// data file that shares the directory can't trip a false alarm.
+fn refuse_legacy_anchor_references(cfg: &WsConfig, root: &Path) -> Result<()> {
+    let mut lines: Vec<String> = Vec::new();
+    for entry in &cfg.repos {
+        let Some(rc) = entry.config() else { continue };
+        for (event, script) in &rc.scripts {
+            for path in script.commands().iter().filter_map(|c| legacy_anchor_path(c, root)) {
+                lines.push(format!(
+                    "  {}.scripts.{event}: {path} → $DRUP_WORKSPACE_ROOT/{path}",
+                    rc.name,
+                ));
+            }
+        }
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`.drup-hooks/…` references in .drup.json used to resolve from the workspace root, \
+         but drup 0.13 passes script paths through verbatim and the shell cwd is the \
+         worktree. These references point at workspace-level files that no longer resolve \
+         from there:\n\n{}\n\nEither prefix each with `$DRUP_WORKSPACE_ROOT/` (as shown), \
+         or commit the hook inside its repo so `.drup-hooks/x.sh` resolves from the worktree.",
+        lines.join("\n"),
+    )
+}
+
+/// `Some(token)` iff `cmd`'s first whitespace-separated token starts with `.drup-hooks/` AND an executable file lives at `<root>/<token>`. The executability gate matches the old anchor's own effective contract — a non-executable file at that path returned 126 then too — and keeps a plain `.drup-hooks/config.yaml` from being flagged as a stale script.
+fn legacy_anchor_path(cmd: &str, root: &Path) -> Option<String> {
+    let token = cmd.split_whitespace().next()?;
+    if !token.starts_with(".drup-hooks/") {
+        return None;
+    }
+    crate::hooks::is_executable(&root.join(token)).then(|| token.to_string())
 }
 
 /// `interactive: true` only makes sense for lifecycle events that may need
@@ -690,22 +729,6 @@ fn read_json<T: for<'de> Deserialize<'de>>(p: &Path) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::anchor_drup_hooks;
-
-    #[test]
-    fn anchor_drup_hooks_prefixes_only_a_drup_hooks_reference() {
-        assert_eq!(
-            anchor_drup_hooks(".drup-hooks/up.sh"),
-            "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/up.sh"
-        );
-        assert_eq!(
-            anchor_drup_hooks(".drup-hooks/db/seed.sh --fresh"),
-            "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/db/seed.sh --fresh"
-        );
-        assert_eq!(anchor_drup_hooks("podman compose up -d"), "podman compose up -d");
-        assert_eq!(anchor_drup_hooks("echo .drup-hooks/x"), "echo .drup-hooks/x");
-    }
-
     #[test]
     fn container_defaults_cover_the_compose_lifecycle() {
         assert_eq!(default_script("podman", "up").as_deref(), Some("podman compose up -d"));
@@ -923,6 +946,45 @@ mod tests {
         // for the removed field by the cheap substring gate.
         write_cfg(dir.path(), r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#);
         assert!(load(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_pre_013_anchor_only_when_an_executable_workspace_file_sits_there() {
+        // Four cases: (a) legacy shape with an executable workspace-level file → refuse; (b) same path but the file isn't executable → the old anchor wouldn't have worked either, nothing to flag; (c) bare path with no file → pass through (per-repo hook or a plain miss); (d) explicit prefix → never flagged.
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join(".drup-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("api-up.sh");
+        std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+
+        write_cfg(
+            dir.path(),
+            r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api-up.sh"}}]}"#,
+        );
+
+        #[cfg(unix)]
+        {
+            // Non-executable: the old anchor exec'd this too and got 126, so flagging it as a stale anchor would be a false positive.
+            load(dir.path()).expect("a non-executable file isn't a hook under either mechanism");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let err = load(dir.path()).err().expect("executable workspace file present → refuse").to_string();
+        assert!(err.contains("api.scripts.up"), "{err}");
+        assert!(err.contains("$DRUP_WORKSPACE_ROOT/.drup-hooks/api-up.sh"), "{err}");
+
+        write_cfg(
+            dir.path(),
+            r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/not-here.sh"}}]}"#,
+        );
+        load(dir.path()).expect("bare path with no workspace file is a per-repo hook or a plain config bug — not the preflight's business");
+
+        write_cfg(
+            dir.path(),
+            r#"{"repos":[{"name":"api","scripts":{"up":"$DRUP_WORKSPACE_ROOT/.drup-hooks/api-up.sh"}}]}"#,
+        );
+        load(dir.path()).expect("the explicit prefix is the migrated form");
     }
 
     #[test]
