@@ -175,7 +175,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         {
             Ok(Some(s)) => s,
             Ok(None) => {
-                crate::ui::skip(repo, &format!("no {event} hook"));
+                crate::ui::skip(repo, &skip_reason(&cfg, repo, format!("no {event} hook")));
                 result.skipped.push(repo.clone());
                 continue;
             }
@@ -213,6 +213,14 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     }
 
     Ok(result)
+}
+
+/// Why a repo with nothing to run is skipped: "this event has no script" and "drup knows nothing about this repo" call for different fixes, and the second used to read as the first.
+fn skip_reason(cfg: &config::WorkspaceConfig, repo: &str, nothing_for_event: String) -> String {
+    if cfg.repo_config(repo).is_some() {
+        return nothing_for_event;
+    }
+    format!("no drup config — add {repo}/.drup.json, or an entry in the workspace .drup.json")
 }
 
 /// Run a repo's opt-in `prepare` hook locally, ahead of `up` — runs on the client even for a remote workspace so it can stage client-side data (main-checkout db dump, local certs) into the worktree for the up-flush to ship. Returns `false` (and files the repo under `failed`) when the hook fails.
@@ -267,7 +275,7 @@ fn sweep_container_remote(
     result: &mut SweepResult,
 ) {
     let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
-        crate::ui::skip(repo, &format!("no {event} script"));
+        crate::ui::skip(repo, &skip_reason(cfg, repo, format!("no {event} script")));
         result.skipped.push(repo.to_string());
         return;
     };

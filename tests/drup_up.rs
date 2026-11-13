@@ -85,12 +85,26 @@ fn no_worktrees_is_preflight_error() {
 
 #[test]
 fn missing_hook_is_skipped_not_an_error() {
-    let f = WorkspaceFixture::with_repos(&["api"]);
+    let f = WorkspaceFixture::empty();
+    f.add_repo("api");
+    f.write_ws_json(r#"{"repos":[{"name":"api","scripts":{"down":"true"}}]}"#);
     f.run_ok(&["new", "api", "feat/nohook"]);
 
     let out = f.run_ok(&["up", "feat/nohook"]);
     let err = stderr(&out);
     assert!(err.contains("no up hook"), "expected dim skip line in:\n{err}");
+}
+
+#[test]
+fn a_repo_with_no_config_at_all_says_so_when_skipped() {
+    // "No up hook" sends you looking for a missing script; a bare name with no file of its own has nothing to look in.
+    let f = WorkspaceFixture::with_repos(&["api"]);
+    f.run_ok(&["new", "api", "feat/bare"]);
+
+    let out = f.run_ok(&["up", "feat/bare"]);
+    let err = stderr(&out);
+    assert!(err.contains("no drup config"), "expected the skip to name the real gap:\n{err}");
+    assert!(err.contains("api/.drup.json"), "expected the skip to say where config goes:\n{err}");
 }
 
 #[test]
