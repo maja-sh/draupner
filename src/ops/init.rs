@@ -112,6 +112,7 @@ fn init_local(
         runtime,
         remote,
         repos: repos.iter().map(|r| scaffold_repo(root, r, &effective)).collect(),
+        ..Default::default()
     };
     let cfg_path = root.join(".drup.json");
     crate::config::write_json_pretty(&cfg_path, &cfg)?;
@@ -163,13 +164,17 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     root.ancestors()
         .skip(1)
-        .find(|dir| dir.join(".drup.json").is_file())
+        .find(|dir| crate::workspace::is_root(dir))
         .map(Path::to_path_buf)
 }
 
 /// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.drup.json`; `drup up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
+    // A repo that commits its own config gets a bare entry: anything scaffolded here would sit on top of it as a per-machine override.
+    if repo_dir.join(".drup.json").is_file() {
+        return RepoEntry::Name(name.to_string());
+    }
     // No server exists yet — the workspace is being created — so derivation runs on the local site.
     let services = compose::has_compose_file(&repo_dir)
         .then(|| {

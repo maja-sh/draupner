@@ -134,14 +134,11 @@ pub fn prepare(
 
 /// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `drup rm` wiped the sibling's DB volumes).
 fn repo_config<'a>(cfg: &'a WorkspaceConfig, repo: &str) -> Option<&'a RepoConfig> {
-    let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
-    match entry.config() {
-        Some(rc) => Some(rc),
-        None => {
-            static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
-            Some(BARE.get_or_init(RepoConfig::default))
-        }
-    }
+    cfg.repos.iter().find(|r| r.name() == repo)?;
+    Some(cfg.repo_config(repo).unwrap_or_else(|| {
+        static BARE: std::sync::OnceLock<RepoConfig> = std::sync::OnceLock::new();
+        BARE.get_or_init(RepoConfig::default)
+    }))
 }
 
 /// Prefer the effective set recorded at the last `up` — it covers services auto-derived from compose — falling back to declared for a worktree that predates the record.

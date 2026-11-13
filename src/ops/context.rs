@@ -41,6 +41,17 @@ struct Workspace {
     domain: Option<String>,
     runtime: String,
     remote: Option<show::RemoteInfo>,
+    repos: Vec<RepoSource>,
+}
+
+/// Where a repo's config comes from — what an agent needs to explain a stack that behaves differently here than the repo says it should.
+#[derive(Serialize)]
+struct RepoSource {
+    name: String,
+    /// The repo's own committed `.drup.json`; `null` when it carries none.
+    config_file: Option<PathBuf>,
+    /// Fields this workspace's `.drup.json` sets on top of that file.
+    workspace_overrides: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -93,11 +104,24 @@ fn build_workspace(cfg: &WorkspaceConfig, root: &Path, site: Option<&Site>) -> W
             None => r.worktree_base(root),
         },
     });
+    let repos = cfg
+        .repos
+        .iter()
+        .map(|entry| {
+            let overrides = cfg.workspace_overrides(entry.name());
+            RepoSource {
+                name: entry.name().to_string(),
+                config_file: overrides.map(|_| root.join(entry.name()).join(".drup.json")),
+                workspace_overrides: overrides.unwrap_or_default().to_vec(),
+            }
+        })
+        .collect();
     Workspace {
         root: root.to_path_buf(),
         domain: cfg.domain.clone(),
         runtime: cfg.runtime().to_string(),
         remote,
+        repos,
     }
 }
 
@@ -187,6 +211,9 @@ fn agent_hints(workspace: &Workspace, current: &Current, task: Option<&Task>) ->
     if workspace.remote.is_some() {
         h.push("workspace.remote is set — this task's stack lives on the server. `drup exec` is location-transparent (routes through ssh automatically), so keep using it exactly as documented.");
     }
+    if workspace.repos.iter().any(|r| !r.workspace_overrides.is_empty()) {
+        h.push("workspace.repos[].workspace_overrides is non-empty for at least one repo — this machine's workspace .drup.json overrides those fields of the repo's own committed .drup.json (config_file). The stack here may not match what the repo declares; the workspace file holds the value in effect.");
+    }
     if current.task.is_none() {
         h.push("cwd is outside any task worktree, so `task` is null. Ask the user which task they want to work in, or ask them to cd into one — do NOT guess.");
     }
@@ -210,7 +237,14 @@ Always JSON on stdout. Fields:
     "runtime":  container runtime name (e.g. "podman", "docker"),
     "remote":   null (local workspace) or:
                   { "connection":            ssh host,
-                    "worktree_base_absolute": server-side parent dir }
+                    "worktree_base_absolute": server-side parent dir },
+    "repos":    one entry per repo the workspace lists:
+                  { "name":                repo directory name,
+                    "config_file":         absolute path to the repo's own committed .drup.json,
+                                           or null when it carries none,
+                    "workspace_overrides": fields the workspace .drup.json sets on top of that
+                                           file, as dotted paths ("env.APP_URL", "kind");
+                                           empty when the workspace defers to the repo }
   },
   "current": {
     "cwd":            canonical absolute cwd,
@@ -319,6 +353,7 @@ mod tests {
             domain: None,
             runtime: "podman".to_string(),
             remote: None,
+            repos: Vec::new(),
         };
         let current = Current {
             cwd: PathBuf::from("/x"),
@@ -341,6 +376,7 @@ mod tests {
             domain: None,
             runtime: "podman".to_string(),
             remote: None,
+            repos: Vec::new(),
         };
         let current = Current {
             cwd: PathBuf::from("/x/.worktrees/feat-x"),
@@ -372,6 +408,7 @@ mod tests {
                 connection: "srv".to_string(),
                 worktree_base_absolute: "/x".to_string(),
             }),
+            repos: Vec::new(),
         };
         let current = Current {
             cwd: PathBuf::from("/x"),

@@ -14,9 +14,11 @@ drup init --refresh-schema
 This page covers what a schema can't: how the pieces interact, what `drup` infers
 on your behalf, and which rule wins when two say different things.
 
-`.drup.json` is **per-machine**, not shared project config. It describes where
-*your* clones live and where *your* stacks run, which is why the offload target
-lives in it directly rather than in a separate overlay.
+The workspace `.drup.json` is **per-machine**, not shared project config. It
+describes where *your* clones live and where *your* stacks run, which is why the
+offload target lives in it directly rather than in a separate overlay. What a
+repo needs in order to run is the shareable part, and that can be committed
+[in the repo itself](#a-repos-own-drupjson).
 
 ---
 
@@ -78,9 +80,49 @@ A repo entry is either a bare name or an object:
 }
 ```
 
-A bare name is convention-only — it gets worktrees and nothing else: no service
-derivation, no port allocation, no injected environment. Anything beyond
-"make me a worktree" needs the object form.
+A bare name defers to the repo. If the repo commits a `.drup.json` of its own,
+that is its config. Without one it gets worktrees, plus the compose defaults
+when it has a compose file.
+
+### A repo's own `.drup.json`
+
+Everything in a repo's entry — `kind`, `services`, `scripts`, `env`, `templates`,
+`copy`, `worktree_excludes` — can be committed inside the repo instead, as
+`.drup.json` at its root. A team then shares one setup rather than pasting it
+between workspaces:
+
+```json
+{
+  "kind": "container",
+  "services": { "web": { "http": "api", "port": 80 } },
+  "scripts": { "up": ".drup-hooks/up.sh" },
+  "copy": [".env"]
+}
+```
+
+It takes no `name` (the directory is the name) and none of the workspace's own
+settings: `repos`, `domain`, `runtime` and `remote` are refused there.
+
+The workspace lists such a repo by bare name. To change something on your
+machine only, use the object form, which is laid over the repo's file:
+
+```json
+{ "repos": ["app", { "name": "api", "env": { "APP_DEBUG": "1" } }] }
+```
+
+- `services`, `scripts` and `env` merge per key. The entry above changes one
+  variable and keeps the rest.
+- `kind`, `templates`, `copy` and `worktree_excludes` are replaced whole when the
+  entry sets them.
+
+Two rules that are easy to trip on:
+
+- **The main checkout's file is the one in effect**, for every task. `drup` reads
+  one config per repo, never one per worktree, so a branch that edits its
+  `.drup.json` changes nothing until the edit reaches the main checkout.
+- **Overrides are silent.** `drup context` lists them under
+  `workspace.repos[].workspace_overrides`, which is where to look when a stack
+  behaves differently on one machine.
 
 ### Container or host
 

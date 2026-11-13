@@ -18,6 +18,16 @@ pub struct WorkspaceConfig {
     pub remote: Option<RemoteConfig>,
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
+    /// Repos that commit a `.drup.json` of their own, already merged with this file's entry for them. Filled by `load` and never written back, so a rewrite of the workspace file (`drup remote set`) can't bake a repo's config into it.
+    #[serde(skip)]
+    pub(crate) from_repo: BTreeMap<String, MergedRepo>,
+}
+
+/// A repo's own committed config with the workspace entry laid over it.
+pub(crate) struct MergedRepo {
+    config: RepoConfig,
+    /// What the workspace entry contributed, as dotted paths (`env.APP_URL`, `kind`).
+    overrides: Vec<String>,
 }
 
 /// Remote-offload block; when present, every repo's stack runs on the server and location-transparent ops target it.
@@ -124,6 +134,40 @@ impl RepoConfig {
     pub fn is_host(&self) -> bool {
         matches!(self.kind, Some(RepoKind::Host))
     }
+
+    /// Lay a workspace entry over the repo's own file. Maps merge per key so one env var can be overridden without restating the rest; `kind` and the lists are replaced whole when the entry sets them. Returns what the entry contributed, as dotted paths.
+    fn overlay(&mut self, over: &RepoConfig) -> Vec<String> {
+        let mut set = Vec::new();
+        if over.kind.is_some() {
+            self.kind = over.kind;
+            set.push("kind".to_string());
+        }
+        for (k, v) in &over.services {
+            self.services.insert(k.clone(), v.clone());
+            set.push(format!("services.{k}"));
+        }
+        for (k, v) in &over.scripts {
+            self.scripts.insert(k.clone(), v.clone());
+            set.push(format!("scripts.{k}"));
+        }
+        for (k, v) in &over.env {
+            self.env.insert(k.clone(), v.clone());
+            set.push(format!("env.{k}"));
+        }
+        if !over.templates.is_empty() {
+            self.templates = over.templates.clone();
+            set.push("templates".to_string());
+        }
+        if !over.copy.is_empty() {
+            self.copy = over.copy.clone();
+            set.push("copy".to_string());
+        }
+        if !over.worktree_excludes.is_empty() {
+            self.worktree_excludes = over.worktree_excludes.clone();
+            set.push("worktree_excludes".to_string());
+        }
+        set
+    }
 }
 
 impl ServiceConfig {
@@ -149,7 +193,7 @@ pub enum HttpDecl {
     Enabled(bool),
 }
 
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 #[serde(untagged)]
 pub enum Script {
     One(String),
@@ -162,7 +206,7 @@ pub enum Script {
     Rich(RichScript),
 }
 
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 pub struct RichScript {
     pub cmd: String,
     /// `true` → drup runs this hook with inherited stdio so a `sudo` prompt
@@ -192,7 +236,7 @@ impl Script {
     }
 }
 
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone)]
 pub struct Template {
     pub src: String,
     pub dest: String,
@@ -259,9 +303,25 @@ impl WorkspaceConfig {
     }
 
 
-    /// Extended config for `repo`, if it's an object entry.
+    /// Effective config for `repo`: its own committed `.drup.json` with this workspace's entry laid over it, else the workspace entry alone. `None` for a bare name whose repo carries no file.
     pub fn repo_config(&self, repo: &str) -> Option<&RepoConfig> {
+        if let Some(merged) = self.from_repo.get(repo) {
+            return Some(&merged.config);
+        }
         self.repos.iter().find(|r| r.name() == repo).and_then(|r| r.config())
+    }
+
+    /// What the workspace entry sets on top of `repo`'s own `.drup.json`; `None` when the repo carries no file.
+    pub fn workspace_overrides(&self, repo: &str) -> Option<&[String]> {
+        self.from_repo.get(repo).map(|m| m.overrides.as_slice())
+    }
+
+    pub fn copy(&self, repo: &str) -> &[String] {
+        self.repo_config(repo).map(|rc| rc.copy.as_slice()).unwrap_or_default()
+    }
+
+    pub fn worktree_excludes(&self, repo: &str) -> &[String] {
+        self.repo_config(repo).map(|rc| rc.worktree_excludes.as_slice()).unwrap_or_default()
     }
 
     pub fn is_host_repo(&self, repo: &str) -> bool {
@@ -313,20 +373,6 @@ impl RepoEntry {
         match self {
             RepoEntry::Name(_) => None,
             RepoEntry::Extended(c) => Some(c),
-        }
-    }
-
-    pub fn worktree_excludes(&self) -> &[String] {
-        match self {
-            RepoEntry::Name(_) => &[],
-            RepoEntry::Extended(c) => &c.worktree_excludes,
-        }
-    }
-
-    pub fn copy(&self) -> &[String] {
-        match self {
-            RepoEntry::Name(_) => &[],
-            RepoEntry::Extended(c) => &c.copy,
         }
     }
 }
@@ -409,7 +455,7 @@ fn runtime_looks_safe(runtime: &str) -> bool {
 /// Load a workspace config from `<workspace-root>/.drup.json`.
 pub fn load(root: &Path) -> Result<WorkspaceConfig> {
     let path = root.join(".drup.json");
-    let cfg: WorkspaceConfig = read_json(&path)?;
+    let mut cfg: WorkspaceConfig = read_json(&path)?;
     refuse_legacy_hooks_field(&path)?;
     // Reject a dangerous SSH destination at the choke point every op shares — `.drup.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
@@ -446,9 +492,55 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig> {
             );
         }
     }
-    refuse_misplaced_interactive(&cfg)?;
+    // Before the merge: the anchor only ever rewrote what the workspace file declared, and a repo's own `.drup-hooks/x.sh` is the pattern that replaces it.
     refuse_legacy_anchor_references(&cfg, root)?;
+    cfg.from_repo = merge_repo_files(&cfg, root)?;
+    refuse_misplaced_interactive(&cfg)?;
     Ok(cfg)
+}
+
+/// Read each listed repo's own `.drup.json` and lay the workspace entry over it. Always the main checkout's copy, never a worktree's: one config per repo per workspace, whatever branch a task is on.
+fn merge_repo_files(cfg: &WorkspaceConfig, root: &Path) -> Result<BTreeMap<String, MergedRepo>> {
+    let mut merged = BTreeMap::new();
+    for entry in &cfg.repos {
+        let Some(mut config) = read_repo_file(root, entry.name())? else { continue };
+        let overrides = entry.config().map(|over| config.overlay(over)).unwrap_or_default();
+        merged.insert(entry.name().to_string(), MergedRepo { config, overrides });
+    }
+    Ok(merged)
+}
+
+/// Fields that describe a workspace, not a repo. A repo's file naming one is almost always a workspace file copied into the repo, and silently ignoring `domain` or `remote` there would look like drup lost the setting.
+const WORKSPACE_ONLY_FIELDS: [&str; 4] = ["repos", "domain", "runtime", "remote"];
+
+fn read_repo_file(root: &Path, repo: &str) -> Result<Option<RepoConfig>> {
+    let path = root.join(repo).join(".drup.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let mut value: serde_json::Value = read_json(&path)?;
+    let fields = value
+        .as_object_mut()
+        .with_context(|| format!("{} must be a JSON object", path.display()))?;
+    if let Some(field) = WORKSPACE_ONLY_FIELDS.into_iter().find(|f| fields.contains_key(*f)) {
+        anyhow::bail!(
+            "`{field}` in {} is a workspace setting — it belongs in the workspace's own \
+             .drup.json. A repo's .drup.json describes only that repo: kind, services, \
+             scripts, env, templates, copy, worktree_excludes.",
+            path.display()
+        );
+    }
+    // The directory is the name; a file may restate it, but one that disagrees was copied from another repo.
+    match fields.get("name").and_then(|n| n.as_str()) {
+        Some(named) if named != repo => anyhow::bail!(
+            "{} names itself `{named}`, but it sits in `{repo}` — drop `name` (the directory \
+             is the name) or fix it",
+            path.display()
+        ),
+        _ => fields.insert("name".to_string(), repo.into()),
+    };
+    let config = serde_json::from_value(value).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(config))
 }
 
 // Migration shim: DELETE a release after 0.13. The `.drup-hooks/` auto-anchor to
@@ -503,7 +595,7 @@ fn legacy_anchor_path(cmd: &str, root: &Path) -> Option<String> {
 /// load-time instead of a mysterious hang or no-op later.
 fn refuse_misplaced_interactive(cfg: &WorkspaceConfig) -> Result<()> {
     for entry in &cfg.repos {
-        let Some(rc) = entry.config() else { continue };
+        let Some(rc) = cfg.repo_config(entry.name()) else { continue };
         for (event, script) in &rc.scripts {
             if !script.is_interactive() {
                 continue;
@@ -985,6 +1077,96 @@ mod tests {
             r#"{"repos":[{"name":"api","scripts":{"up":"$DRUP_WORKSPACE_ROOT/.drup-hooks/api-up.sh"}}]}"#,
         );
         load(dir.path()).expect("the explicit prefix is the migrated form");
+    }
+
+    fn write_repo_cfg(dir: &Path, repo: &str, json: &str) {
+        std::fs::create_dir_all(dir.join(repo)).unwrap();
+        std::fs::write(dir.join(repo).join(".drup.json"), json).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_entry_replaces_kind_and_lists_but_merges_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo_cfg(
+            dir.path(),
+            "api",
+            r#"{"kind":"container","copy":[".env","certs"],
+                "services":{"web":{"port":80},"db":{"port":5432}},
+                "scripts":{"up":"repo-up","down":"repo-down"}}"#,
+        );
+        write_cfg(
+            dir.path(),
+            r#"{"repos":[{"name":"api","kind":"host","copy":[".env.local"],
+                "services":{"web":{"port":8080}},"scripts":{"up":"local-up"}}]}"#,
+        );
+        let cfg = load(dir.path()).unwrap();
+        let rc = cfg.repo_config("api").unwrap();
+
+        assert_eq!(rc.kind, Some(RepoKind::Host));
+        assert_eq!(rc.copy, [".env.local"], "a list is replaced, not appended to");
+        assert_eq!(rc.services["web"].port, 8080);
+        assert_eq!(rc.services["db"].port, 5432, "an untouched key survives");
+        assert_eq!(cfg.script_command("api", "up").as_deref(), Some("local-up"));
+        assert_eq!(cfg.script_command("api", "down").as_deref(), Some("repo-down"));
+        assert_eq!(
+            cfg.workspace_overrides("api").unwrap(),
+            ["kind", "services.web", "scripts.up", "copy"]
+        );
+    }
+
+    #[test]
+    fn a_repos_config_is_never_written_into_the_workspace_file() {
+        // `drup remote set` loads, edits and rewrites `.drup.json`; the merged view riding along would turn every repo's committed config into a per-machine override.
+        let dir = tempfile::tempdir().unwrap();
+        write_repo_cfg(dir.path(), "api", r#"{"scripts":{"up":"repo-only-script"}}"#);
+        write_cfg(dir.path(), r#"{"repos":["api"]}"#);
+        let cfg = load(dir.path()).unwrap();
+        assert!(cfg.script("api", "up").is_some());
+
+        let rewritten = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(rewritten, r#"{"repos":["api"]}"#);
+    }
+
+    #[test]
+    fn a_repo_config_that_names_another_repo_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo_cfg(dir.path(), "api", r#"{"name":"app","scripts":{"up":"true"}}"#);
+        write_cfg(dir.path(), r#"{"repos":["api"]}"#);
+        let err = load(dir.path()).err().expect("a mismatched name must be refused").to_string();
+        assert!(err.contains("`app`") && err.contains("`api`"), "{err}");
+
+        write_repo_cfg(dir.path(), "api", r#"{"name":"api","scripts":{"up":"true"}}"#);
+        load(dir.path()).expect("restating the right name is harmless");
+    }
+
+    #[test]
+    fn load_checks_a_repos_own_scripts_like_the_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        write_repo_cfg(
+            dir.path(),
+            "api",
+            r#"{"scripts":{"status":{"cmd":"echo running","interactive":true}}}"#,
+        );
+        write_cfg(dir.path(), r#"{"repos":["api"]}"#);
+        let err = load(dir.path()).err().expect("an interactive status must be refused wherever it's declared");
+        assert!(err.to_string().contains("interactive"), "{err}");
+    }
+
+    #[test]
+    fn a_repos_own_hook_path_is_not_taken_for_a_pre_013_anchor() {
+        // The anchor only ever rewrote the workspace file's scripts. A repo naming `.drup-hooks/up.sh` means its own file, even when the workspace root happens to hold one by the same name.
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join(".drup-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("up.sh"), "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(hooks.join("up.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write_repo_cfg(dir.path(), "api", r#"{"scripts":{"up":".drup-hooks/up.sh"}}"#);
+        write_cfg(dir.path(), r#"{"repos":["api"]}"#);
+        load(dir.path()).expect("a repo-declared path is not a legacy anchor");
     }
 
     #[test]

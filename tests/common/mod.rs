@@ -191,6 +191,11 @@ impl WorkspaceFixture {
         self.apply_hook_scripts();
     }
 
+    /// Write `<repo>/.drup.json` in the main checkout — the repo's own config, as a team would commit it. Left untracked: `drup` reads the file on disk, not git.
+    pub fn write_repo_json(&self, repo: &str, json: &str) {
+        std::fs::write(self.path().join(repo).join(".drup.json"), json).expect("write repo .drup.json");
+    }
+
     /// Executable bash stub for `DRUP_SSH`/`DRUP_MUTAGEN` — e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")` to simulate reachable/unreachable.
     pub fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path().join(name);
