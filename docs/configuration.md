@@ -253,10 +253,10 @@ repo that declares nothing gets sensible defaults (`compose up -d`,
 `compose down`, `compose ps`, and `compose down -v` on removal), so a plain
 compose project often needs no `scripts` at all.
 
-A value beginning `.drup-hooks/` is anchored to the workspace root automatically,
-so `".drup-hooks/api-up.sh"` resolves whether the script runs locally or on an
-offload server. **Any other relative path is not resolved** — it runs against the
-worktree's working directory.
+**A relative path is not resolved for you** — it runs against the worktree, so
+`".drup-hooks/up.sh"` names a file committed in the repo. A script kept at the
+workspace root takes an explicit `"$DRUP_WORKSPACE_ROOT/.drup-hooks/api-up.sh"`,
+which resolves whether it runs locally or on an offload server.
 
 See [hooks.md](hooks.md) for the events, where each one runs, and the full
 environment contract.

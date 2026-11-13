@@ -236,7 +236,7 @@ fn hook_template(repo: &str, event: &str) -> String {
         "#!/usr/bin/env bash\n\
          # {repo}'s {event} script. Runs from the worktree; its path is $DRUP_WORKTREE.\n\
          # Enable it by adding to {repo}'s `scripts` in .drup.json:\n\
-         #   \"{event}\": \".drup-hooks/{name}\"\n\
+         #   \"{event}\": \"$DRUP_WORKSPACE_ROOT/.drup-hooks/{name}\"\n\
          set -euo pipefail\n\
          \n\
          echo \"{repo}-{event}: worktree=$DRUP_WORKTREE\"\n"
