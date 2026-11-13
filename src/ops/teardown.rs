@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::compose;
-use crate::config::WsConfig;
+use crate::config::WorkspaceConfig;
 use crate::hooks;
 use crate::inject;
 use crate::mutagen;
@@ -19,7 +19,7 @@ use crate::workspace;
 /// removal); errors only when `git worktree remove` fails even with `--force`.
 pub fn remove_task(
     root: &Path,
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     branch: &str,
     worktrees: &[(String, PathBuf)],
     keep_images: bool,
@@ -150,7 +150,7 @@ fn teardown_host(site: Option<&Site>, branch: &str, repo: &str, hook_failed: &mu
 /// Run a local workspace's `down` + `post-remove` hooks; best-effort — a failing hook is reported but doesn't stop removal.
 #[allow(clippy::too_many_arguments)]
 fn teardown_local(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     root: &Path,
     wt: &Path,
     sanitized: &str,
@@ -192,7 +192,7 @@ fn teardown_local(
 /// skipped when unreachable so local teardown can still proceed.
 #[allow(clippy::too_many_arguments)]
 fn teardown_remote(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: Option<&Site>,
     root: &Path,
     wt: &Path,

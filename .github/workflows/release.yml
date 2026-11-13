@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14        # Apple Silicon
+          - os: macos-latest    # Apple Silicon (moves with GitHub's current default)
             target: aarch64-apple-darwin
         # Deliberately omitted (add back as a matrix entry when a target lands):
         # - `x86_64-unknown-linux-gnu` — Linux is on the README roadmap but not shipping.
@@ -88,17 +88,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Semver convention: anything after `-` in the version (vX.Y.Z-rc1, -alpha, -beta.2) is a prerelease. Keeping it off the releases page's "Latest" is what the flag buys.
+          prerelease_flag=""
+          case "${{ github.ref_name }}" in *-*) prerelease_flag="--prerelease" ;; esac
           if [ -s release-notes.md ]; then
             gh release create "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" \
               --title "${{ github.ref_name }}" \
               --notes-file release-notes.md \
+              $prerelease_flag \
               dist/*
           else
             gh release create "${{ github.ref_name }}" \
               --repo "${{ github.repository }}" \
               --title "${{ github.ref_name }}" \
               --generate-notes \
+              $prerelease_flag \
               dist/*
           fi
 

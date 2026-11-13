@@ -175,7 +175,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
         {
             Ok(Some(s)) => s,
             Ok(None) => {
-                crate::ui::skip(repo, &format!("no {event} hook"));
+                crate::ui::skip(repo, &skip_reason(&cfg, repo, format!("no {event} hook")));
                 result.skipped.push(repo.clone());
                 continue;
             }
@@ -215,9 +215,17 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
     Ok(result)
 }
 
+/// Why a repo with nothing to run is skipped: "this event has no script" and "drup knows nothing about this repo" call for different fixes, and the second used to read as the first.
+fn skip_reason(cfg: &config::WorkspaceConfig, repo: &str, nothing_for_event: String) -> String {
+    if cfg.repo_config(repo).is_some() {
+        return nothing_for_event;
+    }
+    format!("no drup config — add {repo}/.drup.json, or an entry in the workspace .drup.json")
+}
+
 /// Run a repo's opt-in `prepare` hook locally, ahead of `up` — runs on the client even for a remote workspace so it can stage client-side data (main-checkout db dump, local certs) into the worktree for the up-flush to ship. Returns `false` (and files the repo under `failed`) when the hook fails.
 fn run_prepare(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     root: &std::path::Path,
     wt: &std::path::Path,
     sanitized: &str,
@@ -255,7 +263,7 @@ fn run_prepare(
 /// Handle one container repo on the server for a remote workspace: run its declarative script over SSH, then sync Caddy routes on the server. Mirrors the local container path but the script and routing run where the stack lives.
 #[allow(clippy::too_many_arguments)]
 fn sweep_container_remote(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     wt: &std::path::Path,
@@ -267,7 +275,7 @@ fn sweep_container_remote(
     result: &mut SweepResult,
 ) {
     let Some(cmd) = cfg.command_for(repo, event, cfg.is_container_repo(repo, wt)) else {
-        crate::ui::skip(repo, &format!("no {event} script"));
+        crate::ui::skip(repo, &skip_reason(cfg, repo, format!("no {event} script")));
         result.skipped.push(repo.to_string());
         return;
     };
@@ -304,7 +312,7 @@ fn sweep_container_remote(
 
 /// Add (`up`) or remove (`down`) Caddy routes for a repo's HTTP services. Returns whether the sync succeeded — always `true` for `down` and for a repo with no HTTP routes; on `up`, `false` if any route failed to install (an HTTP container has no host-port fallback).
 fn sync_routes(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     sanitized: &str,
@@ -347,7 +355,7 @@ fn sync_routes(
 
 /// Forward a remote repo's allocated ports back to this machine (`up`) or tear them down (`down`), so each server-bound port is reachable at the same `localhost:<port>` used on the server. No-op for local; pure-HTTP services are reached via Caddy instead. Best-effort — a forward failure is noted, never fatal.
 fn sync_forwards(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     root: &std::path::Path,
     branch: &str,
     sanitized: &str,
@@ -374,7 +382,7 @@ fn sync_forwards(
 /// Handle one host repo in a sweep: `up` starts its `up` script as a detached process; `down` stops it.
 #[allow(clippy::too_many_arguments)]
 fn sweep_host(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     wt: &std::path::Path,
@@ -413,7 +421,7 @@ fn sweep_host(
         }
     };
 
-    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `DRUP_WORKSPACE_ROOT` is what a `.drup-hooks/…` script path anchors against, so a local root while running on the server points at a filesystem that isn't there.
+    // Working dir at the execution site: server-side synced dir (absolute) for remote (flush first), else the local worktree. Both must be the site's paths — `DRUP_WORKSPACE_ROOT` is exposed to hooks (e.g. an explicit `$DRUP_WORKSPACE_ROOT/.drup-hooks/…` reference to a workspace-level file), so a local root while running on the server points at a filesystem that isn't there.
     let (worktree, site_root) = match cfg.remote.as_ref() {
         Some(r) => {
             let _ = crate::mutagen::flush(&crate::mutagen::session_name(branch, repo));

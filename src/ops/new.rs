@@ -73,7 +73,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 /// task-dir creation — are the caller's; this function assumes `task_dir` exists.
 pub(super) fn add_repos(
     ws_root: &Path,
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &remote::Site,
     branch: &str,
     sanitized: &str,
@@ -89,7 +89,6 @@ pub(super) fn add_repos(
         // the IIFE do trigger cross-repo rollback.
         super::bail_if_interrupted()?;
 
-        let repo_entry = cfg.repos.iter().find(|r| r.name() == repo_name).unwrap();
         let repo_path = ws_root.join(repo_name);
         let wt_path = task_dir.join(repo_name);
         // Captured before `create_worktree` since that's what would create it —
@@ -109,7 +108,7 @@ pub(super) fn add_repos(
             step.ok();
 
             // Anything drup drops into the worktree gets registered here so it never reads as untracked.
-            let mut excludes: Vec<String> = repo_entry.worktree_excludes().to_vec();
+            let mut excludes: Vec<String> = cfg.worktree_excludes(repo_name).to_vec();
 
             // Seeding `vendor/` from the main checkout only makes sense for a
             // gitignored, per-host one. A repo that *commits* its vendor/ already has
@@ -137,7 +136,7 @@ pub(super) fn add_repos(
             }
 
             // Runs before the exclude registration (so copied paths join it), before the remote sync (so they ride it up), and before post-create (so build steps see them).
-            let copies = repo_entry.copy();
+            let copies = cfg.copy(repo_name);
             if !copies.is_empty() {
                 let step = crate::ui::step(repo_name, "files copied");
                 let dests = seed_copies(&repo_path, &wt_path, copies)
@@ -163,7 +162,7 @@ pub(super) fn add_repos(
                 let step = crate::ui::step(repo_name, "Sync created");
                 let session = mutagen::session_name(branch, repo_name);
                 let remote_path = remote::worktree_path(&r.worktree_base(ws_root), sanitized, repo_name);
-                let ignores = mutagen::sync_ignores(repo_entry.worktree_excludes(), &wt_path);
+                let ignores = mutagen::sync_ignores(cfg.worktree_excludes(repo_name), &wt_path);
                 let synced = mutagen::create(&session, &wt_path, &r.connection, &remote_path, &ignores)
                     // Settle the initial push before we derive/render against the server.
                     .and_then(|()| {
@@ -217,7 +216,7 @@ pub(super) fn add_repos(
 /// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared. Failure is fatal for `new` — one-time setup that didn't complete.
 #[allow(clippy::too_many_arguments)]
 fn run_post_create(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &crate::remote::Site,
     ws_root: &Path,
     wt_path: &Path,
@@ -436,7 +435,7 @@ struct CompletedRepo {
 /// Every step is best-effort — the caller propagates the original error, and
 /// blocking rollback on a secondary failure would eat the useful diagnostic.
 fn rollback_repo(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     ws_root: &Path,
     branch: &str,
     sanitized: &str,

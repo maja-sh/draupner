@@ -80,7 +80,7 @@ fn content_length(headers: &[u8]) -> usize {
 }
 
 /// Write `contents` to `path` and mark it 0755 — the one place that knows a script the tests hand to `drup` needs to be executable.
-fn write_exec(path: &Path, contents: &str) {
+pub fn write_exec(path: &Path, contents: &str) {
     std::fs::write(path, contents).expect("write script");
     #[cfg(unix)]
     {
@@ -191,6 +191,11 @@ impl WorkspaceFixture {
         self.apply_hook_scripts();
     }
 
+    /// Write `<repo>/.drup.json` in the main checkout — the repo's own config, as a team would commit it. Left untracked: `drup` reads the file on disk, not git.
+    pub fn write_repo_json(&self, repo: &str, json: &str) {
+        std::fs::write(self.path().join(repo).join(".drup.json"), json).expect("write repo .drup.json");
+    }
+
     /// Executable bash stub for `DRUP_SSH`/`DRUP_MUTAGEN` — e.g. `stub("ok", "exit 0")` / `stub("bad", "exit 1")` to simulate reachable/unreachable.
     pub fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.path().join(name);
@@ -219,7 +224,7 @@ impl WorkspaceFixture {
         path
     }
 
-    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.drup-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it. A file, not an inline string, so a multi-line body needs no JSON escaping; `drup` anchors `.drup-hooks/…` to `$DRUP_WORKSPACE_ROOT` so it resolves from the worktree cwd.
+    /// Declare `(repo, event)` as a lifecycle script: `body` is written executable to `.drup-hooks/<repo>-<event>.sh` and the repo's `scripts` block points at it with a `$DRUP_WORKSPACE_ROOT/…` prefix, since a plain `.drup-hooks/…` path now resolves from the worktree cwd. A file, not an inline string, so a multi-line body needs no JSON escaping.
     pub fn add_hook(&self, repo: &str, event: &str, body: &str) {
         let dir = self.path().join(".drup-hooks");
         std::fs::create_dir_all(&dir).expect("create .drup-hooks");
@@ -228,7 +233,9 @@ impl WorkspaceFixture {
             &self.path().join(&rel),
             &format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
         );
-        self.hooks.borrow_mut().push((repo.to_string(), event.to_string(), rel));
+        self.hooks
+            .borrow_mut()
+            .push((repo.to_string(), event.to_string(), format!("$DRUP_WORKSPACE_ROOT/{rel}")));
         self.apply_hook_scripts();
     }
 

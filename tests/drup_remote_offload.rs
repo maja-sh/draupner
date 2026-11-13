@@ -300,7 +300,7 @@ fn host_repo_on_a_remote_workspace_runs_on_the_server() {
         rec.contains("PATH=/harvested/bin:/usr/bin"),
         "harvested login PATH not passed to the detached host process:\n{rec}"
     );
-    // DRUP_WORKSPACE_ROOT anchors `.drup-hooks/…` paths, so it must name the server's root, not the client's.
+    // DRUP_WORKSPACE_ROOT is exposed so hooks can reach workspace-level files (e.g. `$DRUP_WORKSPACE_ROOT/.drup-hooks/…`); it must name the server's root, not the client's.
     assert!(
         rec.contains("DRUP_WORKSPACE_ROOT=/home/test/drup"),
         "DRUP_WORKSPACE_ROOT must be the server-side root for a detached host process:\n{rec}"

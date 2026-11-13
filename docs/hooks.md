@@ -10,15 +10,16 @@ Declare them in `.drup.json` under a repo's `scripts`:
 ```json
 "scripts": {
   "post-create": "composer install",
-  "up": ".drup-hooks/api-up.sh",
+  "up": ".drup-hooks/up.sh",
   "down": "podman compose down"
 }
 ```
 
 Each value is one shell command or a list run in order, executed with `sh -c`
-from the **worktree directory**. A value beginning `.drup-hooks/` is anchored to
-the workspace root so it resolves wherever it runs; any other relative path is
-not resolved for you.
+from the **worktree directory**. A path is passed through as written, so a
+relative one resolves inside the worktree: `.drup-hooks/up.sh` is a file
+committed in the repo. To reach a file at the workspace root, say so with
+`$DRUP_WORKSPACE_ROOT/…`.
 
 ---
 
@@ -227,21 +228,39 @@ are found. A `PATH` you set in the repo's `env` wins over the harvested one.
 ## The `.drup-hooks/` directory
 
 Anything longer than a line belongs in a shell file rather than inline JSON.
-`.drup-hooks/` at the workspace root is where those live — `drup init` scaffolds a
-starter `.drup-hooks/<repo>-<event>.sh` per event, and `drup` pushes the whole
-directory to the server on each `up`, so a shared script works the same in both
-places. Point a `scripts` entry at one:
+There are two places to keep one.
+
+**In the repo.** Commit `.drup-hooks/up.sh` inside the repo and name it by its
+relative path. It travels with the branch, and reaches an offload server with
+the rest of the worktree:
 
 ```json
-"scripts": { "up": ".drup-hooks/api-up.sh" }
+"scripts": { "up": ".drup-hooks/up.sh" }
 ```
 
-Nothing in `.drup-hooks/` runs unless a `scripts` entry names it. The scaffolded
+**At the workspace root.** `drup init` scaffolds a starter
+`.drup-hooks/<repo>-<event>.sh` per event there, and `drup` pushes the whole
+directory to the server on each `up`. Name these with the explicit prefix, which
+resolves at whichever site the script runs:
+
+```json
+"scripts": { "up": "$DRUP_WORKSPACE_ROOT/.drup-hooks/api-up.sh" }
+```
+
+Nothing in either place runs unless a `scripts` entry names it. The scaffolded
 files are inert until you declare one.
 
 Scripts must be executable. `drup` restores the executable bit on the copy it
 pushes to a server, but a client-side script (notably `prepare`) that an editor
 rewrote to `644` will fail with a bare `Permission denied` — `chmod +x` it.
+
+### Upgrading from anchored paths (pre-0.13)
+
+A value beginning `.drup-hooks/` used to be rewritten to the workspace root
+behind your back. It is now taken as written, which is what lets a script live
+in its repo. A config that still leans on the rewrite is refused at load with
+each line to change: add the `$DRUP_WORKSPACE_ROOT/` prefix, or move the script
+into the repo it belongs to.
 
 ### Upgrading from hook files (pre-0.6)
 
@@ -250,7 +269,7 @@ no `scripts` entry at all. That mechanism is gone; a leftover file now fails the
 repo with the line to paste rather than silently doing nothing:
 
 ```json
-"scripts": { "up": ".drup-hooks/api/up" }
+"scripts": { "up": "$DRUP_WORKSPACE_ROOT/.drup-hooks/api/up" }
 ```
 
 The file itself keeps working, but its contract changed with the move — it now

@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::WsConfig;
+use crate::config::WorkspaceConfig;
 use crate::ui;
 
 /// Per-line buffer cap so a hook emitting an unterminated stream can't OOM us;
@@ -25,9 +25,9 @@ pub struct ResolvedScript {
     pub interactive: bool,
 }
 
-/// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `.drup-hooks/…` anchoring and `Many`-join happen in `cfg.script_command` so `capture_command` can't drift from `run_command`.
+/// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `Many`-join happens in `cfg.script_command` so `capture_command` can't drift from `run_command`.
 pub fn resolve(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     workspace_root: &Path,
     repo: &str,
     event: &str,
@@ -297,7 +297,7 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
 /// Mirrors `resolve`'s condition exactly: a declared `scripts` entry wins, so a
 /// repo that has already migrated is not refused for still owning the old file.
 pub fn preflight_legacy_hook_files(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     workspace_root: &Path,
     repos: &[String],
     events: &[&str],
@@ -319,21 +319,21 @@ fn refuse_legacy_hook_file(workspace_root: &Path, repo: &str, event: &str) -> Re
     }
     bail!(
         "{rel} is an executable hook file, but hook files discovered by convention were \
-         removed in drup 0.6 — declare it instead: add \"scripts\": {{\"{event}\": \"{rel}\"}} \
-         to {repo}'s entry in .drup.json. The contract changed with it: the script now runs \
-         with cwd = the worktree (not the workspace root), and the worktree path arrives as \
-         $DRUP_WORKTREE (not $1)."
+         removed in drup 0.6 — declare it instead: add \"scripts\": {{\"{event}\": \"$DRUP_WORKSPACE_ROOT/{rel}\"}} \
+         to {repo}'s entry in .drup.json. The script runs with cwd = the worktree and the \
+         worktree path arrives as $DRUP_WORKTREE; prefix workspace-level files with \
+         $DRUP_WORKSPACE_ROOT/ to reach them."
     )
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
@@ -387,23 +387,23 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_script_resolves_to_one_anchored_command() {
-        // The `Many`-join and `.drup-hooks/…` anchoring live in `config::script_command`; deferring either to the dispatch site is what once let `capture_command` join without anchoring.
-        let cfg: WsConfig = serde_json::from_str(
+    fn a_declared_many_script_joins_fail_fast() {
+        // The `Many`-join lives in `config::script_command`; deferring it to the dispatch site is what once let `capture_command` join differently from `run_command`. Paths are passed through verbatim — a shell with cwd=worktree resolves them.
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"status":[".drup-hooks/status.sh","echo ok"]}}]}"#,
         )
         .expect("parse config");
         let script = resolve(&cfg, Path::new("/ws"), "api", "status", false)
             .expect("resolve")
             .expect("a declared script must resolve to a command");
-        assert_eq!(script.cmd, "\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/status.sh && echo ok");
+        assert_eq!(script.cmd, ".drup-hooks/status.sh && echo ok");
         assert!(!script.interactive, "a plain declared script defaults to non-interactive");
     }
 
     #[test]
     fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
         // `runtime` pinned so the assertion doesn't depend on which of docker/podman lives on this box's PATH.
-        let cfg: WsConfig =
+        let cfg: WorkspaceConfig =
             serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#).expect("parse config");
         let script = resolve(&cfg, Path::new("/ws"), "api", "up", true)
             .expect("resolve")
@@ -425,7 +425,7 @@ mod tests {
         let file = hooks.join("up");
         std::fs::write(&file, "#!/bin/sh\necho hi\n").expect("write hook");
 
-        let cfg: WsConfig =
+        let cfg: WorkspaceConfig =
             serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#).expect("parse config");
 
         // Not executable: already inert before removal, so a container repo still gets its default.
@@ -444,12 +444,12 @@ mod tests {
         let err = resolve(&cfg, dir.path(), "api", "up", true)
             .expect_err("an executable hook file must be refused")
             .to_string();
-        assert!(err.contains(r#""scripts": {"up": ".drup-hooks/api/up"}"#), "{err}");
+        assert!(err.contains(r#""scripts": {"up": "$DRUP_WORKSPACE_ROOT/.drup-hooks/api/up"}"#), "{err}");
         assert!(err.contains("$DRUP_WORKTREE"), "the new worktree contract must be named: {err}");
         assert!(err.contains("cwd = the worktree"), "the cwd change must be named: {err}");
 
         // A declared script wins outright — the shim never fires for a repo that already migrated.
-        let migrated: WsConfig = serde_json::from_str(
+        let migrated: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#,
         )
         .expect("parse config");
@@ -457,7 +457,7 @@ mod tests {
             resolve(&migrated, dir.path(), "api", "up", true)
                 .expect("resolve")
                 .map(|s| s.cmd),
-            Some("\"$DRUP_WORKSPACE_ROOT\"/.drup-hooks/api/up".to_string())
+            Some(".drup-hooks/api/up".to_string())
         );
     }
 }

@@ -63,7 +63,7 @@ fn a_leftover_hook_file_fails_the_repo_with_the_migration() {
     let err = stderr(&out);
     assert!(!err.contains("FROM-HOOK-FILE"), "the hook file must not run:\n{err}");
     assert!(
-        err.contains(r#""scripts": {"up": ".drup-hooks/api/up"}"#),
+        err.contains(r#""scripts": {"up": "$DRUP_WORKSPACE_ROOT/.drup-hooks/api/up"}"#),
         "the error must name the exact JSON to paste:\n{err}"
     );
     assert!(err.contains("$DRUP_WORKTREE"), "the error must name the new worktree var:\n{err}");
@@ -77,7 +77,7 @@ fn declaring_a_hook_file_under_scripts_runs_it_again() {
     f.add_repo("api");
     write_legacy_hook_file(&f, "api", "up");
     f.write_ws_json(
-        r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#,
+        r#"{"repos":[{"name":"api","scripts":{"up":"$DRUP_WORKSPACE_ROOT/.drup-hooks/api/up"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/migrated"]);
 

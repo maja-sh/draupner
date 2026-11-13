@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
+use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WorkspaceConfig};
 use crate::compose;
 
 /// The lifecycle events `drup` dispatches, in the order they happen. `drup init`
@@ -106,19 +106,20 @@ fn init_local(
     let remote_note = remote.as_ref().map(|r| r.connection.clone());
     let pinned = runtime.is_some();
     let step_config = crate::ui::step("cfg", ".drup.json");
-    let cfg = WsConfig {
+    let cfg = WorkspaceConfig {
         schema: Some("./.drup.schema.json".to_string()),
         domain,
         runtime,
         remote,
         repos: repos.iter().map(|r| scaffold_repo(root, r, &effective)).collect(),
+        ..Default::default()
     };
     let cfg_path = root.join(".drup.json");
     crate::config::write_json_pretty(&cfg_path, &cfg)?;
     step_config.ok();
 
     let step_schema = crate::ui::step("cfg", ".drup.schema.json");
-    let schema = schemars::schema_for!(WsConfig);
+    let schema = schemars::schema_for!(WorkspaceConfig);
     crate::config::write_json_pretty(&root.join(".drup.schema.json"), &schema)?;
     step_schema.ok();
 
@@ -152,7 +153,7 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("drup-init", "--refresh-schema");
 
     let step = crate::ui::step("cfg", ".drup.schema.json");
-    let schema = schemars::schema_for!(WsConfig);
+    let schema = schemars::schema_for!(WorkspaceConfig);
     crate::config::write_json_pretty(&root.join(".drup.schema.json"), &schema)?;
     step.ok();
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".drup.schema.json").display())]);
@@ -163,13 +164,17 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
 fn enclosing_workspace(root: &Path) -> Option<PathBuf> {
     root.ancestors()
         .skip(1)
-        .find(|dir| dir.join(".drup.json").is_file())
+        .find(|dir| crate::workspace::is_root(dir))
         .map(Path::to_path_buf)
 }
 
 /// Build a repo entry, best-effort scaffolding the auto-derived `services` block so routing is visible in `.drup.json`; `drup up` re-derives live regardless.
 fn scaffold_repo(root: &Path, name: &str, runtime: &str) -> RepoEntry {
     let repo_dir = root.join(name);
+    // A repo that commits its own config gets a bare entry: anything scaffolded here would sit on top of it as a per-machine override.
+    if repo_dir.join(".drup.json").is_file() {
+        return RepoEntry::Name(name.to_string());
+    }
     // No server exists yet — the workspace is being created — so derivation runs on the local site.
     let services = compose::has_compose_file(&repo_dir)
         .then(|| {
@@ -236,7 +241,7 @@ fn hook_template(repo: &str, event: &str) -> String {
         "#!/usr/bin/env bash\n\
          # {repo}'s {event} script. Runs from the worktree; its path is $DRUP_WORKTREE.\n\
          # Enable it by adding to {repo}'s `scripts` in .drup.json:\n\
-         #   \"{event}\": \".drup-hooks/{name}\"\n\
+         #   \"{event}\": \"$DRUP_WORKSPACE_ROOT/.drup-hooks/{name}\"\n\
          set -euo pipefail\n\
          \n\
          echo \"{repo}-{event}: worktree=$DRUP_WORKTREE\"\n"

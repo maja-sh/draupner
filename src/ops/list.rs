@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::config::{self, WsConfig};
+use crate::config::{self, WorkspaceConfig};
 use crate::git;
 use crate::hooks;
 use crate::inject;
@@ -125,7 +125,7 @@ fn aggregate_short_row(key: &str, rows: &[(ListRow, Option<String>)]) -> ListSho
 
 /// Extracted so `thread::scope` can fan out one thread per worktree; the original inline loop body verbatim, minus the direct `ui::note` call (deferred through `RowJob::notes` so parallel workers can't interleave into the listing).
 fn compute_row(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: Option<&crate::remote::Site>,
     ws_root: &std::path::Path,
     wt: workspace::Worktree,
@@ -180,7 +180,7 @@ fn compute_row(
 /// they were never meant to know about. `compute_row` and `add::require_task_stopped`
 /// both filter to managed worktrees before calling this; new callers must too.
 pub(super) fn probe_status(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: Option<&crate::remote::Site>,
     ws_root: &std::path::Path,
     wt_path: &std::path::Path,
@@ -256,7 +256,7 @@ pub(super) fn probe_status(
 
 /// Not the raw `.drup-meta` port map — `ports::resolve` only ever adds keys, so a service removed from `.drup.json` leaves its allocation behind and probing it reported the process as squatting a stale port it never claimed.
 fn host_probe_ports(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &crate::remote::Site,
     root: &std::path::Path,
     worktree: &std::path::Path,
@@ -306,7 +306,7 @@ struct ListJsonTask {
     created_at: Option<String>,
 }
 
-fn run_json(cfg: &WsConfig, root: &Path, site: Option<&Site>) -> Result<()> {
+fn run_json(cfg: &WorkspaceConfig, root: &Path, site: Option<&Site>) -> Result<()> {
     let worktrees = workspace::worktrees(root, cfg);
 
     // Same fan-out shape as the human path: one thread per worktree, join under
@@ -345,7 +345,7 @@ fn run_json(cfg: &WsConfig, root: &Path, site: Option<&Site>) -> Result<()> {
 }
 
 fn compute_json_row(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: Option<&Site>,
     root: &Path,
     wt: workspace::Worktree,

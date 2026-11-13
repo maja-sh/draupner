@@ -6,18 +6,27 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Walk upward from CWD for the nearest `.drup.json`.
+/// Walk upward from CWD for the nearest workspace `.drup.json`.
 pub fn locate() -> Result<Workspace> {
     let start = std::env::current_dir()?;
     let mut cur = start.as_path();
     loop {
-        if cur.join(".drup.json").is_file() {
+        if is_root(cur) {
             return Ok(Workspace { root: cur.to_path_buf() });
         }
         match cur.parent() {
             Some(p) => cur = p,
-            None => bail!("no `.drup.json` found from {} upward", start.display()),
+            None => bail!("no workspace `.drup.json` found from {} upward", start.display()),
         }
+    }
+}
+
+/// Whether `dir` holds a *workspace* `.drup.json`. A repo may commit a file of the same name, and every worktree then carries a copy — presence alone would make each one look like a root to commands run inside it. The workspace's is the one with a `repos` list. A file that won't parse counts as one, so its error surfaces rather than the walk stepping past it.
+pub fn is_root(dir: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(dir.join(".drup.json")) else { return false };
+    match serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')) {
+        Ok(v) => v.get("repos").is_some(),
+        Err(_) => true,
     }
 }
 
@@ -52,7 +61,7 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
 /// shared shape hooksweep, add's stopped-check, and future callers all want.
 pub fn task_worktrees(
     root: &Path,
-    cfg: &crate::config::WsConfig,
+    cfg: &crate::config::WorkspaceConfig,
     branch: &str,
 ) -> Vec<(String, PathBuf)> {
     cfg.repos
@@ -102,7 +111,7 @@ pub struct Worktree {
 /// Every task worktree across configured repos, sourced from git (not the filesystem) so
 /// stale registrations, out-of-tree worktrees, and sanitized-name collisions are handled
 /// correctly; the main checkout is excluded.
-pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
+pub fn worktrees(root: &Path, cfg: &crate::config::WorkspaceConfig) -> Vec<Worktree> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let worktrees_root = canonical_root.join(".worktrees");
 

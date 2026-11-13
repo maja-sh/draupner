@@ -33,7 +33,7 @@ fn init_local_writes_config_and_hook_templates() {
             assert!(p.is_file(), "expected hook template {p:?}");
             let body = std::fs::read_to_string(&p).unwrap();
             assert!(
-                body.contains(&format!("\"{event}\": \".drup-hooks/{repo}-{event}.sh\"")),
+                body.contains(&format!("\"{event}\": \"$DRUP_WORKSPACE_ROOT/.drup-hooks/{repo}-{event}.sh\"")),
                 "template should name the `scripts` entry that enables it: {body}"
             );
             assert!(!body.contains("$1"), "the removed $1 contract must not be taught: {body}");

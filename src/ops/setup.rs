@@ -28,7 +28,7 @@ pub fn run(yes: bool, port: Option<u16>, admin_port: Option<u16>) -> Result<()> 
 
 /// The address this machine must reach the routing Caddy at — a pinned
 /// non-wildcard `remote.publish_address` if set, else derived from SSH.
-fn routing_address(cfg: &crate::config::WsConfig) -> Result<String> {
+fn routing_address(cfg: &crate::config::WorkspaceConfig) -> Result<String> {
     let Some(remote) = &cfg.remote else {
         return Ok("127.0.0.1".to_string());
     };
@@ -59,18 +59,18 @@ fn is_wildcard(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RemoteConfig, WsConfig};
+    use crate::config::{RemoteConfig, WorkspaceConfig};
 
     // `.invalid` (RFC 2606) never resolves, so SSH derivation fails deterministically.
-    fn remote_cfg(publish: Option<&str>) -> WsConfig {
+    fn remote_cfg(publish: Option<&str>) -> WorkspaceConfig {
         let mut r = RemoteConfig::new("drup-no-such-server.invalid".to_string(), None);
         r.publish_address = publish.map(str::to_string);
-        WsConfig { remote: Some(r), ..WsConfig::default() }
+        WorkspaceConfig { remote: Some(r), ..WorkspaceConfig::default() }
     }
 
     #[test]
     fn local_workspace_targets_loopback() {
-        let cfg = WsConfig::default();
+        let cfg = WorkspaceConfig::default();
         assert_eq!(routing_address(&cfg).unwrap(), "127.0.0.1");
     }
 

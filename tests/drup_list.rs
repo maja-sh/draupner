@@ -117,8 +117,8 @@ fn a_repo_with_no_recorded_ports_emits_no_sub_rows() {
 }
 
 #[test]
-fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
-    // Regression: `capture_command` joined the script's commands without anchoring `.drup-hooks/`, so a status script naming a shared hook exited 127 under cwd = worktree, and `drup list` silently showed a blank status column while `up` (which anchors) worked.
+fn status_script_resolves_a_workspace_level_hook_via_explicit_prefix() {
+    // `drup list`'s status capture runs the script with cwd = worktree, so reaching a workspace-level hook needs the explicit `$DRUP_WORKSPACE_ROOT/` prefix. The capture path must honor the same shell env as `run_command`, else list silently blanks the status column while `up` works.
     let f = WorkspaceFixture::empty();
     f.add_repo("api");
     let hook = f.path().join(".drup-hooks").join("api-status.sh");
@@ -130,7 +130,7 @@ fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     f.write_ws_json(
-        r#"{"repos":[{"name":"api","scripts":{"status":".drup-hooks/api-status.sh"}}]}"#,
+        r#"{"repos":[{"name":"api","scripts":{"status":"$DRUP_WORKSPACE_ROOT/.drup-hooks/api-status.sh"}}]}"#,
     );
     f.run_ok(&["new", "api", "feat/anchored"]);
 
@@ -138,7 +138,7 @@ fn status_script_naming_ws_hooks_path_is_anchored_to_workspace_root() {
     let err = stderr(&out);
     assert!(
         err.contains("stack up") && err.contains("https://anchored:8441"),
-        "expected the `.drup-hooks/`-relative status script's output in:\n{err}"
+        "expected the workspace-level status script's output in:\n{err}"
     );
 }
 
