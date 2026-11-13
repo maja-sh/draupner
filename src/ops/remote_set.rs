@@ -232,7 +232,7 @@ enum Live {
 
 /// Probes where the workspace points now — the side that would be stranded. Returns whether
 /// --force overrode a positive or inconclusive finding.
-fn refuse_if_running(cfg: &config::WsConfig, root: &Path, force: bool) -> Result<bool> {
+fn refuse_if_running(cfg: &config::WorkspaceConfig, root: &Path, force: bool) -> Result<bool> {
     // Filter to repos drup has a stack model for: anything else would only manufacture "unknown".
     let targets: Vec<workspace::Worktree> = workspace::worktrees(root, cfg)
         .into_iter()
@@ -340,7 +340,7 @@ fn refuse(force: bool, finding: String, remedy: String) -> Result<bool> {
 }
 
 fn liveness(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &Path,
     wt: &workspace::Worktree,
@@ -367,7 +367,7 @@ fn liveness(
 /// One round trip carries every verdict via exit status (3 = no runtime, 4 = no dir)
 /// because remote pays SSH per probe; both are sound Down inferences, not guesses.
 fn compose_liveness(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &Path,
     wt: &workspace::Worktree,

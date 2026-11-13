@@ -92,7 +92,7 @@ fn check_remote(
 }
 
 /// Report local routing readiness by reusing `drup setup`'s probe so the two agree on "ready".
-fn check_local(cfg: &config::WsConfig, verbose: bool) -> Result<()> {
+fn check_local(cfg: &config::WorkspaceConfig, verbose: bool) -> Result<()> {
     crate::ui::header("drup-remote-check", "local");
 
     let Some(domain) = cfg.domain.as_deref() else {

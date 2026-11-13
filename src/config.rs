@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Serialize, Default, schemars::JsonSchema)]
-pub struct WsConfig {
+pub struct WorkspaceConfig {
     #[serde(skip_serializing_if = "Option::is_none", default, rename = "$schema")]
     pub schema: Option<String>,
     /// Private TLD for per-worktree hostnames, e.g. `myapp.test`; top-level because routing applies to local and remote alike.
@@ -245,7 +245,7 @@ fn on_path(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-impl WsConfig {
+impl WorkspaceConfig {
     /// Configured runtime, else detected, else the fallback. Infallible so call sites that only *name* it (hook env, error messages) keep rendering with neither installed; actual spawns go through [`ensure_available`].
     pub fn runtime(&self) -> &str {
         if let Some(r) = self.runtime.as_deref() {
@@ -407,9 +407,9 @@ fn runtime_looks_safe(runtime: &str) -> bool {
 }
 
 /// Load a workspace config from `<workspace-root>/.drup.json`.
-pub fn load(root: &Path) -> Result<WsConfig> {
+pub fn load(root: &Path) -> Result<WorkspaceConfig> {
     let path = root.join(".drup.json");
-    let cfg: WsConfig = read_json(&path)?;
+    let cfg: WorkspaceConfig = read_json(&path)?;
     refuse_legacy_hooks_field(&path)?;
     // Reject a dangerous SSH destination at the choke point every op shares — `.drup.json` isn't gitignored, so a clone could carry a hostile `-oProxyCommand=…`.
     if let Some(r) = &cfg.remote {
@@ -462,7 +462,7 @@ pub fn load(root: &Path) -> Result<WsConfig> {
 /// file actually exists there and is executable, so a repo that moved its hook
 /// into the checkout (the new primary pattern) is never refused, and a plain
 /// data file that shares the directory can't trip a false alarm.
-fn refuse_legacy_anchor_references(cfg: &WsConfig, root: &Path) -> Result<()> {
+fn refuse_legacy_anchor_references(cfg: &WorkspaceConfig, root: &Path) -> Result<()> {
     let mut lines: Vec<String> = Vec::new();
     for entry in &cfg.repos {
         let Some(rc) = entry.config() else { continue };
@@ -501,7 +501,7 @@ fn legacy_anchor_path(cmd: &str, root: &Path) -> Option<String> {
 /// human input, and only on local workspaces for now. Refuse the two
 /// combinations that can't ever work so the user hits a clear error at
 /// load-time instead of a mysterious hang or no-op later.
-fn refuse_misplaced_interactive(cfg: &WsConfig) -> Result<()> {
+fn refuse_misplaced_interactive(cfg: &WorkspaceConfig) -> Result<()> {
     for entry in &cfg.repos {
         let Some(rc) = entry.config() else { continue };
         for (event, script) in &rc.scripts {
@@ -812,9 +812,9 @@ mod tests {
 
     #[test]
     fn script_rich_form_round_trips_and_defaults_interactive_to_false() {
-        use super::WsConfig;
+        use super::WorkspaceConfig;
         // Rich form with interactive: true
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":{"cmd":"sudo gcloud auth","interactive":true}}}]}"#,
         )
         .expect("rich form parses");
@@ -823,14 +823,14 @@ mod tests {
         assert!(s.is_interactive(), "`interactive: true` must round-trip");
 
         // Rich form without interactive — defaults to false, no-op compared to a plain string
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":{"cmd":"echo hi"}}}]}"#,
         )
         .expect("rich form with no interactive parses");
         assert!(!cfg.script("api", "up").unwrap().is_interactive());
 
         // Plain string + plain list still parse as before and are never interactive
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":"echo hi","down":["a","b"]}}]}"#,
         )
         .expect("legacy forms still parse");
@@ -991,7 +991,7 @@ mod tests {
     fn read_json_strips_utf8_bom() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "\u{feff}{\"repos\":[]}").unwrap();
-        let cfg: WsConfig = read_json(tmp.path()).unwrap();
+        let cfg: WorkspaceConfig = read_json(tmp.path()).unwrap();
         assert!(cfg.repos.is_empty());
     }
 

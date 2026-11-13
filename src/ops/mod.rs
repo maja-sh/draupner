@@ -149,7 +149,7 @@ pub(crate) fn bail_if_interrupted() -> anyhow::Result<()> {
 /// than fails so a broken infra doesn't block worktree creation for a
 /// stack that doesn't need routing.
 pub(crate) fn ensure_ws_net_if_active(
-    cfg: &crate::config::WsConfig,
+    cfg: &crate::config::WorkspaceConfig,
     site: &crate::remote::Site,
 ) {
     if cfg.routing_active() {

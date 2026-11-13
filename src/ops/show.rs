@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{self, ServiceConfig, WsConfig};
+use crate::config::{self, ServiceConfig, WorkspaceConfig};
 use crate::hooks;
 use crate::inject;
 use crate::remote::Site;
@@ -48,7 +48,7 @@ pub fn run(branch: Option<&str>, json: bool, describe: bool) -> Result<()> {
 }
 
 /// Explicit branch wins; otherwise walk out of the CWD to the enclosing task dir and recover the *original* branch name from git (not the sanitized dir name), so downstream `drup exec`s see the branch the user typed.
-fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WsConfig) -> Result<String> {
+fn resolve_branch(branch: Option<&str>, root: &Path, cfg: &WorkspaceConfig) -> Result<String> {
     if let Some(b) = branch {
         return Ok(b.to_string());
     }
@@ -116,7 +116,7 @@ pub(crate) struct ServiceInfo {
     pub is_http_routed: bool,
 }
 
-pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> ShowData {
+pub(crate) fn collect(cfg: &WorkspaceConfig, root: &Path, branch: &str, site: Option<&Site>) -> ShowData {
     let sanitized = workspace::sanitize_branch(branch);
 
     let remote = cfg.remote.as_ref().map(|r| RemoteInfo {
@@ -176,7 +176,7 @@ pub(crate) fn collect(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&S
 /// `None` when the site is unreachable — the caller shouldn't guess.
 #[allow(clippy::too_many_arguments)]
 fn liveness(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     root: &Path,
     worktree: &Path,
     branch: &str,
@@ -231,7 +231,7 @@ fn liveness(
 
 /// Services with their allocated port + routing status. `recorded` comes from the `.drup-meta` last written at `up` (which covers auto-derived compose services); fall back to the `.drup.json`-declared set for a not-yet-up worktree.
 pub(crate) fn services_for(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     sanitized: &str,
     repo: &str,
     port_map: BTreeMap<String, u16>,

@@ -8,7 +8,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::WsConfig;
+use crate::config::WorkspaceConfig;
 use crate::ui;
 
 /// Per-line buffer cap so a hook emitting an unterminated stream can't OOM us;
@@ -27,7 +27,7 @@ pub struct ResolvedScript {
 
 /// The shell command for `event`: declared `scripts` entry, else the container default. `None` → dim skip. `Many`-join happens in `cfg.script_command` so `capture_command` can't drift from `run_command`.
 pub fn resolve(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     workspace_root: &Path,
     repo: &str,
     event: &str,
@@ -297,7 +297,7 @@ fn pipe<R: Read>(r: R, tag: &str, stderr: bool) {
 /// Mirrors `resolve`'s condition exactly: a declared `scripts` entry wins, so a
 /// repo that has already migrated is not refused for still owning the old file.
 pub fn preflight_legacy_hook_files(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     workspace_root: &Path,
     repos: &[String],
     events: &[&str],
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn a_declared_many_script_joins_fail_fast() {
         // The `Many`-join lives in `config::script_command`; deferring it to the dispatch site is what once let `capture_command` join differently from `run_command`. Paths are passed through verbatim — a shell with cwd=worktree resolves them.
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"status":[".drup-hooks/status.sh","echo ok"]}}]}"#,
         )
         .expect("parse config");
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn resolution_falls_back_to_the_container_default_and_then_to_nothing() {
         // `runtime` pinned so the assertion doesn't depend on which of docker/podman lives on this box's PATH.
-        let cfg: WsConfig =
+        let cfg: WorkspaceConfig =
             serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#).expect("parse config");
         let script = resolve(&cfg, Path::new("/ws"), "api", "up", true)
             .expect("resolve")
@@ -425,7 +425,7 @@ mod tests {
         let file = hooks.join("up");
         std::fs::write(&file, "#!/bin/sh\necho hi\n").expect("write hook");
 
-        let cfg: WsConfig =
+        let cfg: WorkspaceConfig =
             serde_json::from_str(r#"{"runtime":"podman","repos":[{"name":"api"}]}"#).expect("parse config");
 
         // Not executable: already inert before removal, so a container repo still gets its default.
@@ -449,7 +449,7 @@ mod tests {
         assert!(err.contains("cwd = the worktree"), "the cwd change must be named: {err}");
 
         // A declared script wins outright — the shim never fires for a repo that already migrated.
-        let migrated: WsConfig = serde_json::from_str(
+        let migrated: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","scripts":{"up":".drup-hooks/api/up"}}]}"#,
         )
         .expect("parse config");

@@ -217,7 +217,7 @@ pub fn sweep(branch: &str, event: &str, op: &str) -> Result<SweepResult> {
 
 /// Run a repo's opt-in `prepare` hook locally, ahead of `up` — runs on the client even for a remote workspace so it can stage client-side data (main-checkout db dump, local certs) into the worktree for the up-flush to ship. Returns `false` (and files the repo under `failed`) when the hook fails.
 fn run_prepare(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     root: &std::path::Path,
     wt: &std::path::Path,
     sanitized: &str,
@@ -255,7 +255,7 @@ fn run_prepare(
 /// Handle one container repo on the server for a remote workspace: run its declarative script over SSH, then sync Caddy routes on the server. Mirrors the local container path but the script and routing run where the stack lives.
 #[allow(clippy::too_many_arguments)]
 fn sweep_container_remote(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     wt: &std::path::Path,
@@ -304,7 +304,7 @@ fn sweep_container_remote(
 
 /// Add (`up`) or remove (`down`) Caddy routes for a repo's HTTP services. Returns whether the sync succeeded — always `true` for `down` and for a repo with no HTTP routes; on `up`, `false` if any route failed to install (an HTTP container has no host-port fallback).
 fn sync_routes(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     sanitized: &str,
@@ -347,7 +347,7 @@ fn sync_routes(
 
 /// Forward a remote repo's allocated ports back to this machine (`up`) or tear them down (`down`), so each server-bound port is reachable at the same `localhost:<port>` used on the server. No-op for local; pure-HTTP services are reached via Caddy instead. Best-effort — a forward failure is noted, never fatal.
 fn sync_forwards(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     root: &std::path::Path,
     branch: &str,
     sanitized: &str,
@@ -374,7 +374,7 @@ fn sync_forwards(
 /// Handle one host repo in a sweep: `up` starts its `up` script as a detached process; `down` stops it.
 #[allow(clippy::too_many_arguments)]
 fn sweep_host(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &Site,
     root: &std::path::Path,
     wt: &std::path::Path,

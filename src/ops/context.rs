@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use crate::config::{self, WsConfig};
+use crate::config::{self, WorkspaceConfig};
 use crate::ops::show;
 use crate::remote::Site;
 use crate::workspace;
@@ -71,7 +71,7 @@ struct TaskState {
     any_running: bool,
 }
 
-fn collect(cfg: &WsConfig, root: &Path, cwd: &Path, site: Option<&Site>) -> Context {
+fn collect(cfg: &WorkspaceConfig, root: &Path, cwd: &Path, site: Option<&Site>) -> Context {
     let current = build_current(cfg, root, cwd);
     let task = current.task.as_deref().map(|branch| build_task(cfg, root, branch, site));
     let workspace = build_workspace(cfg, root, site);
@@ -85,7 +85,7 @@ fn collect(cfg: &WsConfig, root: &Path, cwd: &Path, site: Option<&Site>) -> Cont
     }
 }
 
-fn build_workspace(cfg: &WsConfig, root: &Path, site: Option<&Site>) -> Workspace {
+fn build_workspace(cfg: &WorkspaceConfig, root: &Path, site: Option<&Site>) -> Workspace {
     let remote = cfg.remote.as_ref().map(|r| show::RemoteInfo {
         connection: r.connection.clone(),
         worktree_base_absolute: match site {
@@ -102,7 +102,7 @@ fn build_workspace(cfg: &WsConfig, root: &Path, site: Option<&Site>) -> Workspac
 }
 
 /// cwd → (task, repo) inference plus original-branch recovery via git.
-fn build_current(cfg: &WsConfig, root: &Path, cwd: &Path) -> Current {
+fn build_current(cfg: &WorkspaceConfig, root: &Path, cwd: &Path) -> Current {
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let worktrees_root = root.join(".worktrees");
     let worktrees_root_canon = worktrees_root.canonicalize().unwrap_or(worktrees_root);
@@ -123,7 +123,7 @@ fn build_current(cfg: &WsConfig, root: &Path, cwd: &Path) -> Current {
 }
 
 /// Recover the user-typed branch from a sanitized task-dir name via git; None when no repo confirms it, since the sanitized name is not a valid substitute for downstream `drup exec`.
-fn recover_branch(cfg: &WsConfig, root: &Path, worktrees_root: &Path, task_dir: &str) -> Option<String> {
+fn recover_branch(cfg: &WorkspaceConfig, root: &Path, worktrees_root: &Path, task_dir: &str) -> Option<String> {
     let target = worktrees_root.join(task_dir);
     let target = target.canonicalize().unwrap_or(target);
     for entry in &cfg.repos {
@@ -139,7 +139,7 @@ fn recover_branch(cfg: &WsConfig, root: &Path, worktrees_root: &Path, task_dir: 
     None
 }
 
-fn build_task(cfg: &WsConfig, root: &Path, branch: &str, site: Option<&Site>) -> Task {
+fn build_task(cfg: &WorkspaceConfig, root: &Path, branch: &str, site: Option<&Site>) -> Task {
     let data = show::collect(cfg, root, branch, site);
     let state = aggregate_state(&data.repos);
     Task {

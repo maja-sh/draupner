@@ -73,7 +73,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 /// task-dir creation — are the caller's; this function assumes `task_dir` exists.
 pub(super) fn add_repos(
     ws_root: &Path,
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &remote::Site,
     branch: &str,
     sanitized: &str,
@@ -217,7 +217,7 @@ pub(super) fn add_repos(
 /// Runs a repo's `post-create` where its stack lives (remote over SSH, else local); no-op if nothing is declared. Failure is fatal for `new` — one-time setup that didn't complete.
 #[allow(clippy::too_many_arguments)]
 fn run_post_create(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &crate::remote::Site,
     ws_root: &Path,
     wt_path: &Path,
@@ -436,7 +436,7 @@ struct CompletedRepo {
 /// Every step is best-effort — the caller propagates the original error, and
 /// blocking rollback on a secondary failure would eat the useful diagnostic.
 fn rollback_repo(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     ws_root: &Path,
     branch: &str,
     sanitized: &str,

@@ -21,7 +21,7 @@ pub enum Site {
 
 impl Site {
     /// The `$HOME` fetch doubles as reachability check: fail here, not part-way through bring-up.
-    pub fn resolve(cfg: &crate::config::WsConfig) -> Result<Site> {
+    pub fn resolve(cfg: &crate::config::WorkspaceConfig) -> Result<Site> {
         match &cfg.remote {
             None => Ok(Site::Local),
             Some(r) => {

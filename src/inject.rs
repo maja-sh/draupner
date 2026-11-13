@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
 use crate::compose;
-use crate::config::{RepoConfig, RepoKind, ServiceConfig, WsConfig};
+use crate::config::{RepoConfig, RepoKind, ServiceConfig, WorkspaceConfig};
 use crate::git;
 use crate::ports;
 use crate::remote::{self, Site};
@@ -47,7 +47,7 @@ impl Phase {
 
 /// Compute the injection env for a repo's worktree; `site` decides where derivation, port probes, and the compose override run, while `worktree` is always the local (synced) path used for file checks and template rendering. A bare-name entry is treated as an object with no overrides (see `repo_config`), not an opt-out.
 pub fn prepare(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: &Site,
     root: &Path,
     worktree: &Path,
@@ -133,7 +133,7 @@ pub fn prepare(
 }
 
 /// Treats a bare-name entry as the object entry with no overrides that it means; before this, `prepare` returned early for such repos, so a bare-name repo with a compose file got the default `compose up -d` lifecycle without `COMPOSE_PROJECT_NAME`, and every branch's compose stack shared one project (the second `up` stole the first's containers, `drup rm` wiped the sibling's DB volumes).
-fn repo_config<'a>(cfg: &'a WsConfig, repo: &str) -> Option<&'a RepoConfig> {
+fn repo_config<'a>(cfg: &'a WorkspaceConfig, repo: &str) -> Option<&'a RepoConfig> {
     let entry = cfg.repos.iter().find(|r| r.name() == repo)?;
     match entry.config() {
         Some(rc) => Some(rc),
@@ -156,7 +156,7 @@ fn recorded_or_declared(
 }
 
 /// `DRUP_REMOTE` reflects the *workspace*, not the current site, so a hook reads one consistent answer wherever it runs. Not named `DRUP_REMOTE_HOST` because that is an input override a nested `drup` call would silently inherit.
-fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
+fn workspace_context(cfg: &WorkspaceConfig) -> Vec<(String, String)> {
     vec![
         ("DRUP_RUNTIME".to_string(), cfg.runtime().to_string()),
         ("DRUP_REMOTE".to_string(), if cfg.remote.is_some() { "1" } else { "0" }.to_string()),
@@ -170,7 +170,7 @@ fn workspace_context(cfg: &WsConfig) -> Vec<(String, String)> {
 /// The worktree path at the execution site — server-side synced dir for a
 /// remote workspace, local path otherwise.
 fn site_worktree_path(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: &Site,
     root: &Path,
     worktree: &Path,
@@ -197,7 +197,7 @@ fn base_files_at(worktree: &Path, site_worktree: &str) -> Vec<String> {
 
 /// `pub(crate)` so teardown can remove the server-side file it wrote.
 pub(crate) fn override_path_at(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: &Site,
     root: &Path,
     branch_sanitized: &str,
@@ -248,7 +248,7 @@ fn compose_env(
 
 /// Read-only: uses the service set recorded at the last `up` so `down`/`rm` resolve the same route `@id`s `up` created; never allocates or derives.
 pub fn routes(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     root: &Path,
     branch_sanitized: &str,
     repo: &str,
@@ -302,7 +302,7 @@ fn route_specs(
 /// declared alone. A failed derive is fatal only for explicit `kind: container`
 /// — an inferred one shouldn't hard-fail just because the runtime is out.
 fn effective_services(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: &Site,
     site_worktree: &str,
     local_worktree: &Path,
@@ -364,7 +364,7 @@ fn ws_vars(
 
 /// A peer repo's vars re-keyed under a `<peer>.` prefix for substitution.
 fn peer_vars(
-    cfg: &WsConfig,
+    cfg: &WorkspaceConfig,
     site: &Site,
     root: &Path,
     branch_sanitized: &str,
@@ -537,9 +537,9 @@ mod tests {
 
     #[test]
     fn workspace_context_reports_runtime_and_remoteness() {
-        use crate::config::{RemoteConfig, WsConfig};
+        use crate::config::{RemoteConfig, WorkspaceConfig};
 
-        let local = WsConfig::default();
+        let local = WorkspaceConfig::default();
         let ctx = workspace_context(&local);
         let detected = crate::config::detect_runtime().unwrap_or("podman").to_string();
         assert!(ctx.contains(&("DRUP_RUNTIME".to_string(), detected)), "{ctx:?}");
@@ -547,10 +547,10 @@ mod tests {
         // Always present so a hook can test it without an unset-variable guard.
         assert!(ctx.contains(&("DRUP_CONNECTION".to_string(), String::new())), "{ctx:?}");
 
-        let remote = WsConfig {
+        let remote = WorkspaceConfig {
             runtime: Some("docker".to_string()),
             remote: Some(RemoteConfig::new("srv".to_string(), None)),
-            ..WsConfig::default()
+            ..WorkspaceConfig::default()
         };
         let ctx = workspace_context(&remote);
         assert!(ctx.contains(&("DRUP_RUNTIME".to_string(), "docker".to_string())), "{ctx:?}");
@@ -572,7 +572,7 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join("docker-compose.yml"), "services: {}\n").unwrap();
 
-        let cfg: WsConfig = serde_json::from_str(r#"{"repos":["api"]}"#).unwrap();
+        let cfg: WorkspaceConfig = serde_json::from_str(r#"{"repos":["api"]}"#).unwrap();
         // Inspect: no derive, no allocation, no runtime call — the project name is
         // set on every phase, so this exercises the fix without a container runtime.
         let env = prepare(&cfg, &Site::Local, root, &wt, "feat-a", "api", Phase::Inspect).unwrap();
@@ -591,7 +591,7 @@ mod tests {
         // hostname resolves to — otherwise the injected host is a dead name.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let cfg: WsConfig =
+        let cfg: WorkspaceConfig =
             serde_json::from_str(r#"{"domain":"myapp.test","repos":["api"]}"#).unwrap();
         let recorded = services(&repo_with(&[("web", svc(Some(HttpDecl::Enabled(true)), 80))]));
         ports::record_services(root, "feat-a", "api", &recorded).unwrap();
@@ -625,7 +625,7 @@ mod tests {
     fn peer_vars_rekeys_a_recorded_peer_port() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","kind":"container"},
                          {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
         )
@@ -646,7 +646,7 @@ mod tests {
     fn peer_vars_read_phase_is_empty_for_an_unbuilt_or_unknown_peer() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","kind":"container"},
                          {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
         )
@@ -659,7 +659,7 @@ mod tests {
     fn peer_vars_pre_allocates_an_unbuilt_peer_on_an_allocating_phase() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let cfg: WsConfig = serde_json::from_str(
+        let cfg: WorkspaceConfig = serde_json::from_str(
             r#"{"repos":[{"name":"api","kind":"container"},
                          {"name":"app","kind":"host","services":{"web":{"port":8000}}}]}"#,
         )
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn override_path_at_is_absolute_for_a_relative_remote_base() {
         // A relative override path would double-resolve under the `cd`'d worktree.
-        let cfg = WsConfig {
+        let cfg = WorkspaceConfig {
             remote: Some(crate::config::RemoteConfig::new("srv".into(), Some("myapp".into()))),
             ..Default::default()
         };
@@ -812,7 +812,7 @@ mod tests {
         let p = override_path_at(&cfg, &site, Path::new("/local/myapp"), "feat-x", "api");
         assert_eq!(p, "/home/u/myapp/.drup-meta/6_feat-x-3_api.override.yml");
 
-        let local = WsConfig::default();
+        let local = WorkspaceConfig::default();
         let lp = override_path_at(&local, &Site::Local, Path::new("/ws"), "feat-x", "api");
         assert!(lp.ends_with(".drup-meta/6_feat-x-3_api.override.yml"), "{lp}");
     }

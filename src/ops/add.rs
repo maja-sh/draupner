@@ -84,7 +84,7 @@ pub fn run(repos_arg: &str, branch: &str, up: bool) -> Result<()> {
 /// the false-negative failure mode is real state corruption, but a hook that
 /// can't say "running" isn't diagnostic of a live stack.
 fn require_task_stopped(
-    cfg: &config::WsConfig,
+    cfg: &config::WorkspaceConfig,
     site: &remote::Site,
     ws_root: &std::path::Path,
     branch: &str,

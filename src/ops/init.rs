@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WsConfig};
+use crate::config::{RemoteConfig, RepoConfig, RepoEntry, WorkspaceConfig};
 use crate::compose;
 
 /// The lifecycle events `drup` dispatches, in the order they happen. `drup init`
@@ -106,7 +106,7 @@ fn init_local(
     let remote_note = remote.as_ref().map(|r| r.connection.clone());
     let pinned = runtime.is_some();
     let step_config = crate::ui::step("cfg", ".drup.json");
-    let cfg = WsConfig {
+    let cfg = WorkspaceConfig {
         schema: Some("./.drup.schema.json".to_string()),
         domain,
         runtime,
@@ -118,7 +118,7 @@ fn init_local(
     step_config.ok();
 
     let step_schema = crate::ui::step("cfg", ".drup.schema.json");
-    let schema = schemars::schema_for!(WsConfig);
+    let schema = schemars::schema_for!(WorkspaceConfig);
     crate::config::write_json_pretty(&root.join(".drup.schema.json"), &schema)?;
     step_schema.ok();
 
@@ -152,7 +152,7 @@ fn refresh_schema_only(root: &Path) -> Result<()> {
     crate::ui::header("drup-init", "--refresh-schema");
 
     let step = crate::ui::step("cfg", ".drup.schema.json");
-    let schema = schemars::schema_for!(WsConfig);
+    let schema = schemars::schema_for!(WorkspaceConfig);
     crate::config::write_json_pretty(&root.join(".drup.schema.json"), &schema)?;
     step.ok();
     crate::ui::summary_ok(&[format!("{} refreshed", root.join(".drup.schema.json").display())]);

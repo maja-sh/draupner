@@ -52,7 +52,7 @@ pub fn worktree_for(root: &Path, branch: &str, repo: &str) -> Option<PathBuf> {
 /// shared shape hooksweep, add's stopped-check, and future callers all want.
 pub fn task_worktrees(
     root: &Path,
-    cfg: &crate::config::WsConfig,
+    cfg: &crate::config::WorkspaceConfig,
     branch: &str,
 ) -> Vec<(String, PathBuf)> {
     cfg.repos
@@ -102,7 +102,7 @@ pub struct Worktree {
 /// Every task worktree across configured repos, sourced from git (not the filesystem) so
 /// stale registrations, out-of-tree worktrees, and sanitized-name collisions are handled
 /// correctly; the main checkout is excluded.
-pub fn worktrees(root: &Path, cfg: &crate::config::WsConfig) -> Vec<Worktree> {
+pub fn worktrees(root: &Path, cfg: &crate::config::WorkspaceConfig) -> Vec<Worktree> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let worktrees_root = canonical_root.join(".worktrees");
 
